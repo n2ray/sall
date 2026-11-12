@@ -92,7 +92,8 @@ final class PairLink {
         if (b.length != count || !Base64.getUrlEncoder().withoutPadding().encodeToString(b).equals(text)) throw new IllegalArgumentException();
         return b;
     }
-    private static String macId(byte[] fp) {
+    static String macId(byte[] fp) {
+        if (fp == null || fp.length != 32) throw new IllegalArgumentException("Invalid Mac fingerprint");
         String alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"; StringBuilder s = new StringBuilder();
         int acc = 0, bits = 0;
         for (int i = 0; i < 10; i++) { acc = (acc << 8) | (fp[i] & 255); bits += 8; while (bits >= 5) { bits -= 5; s.append(alphabet.charAt((acc >>> bits) & 31)); } }

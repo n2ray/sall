@@ -40,6 +40,7 @@ public final class MainActivity extends Activity {
     private volatile Surface surface;
     private LinearLayout root, connectionPanel, sessionPanel, choices, savedMacs, nearbyMacs, keyRow;
     private ScrollView connectionContainer;
+    private SavedMacStore savedMacStore;
     private TextView status, sessionStatus, pictureStatus;
     private boolean pictureStatusActive;
     private int pictureStatusGeneration;
@@ -150,6 +151,7 @@ public final class MainActivity extends Activity {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        savedMacStore = new SavedMacStore(getPreferences(0));
         largerPicture = getPreferences(0).getBoolean("largerPicture", false);
         portraitImeHeight = getPreferences(0).getFloat("portraitImeHeight", 0);
         getWindow().setFlags(android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN, android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN);
@@ -206,7 +208,7 @@ public final class MainActivity extends Activity {
                 android.view.View previous = nearby.remove(name); if (previous != null) nearbyMacs.removeView(previous);
                 Button row = button(nearbyMacs, "附近 · " + name, v -> {
                     host.setText(address); port.setText(String.valueOf(number));
-                    if (getPreferences(0).contains("pin:" + address + ":" + number)) start(false);
+                    if (savedMacStore.pin(new SavedMacs.Endpoint(address, number)) != null) start(false);
                     else show("请在 Mac 的 Sill 中打开配对窗口并输入配对码。");
                 });
                 nearby.put(name, row);
@@ -263,7 +265,7 @@ public final class MainActivity extends Activity {
         java.util.List<PairLink.Address> local = link.localCandidates(discovery.pairingDoors());
         java.util.List<PairLink.Address> candidates = link.candidates(local);
         network.execute(() -> {
-            PairLink.Address winner = null; byte[] pin = null;
+            PairLink.Address winner = null; SavedMacs.Identity identity = null;
             byte[] secret = link.secret(); byte[] expected = link.fingerprint();
             try {
                 for (int i = 0; i < candidates.size(); i++) {
@@ -273,19 +275,19 @@ public final class MainActivity extends Activity {
                     try (SillConnection pair = i < local.size()
                             ? SillConnection.connect(a.host(), number, "sill-pair/1", expected, 1200, 1800)
                             : SillConnection.connect(a.host(), number, "sill-pair/1", expected)) {
-                        pin = pair.pairQr(secret, android.os.Build.MODEL, android.os.Build.DEVICE);
+                        identity = pair.pairQrIdentity(secret, android.os.Build.MODEL, android.os.Build.DEVICE);
                         winner = a; break;
                     } catch (Exception ignored) { }
                 }
             } finally { java.util.Arrays.fill(secret, (byte) 0); link.clearSecret(); }
-            PairLink.Address selected = winner; byte[] authenticated = pin;
+            PairLink.Address selected = winner; SavedMacs.Identity authenticated = identity;
             ui.post(() -> {
                 if (!running || closing || isFinishing() || isDestroyed()) return;
                 running = false;
                 if (selected == null || authenticated == null) { show("配对失败，请确认 Mac 的配对链接仍有效且网络可达。"); return; }
                 int number = selected.port() == 0 ? link.port : selected.port();
-                getPreferences(0).edit().putString("pin:" + selected.host() + ":" + number, Base64.encodeToString(authenticated, Base64.NO_WRAP))
-                        .putString("host", selected.host()).putString("port", String.valueOf(number)).apply();
+                savedMacStore.paired(authenticated, new SavedMacs.Endpoint(selected.host(), number));
+                getPreferences(0).edit().putString("host", selected.host()).putString("port", String.valueOf(number)).apply();
                 host.setText(selected.host()); port.setText(String.valueOf(number)); code.setText(""); refreshSavedMacs();
                 start(false);
             });
@@ -307,24 +309,28 @@ public final class MainActivity extends Activity {
     }
     private void refreshSavedMacs() {
         savedMacs.removeAllViews();
-        java.util.List<String> keys = new java.util.ArrayList<>();
-        for (String key : getPreferences(0).getAll().keySet()) if (key.startsWith("pin:")) keys.add(key);
-        java.util.Collections.sort(keys);
-        for (String key : keys) {
-            String address = key.substring(4); int divider = address.lastIndexOf(':');
-            if (divider < 1 || divider == address.length() - 1) continue;
-            String macHost = address.substring(0, divider), macPort = address.substring(divider + 1);
-            Button row = button(savedMacs, macHost + "  ·  " + macPort, v -> {
-                host.setText(macHost); port.setText(macPort); start(false);
+        for (SavedMacs.Mac mac : savedMacStore.all()) {
+            String label = mac.displayName() + "  ·  " + mac.preferred().display();
+            if (mac.addresses().size() > 1) label += "  (" + mac.addresses().size() + " 个地址)";
+            Button row = button(savedMacs, label, v -> {
+                if (mac.addresses().size() == 1) { connectSavedMac(mac.identity(), mac.preferred()); return; }
+                java.util.List<SavedMacs.Endpoint> endpoints = new java.util.ArrayList<>(mac.addresses());
+                endpoints.remove(mac.preferred()); endpoints.add(0, mac.preferred());
+                String[] labels = endpoints.stream().map(SavedMacs.Endpoint::display).toArray(String[]::new);
+                new android.app.AlertDialog.Builder(this).setTitle(mac.displayName()).setItems(labels,
+                        (dialog, which) -> connectSavedMac(mac.identity(), endpoints.get(which))).setNegativeButton("取消", null).show();
             });
             row.setOnLongClickListener(v -> {
                 new android.app.AlertDialog.Builder(this).setTitle("移除本机记录？")
                     .setMessage("这只移除手机上的记录；如需撤销 Mac 的信任，请在 Mac 的 Sill 设置中移除设备。")
                     .setNegativeButton("取消", null).setPositiveButton("移除", (d, which) -> {
-                        getPreferences(0).edit().remove(key).apply(); refreshSavedMacs();
+                        savedMacStore.forget(mac.identity()); refreshSavedMacs();
                     }).show(); return true;
             });
         }
+    }
+    private void connectSavedMac(SavedMacs.Identity identity, SavedMacs.Endpoint endpoint) {
+        host.setText(endpoint.host()); port.setText(String.valueOf(endpoint.port())); start(false, identity);
     }
     private void buildSession() {
         sessionPanel = new LinearLayout(this); sessionPanel.setOrientation(LinearLayout.VERTICAL);
@@ -434,7 +440,7 @@ public final class MainActivity extends Activity {
             public Double scale() { return textScale; }
             public void begin() { dismissSettings(false); dismissMenu(); if (appDrawer != null) appDrawer.dismiss(); owner = connection; window = activeWindowId; offered = offersOff(); }
             public boolean canCommit() { return available() && connection == owner && activeWindowId == window && offered == offersOff(); }
-            public void commit(Double scale) { textScale = scale; scheduleViewport(); }
+            public void commit(Double scale) { textScale = scale; android.util.Log.i("SillAndroid", "Aa: committed scale=" + scale); scheduleViewport(); }
         });
         scaleControl = scaleButton; scaleButton.setTextColor(-1); scaleButton.setTextSize(12); scaleButton.setBackground(shape(0xff272a30, 12));
         LinearLayout.LayoutParams scaleParams = new LinearLayout.LayoutParams(0, dp(46), 1);
@@ -527,8 +533,17 @@ public final class MainActivity extends Activity {
         root.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, oright, ob) -> {
             if (r - l != oright - ol || b - t != ob - ot) { dismissWindowControls(); cancelWindowDrag(); if (scaleControl != null) scaleControl.cancel(); }
             if (oright > ol && ob > ot && (r - l > b - t) != (oright - ol > ob - ot)) {
+                android.util.Log.i("SillAndroid", "Settings: rotated open=" + settingsOpen + " child=" + (settingsChild != null));
                 if (pictureInput != null) pictureInput.cancel();
-                if (appDrawer != null) appDrawer.dismiss();
+                if (appDrawer != null && appDrawer.isShowing()) {
+                    AppDrawerDialog drawer = appDrawer;
+                    int presentation = drawer.presentationVersion();
+                    root.post(() -> {
+                        if (appDrawer == drawer && connection != null)
+                            drawer.reanchor(presentation, drawerWindows, appList, appIcons, activeWindowId,
+                                    desktopActive, picture, root.getWidth() > root.getHeight());
+                    });
+                }
                 if (settingsOpen) {
                     settingsReanchorPending = true;
                     root.post(this::reanchorSettings);
@@ -816,7 +831,9 @@ public final class MainActivity extends Activity {
             float density = getResources().getDisplayMetrics().density;
             int fps = wantedViewportFps();
             JSONObject v = new JSONObject().put("width", picture.getWidth() / density).put("height", picture.getHeight() / density).put("fps", fps);
-            if (textScale != null) v.put("scale", textScale); sendAsync(9, v);
+            if (textScale != null) v.put("scale", textScale);
+            android.util.Log.i("SillAndroid", "Viewport: queued " + Math.round(picture.getWidth() / density) + "x" + Math.round(picture.getHeight() / density) + " scale=" + textScale);
+            sendAsync(9, v);
             lastViewportFps = fps;
         } catch (Exception e) { show("画面尺寸发送失败"); }
     }
@@ -919,6 +936,7 @@ public final class MainActivity extends Activity {
             if (restoreKeyboard) ((android.view.inputmethod.InputMethodManager)getSystemService(INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(keyboard.getWindowToken(), 0);
             keyboard.clearFocus();
         }
+        android.util.Log.i("SillAndroid", "Settings: show " + (root.getWidth() > root.getHeight() ? "landscape" : "portrait") + " reanchor=" + reanchor);
         java.util.function.IntConsumer choose = i -> {
             if (i == 0) hostSettingsMenu();
             if (i == 1) { clipboardEnabled = !clipboardEnabled; getPreferences(0).edit().putBoolean("shareClipboard", clipboardEnabled).apply(); updateClipboard(); }
@@ -990,7 +1008,10 @@ public final class MainActivity extends Activity {
         } else {
             android.app.AlertDialog dialog = new android.app.AlertDialog.Builder(this).setTitle("设置").setItems(items, (d, i) -> choose.accept(i)).create();
             settingsDialog = dialog;
-            dialog.setOnDismissListener(d -> { if (settingsDialog != dialog) return; settingsDialog = null; if (!settingsReanchoring && settingsChild == null) finishSettings(); });
+            dialog.setOnDismissListener(d -> {
+                android.util.Log.i("SillAndroid", "Settings: dialog dismissed current=" + (settingsDialog == dialog) + " child=" + (settingsChild != null));
+                if (settingsDialog != dialog) return; settingsDialog = null; if (!settingsReanchoring && settingsChild == null) finishSettings();
+            });
             dialog.show();
         }
     }
@@ -1006,6 +1027,12 @@ public final class MainActivity extends Activity {
     }
     private void dismissSettings() { dismissSettings(true); }
     private void dismissSettings(boolean restoreKeyboard) {
+        if (settingsOpen) {
+            StackTraceElement[] trace = new Throwable().getStackTrace();
+            String caller = "unknown";
+            for (int n = 1; n < trace.length; n++) if (!trace[n].getMethodName().equals("dismissSettings")) { caller = trace[n].getMethodName(); break; }
+            android.util.Log.i("SillAndroid", "Settings: dismiss caller=" + caller + " restore=" + restoreKeyboard);
+        }
         settingsReanchorPending = false;
         if (!restoreKeyboard) settingsRestoreKeyboard = false;
         if (android.os.Build.VERSION.SDK_INT >= 33 && settingsBack != null) {
@@ -1020,6 +1047,7 @@ public final class MainActivity extends Activity {
         finishSettings();
     }
     private void reanchorSettings() {
+        if (settingsReanchorPending) android.util.Log.i("SillAndroid", "Settings: reanchor open=" + settingsOpen + " child=" + (settingsChild != null) + " session=" + (connection != null && connection == settingsSession));
         if (!settingsReanchorPending || !settingsOpen || settingsChild != null) return;
         if (connection == null || connection != settingsSession) { dismissSettings(false); return; }
         settingsReanchorPending = false;
@@ -1037,6 +1065,7 @@ public final class MainActivity extends Activity {
     }
     private void finishSettings() {
         if (!settingsOpen) return;
+        android.util.Log.i("SillAndroid", "Settings: finished");
         settingsOpen = false;
         if (updateSessionLayout != null) updateSessionLayout.run();
         SillConnection expected = settingsSession; settingsSession = null;
@@ -1145,7 +1174,8 @@ public final class MainActivity extends Activity {
         }, 5000);
     }
     private void connect() { start(true); }
-    private void start(boolean pairing) {
+    private void start(boolean pairing) { start(pairing, null); }
+    private void start(boolean pairing, SavedMacs.Identity selectedIdentity) {
         String address = host.getText().toString().trim();
         String password = code.getText().toString();
         int number;
@@ -1155,19 +1185,19 @@ public final class MainActivity extends Activity {
         running = true; closing = false; getPreferences(0).edit().putString("host", address).putString("port", String.valueOf(number)).apply();
         network.execute(() -> {
             try {
-                String pinKey = "pin:" + address + ":" + number;
+                SavedMacs.Endpoint endpoint = new SavedMacs.Endpoint(address, number);
                 byte[] pin;
                 if (pairing) {
                     show("正在配对…");
+                    SavedMacs.Identity identity;
                     try (SillConnection pair = SillConnection.connect(address, number, "sill-pair/1", null)) {
-                        pin = pair.pair(password, android.os.Build.MODEL, android.os.Build.DEVICE);
+                        identity = pair.pairIdentity(password, android.os.Build.MODEL, android.os.Build.DEVICE);
                     }
-                    getPreferences(0).edit().putString(pinKey, Base64.encodeToString(pin, Base64.NO_WRAP)).apply();
+                    savedMacStore.paired(identity, endpoint); pin = identity.pin();
                     ui.post(() -> { code.setText(""); refreshSavedMacs(); });
                 } else {
-                    String saved = getPreferences(0).getString(pinKey, null);
-                    if (saved == null) throw new IllegalStateException("请先配对这台 Mac。");
-                    pin = Base64.decode(saved, Base64.NO_WRAP);
+                    pin = selectedIdentity == null ? savedMacStore.pin(endpoint) : savedMacStore.pin(selectedIdentity, endpoint);
+                    if (pin == null) throw new IllegalStateException("请先配对这台 Mac。");
                 }
                 boolean established = false;
                 int retries = 0;
@@ -1177,6 +1207,7 @@ public final class MainActivity extends Activity {
                         if (!established) show("正在连接…");
                         try (SillConnection session = SillConnection.connect(address, number, "sill/1", pin)) {
                             if (!running || closing) break;
+                            savedMacStore.connected(pin, endpoint);
                             HostLockState sessionLock = new HostLockState(false); sessionLock.requireFreshFrame();
                             hostLock = sessionLock; keyframeRecovery = new KeyframeRecovery(); keyframeStreaming = false; keyframeWorstRtt = 0; keyframeRttWindow = 0; recoveryFrame.set(null); lastParameters = null; revealFrame.set(null); recoveryGeneration = -1;
                             pointerSync = new PointerSync();
@@ -1250,18 +1281,29 @@ public final class MainActivity extends Activity {
         SillConnection expected;
         synchronized (outputLock) {
             expected = connection;
-            if (expected == null) return;
+            if (expected == null) {
+                if (kind == 9) android.util.Log.i("SillAndroid", "Viewport: not sent, no session");
+                return;
+            }
             if ((kind == 6 || kind == 7 || kind == 47) && initialSource != null) initialSource.chosen();
         }
         PointerSync feed = pointerSync;
         if (kind == 8 && feed != null && connection == expected) feed.inputQueued();
+        long queuedAt = kind == 9 ? android.os.SystemClock.uptimeMillis() : 0;
         input.execute(() -> {
+            long waitMs = kind == 9 ? android.os.SystemClock.uptimeMillis() - queuedAt : 0;
             try {
                 synchronized (outputLock) {
-                    if (connection == expected && allowedForLock(kind, value)) expected.send(kind, empty ? new byte[0] : value.toString().getBytes(StandardCharsets.UTF_8));
+                    if (connection == expected && allowedForLock(kind, value)) {
+                        expected.send(kind, empty ? new byte[0] : value.toString().getBytes(StandardCharsets.UTF_8));
+                        if (kind == 9) android.util.Log.i("SillAndroid", "Viewport: sent, queue wait=" + waitMs + "ms");
+                    } else if (kind == 9) android.util.Log.i("SillAndroid", "Viewport: not sent, session changed, queue wait=" + waitMs + "ms");
                 }
             }
-            catch (Exception e) { showFor(expected, "发送失败: " + e.getClass().getSimpleName()); }
+            catch (Exception e) {
+                if (kind == 9) android.util.Log.i("SillAndroid", "Viewport: send failed, queue wait=" + waitMs + "ms, error=" + e.getClass().getSimpleName());
+                showFor(expected, "发送失败: " + e.getClass().getSimpleName());
+            }
         });
     }
     private boolean allowedForLock(int kind, JSONObject value) {

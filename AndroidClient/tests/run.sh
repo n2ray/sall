@@ -61,3 +61,5 @@ javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/InitialSourc
 java -ea -cp "$test_dir" io.github.n2ray.sill.InitialSourcePolicyTest
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/TextScale.java "$root"/tests/TextScaleTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sill.TextScaleTest
+javac -d "$test_dir" "$root"/tests/fixtures/android/content/SharedPreferences.java "$root"/app/src/main/java/io/github/n2ray/sill/PairLink.java "$root"/app/src/main/java/io/github/n2ray/sill/SavedMacs.java "$root"/app/src/main/java/io/github/n2ray/sill/SavedMacStore.java "$root"/tests/SavedMacsTest.java
+java -ea -cp "$test_dir" io.github.n2ray.sill.SavedMacsTest

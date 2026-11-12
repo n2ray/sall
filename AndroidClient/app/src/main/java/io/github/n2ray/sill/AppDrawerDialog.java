@@ -43,12 +43,14 @@ final class AppDrawerDialog {
     private final Map<String, List<ImageView>> badgeViews = new HashMap<>();
     private long activeWindow = -1;
     private boolean activeDesktop;
+    private int presentationVersion;
 
     AppDrawerDialog(Activity activity, Listener listener) { this.activity = activity; this.listener = listener; }
 
     void show(JSONArray windowList, JSONArray appList, Map<String, Bitmap> appIcons, long active,
               boolean desktop, FrameLayout picture, boolean landscape) {
         if (isShowing()) { dismiss(); return; }
+        presentationVersion++;
         LinearLayout root = new LinearLayout(activity); root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(dp(14), dp(14), dp(14), dp(14)); root.setBackground(background(0xff181a1f, 20));
         root.setFocusableInTouchMode(true);
@@ -123,6 +125,34 @@ final class AppDrawerDialog {
     }
 
     boolean isShowing() { return overlay != null || (dialog != null && dialog.isShowing()); }
+    int presentationVersion() { return presentationVersion; }
+    void reanchor(int expectedVersion, JSONArray windowList, JSONArray appList, Map<String, Bitmap> appIcons,
+                  long active, boolean desktop, FrameLayout picture, boolean landscape) {
+        if (!isShowing() || presentationVersion != expectedVersion) return;
+        String query = search.getText().toString();
+        int selectionStart = search.getSelectionStart(), selectionEnd = search.getSelectionEnd();
+        int scrollY = scroll.getScrollY();
+        boolean focused = search.hasFocus();
+        android.view.WindowInsets insets = search.getRootWindowInsets();
+        boolean imeVisible = android.os.Build.VERSION.SDK_INT >= 30 && insets != null
+                ? insets.isVisible(android.view.WindowInsets.Type.ime()) : focused;
+        dismiss();
+        show(windowList, appList, appIcons, active, desktop, picture, landscape);
+        EditText restored = search;
+        restored.setText(query);
+        if (selectionStart >= 0 && selectionEnd >= 0)
+            restored.setSelection(Math.min(selectionStart, query.length()), Math.min(selectionEnd, query.length()));
+        ScrollView restoredScroll = scroll;
+        restoredScroll.post(() -> { if (search == restored && isShowing()) restoredScroll.scrollTo(0, scrollY); });
+        if (focused) {
+            restored.requestFocus();
+            if (imeVisible) restored.post(() -> {
+                if (search == restored && isShowing() && restored.hasFocus())
+                    ((android.view.inputmethod.InputMethodManager) activity.getSystemService(Activity.INPUT_METHOD_SERVICE))
+                            .showSoftInput(restored, 0);
+            });
+        }
+    }
     void handleBack() {
         if (overlay == null) { dismiss(); return; }
         android.view.WindowInsets insets = overlay.getRootWindowInsets();
@@ -135,6 +165,7 @@ final class AppDrawerDialog {
         } else dismiss();
     }
     void dismiss() {
+        presentationVersion++;
         if (android.os.Build.VERSION.SDK_INT >= 33 && overlayBack != null) {
             activity.getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(overlayBack);
             overlayBack = null;

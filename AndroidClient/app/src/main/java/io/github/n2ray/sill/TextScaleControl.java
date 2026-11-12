@@ -34,13 +34,13 @@ final class TextScaleControl extends Button {
         setAllCaps(false); refresh();
     }
     void refresh() {
-        if (tracking && !delegate.canCommit()) cancel();
+        if (tracking && !delegate.canCommit()) cancel("state changed");
         setAlpha(delegate.available() ? 1f : .35f);
         String value = TextScale.title(TextScale.position(delegate.scale(), delegate.offersOff()));
         setText("Aa\n" + value); setContentDescription("文字大小，" + value + (delegate.available() ? "" : "，选择窗口后可用"));
     }
     @Override public boolean onTouchEvent(MotionEvent event) {
-        if (tracking && !TextScale.singlePointer(event.getPointerCount())) { cancel(); return true; }
+        if (tracking && !TextScale.singlePointer(event.getPointerCount())) { cancel("multiple pointers"); return true; }
         switch (event.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
                 if (!delegate.available()) return false;
@@ -58,23 +58,27 @@ final class TextScaleControl extends Button {
                 return true;
             case MotionEvent.ACTION_MOVE:
                 if (!tracking) return false;
-                if (!delegate.canCommit()) { cancel(); return true; }
+                if (!delegate.canCommit()) { cancel("state changed"); return true; }
                 double next = TextScale.snap(start + (event.getRawX() - downX) / (44 * density) * .25, off);
                 if (next != live) { live = next; ruler.invalidate(); performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK); }
                 return true;
             case MotionEvent.ACTION_UP:
                 if (!tracking) return false;
                 boolean apply = delegate.canCommit() && live != start;
-                double chosen = live; cancel();
+                double chosen = live;
+                android.util.Log.i("SillAndroid", "Aa: release apply=" + apply + " start=" + start + " chosen=" + chosen);
+                cancel("released");
                 if (apply) delegate.commit(TextScale.scale(chosen));
                 refresh(); performClick(); return true;
-            case MotionEvent.ACTION_CANCEL: cancel(); return true;
+            case MotionEvent.ACTION_CANCEL: cancel("touch cancelled"); return true;
             default: return tracking;
         }
     }
     @Override public boolean performClick() { super.performClick(); return true; }
     @Override protected void onDetachedFromWindow() { cancel(); super.onDetachedFromWindow(); }
-    void cancel() {
+    void cancel() { cancel("layout or lifecycle"); }
+    private void cancel(String reason) {
+        if (tracking && !reason.equals("released")) android.util.Log.i("SillAndroid", "Aa: cancelled (" + reason + ")");
         tracking = false;
         if (popup != null) popup.dismiss();
         popup = null; ruler = null;

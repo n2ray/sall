@@ -84,18 +84,27 @@ final class SillConnection implements Closeable {
     }
 
     byte[] pair(String code, String deviceName, String model) throws Exception {
+        return pairIdentity(code, deviceName, model).pin();
+    }
+
+    SavedMacs.Identity pairIdentity(String code, String deviceName, String model) throws Exception {
         android.util.Log.i("SillAndroid", "Deriving pairing proof");
         byte[] key = PairingProof.codeKey(code, peerFingerprint);
-        return pairWithKey(key, "code", deviceName, model);
+        try { return pairWithKey(key, "code", deviceName, model); }
+        finally { java.util.Arrays.fill(key, (byte) 0); }
     }
 
     byte[] pairQr(byte[] secret, String deviceName, String model) throws Exception {
+        return pairQrIdentity(secret, deviceName, model).pin();
+    }
+
+    SavedMacs.Identity pairQrIdentity(byte[] secret, String deviceName, String model) throws Exception {
         if (secret == null || secret.length != 16) throw new IllegalArgumentException("Invalid QR secret");
         socket.setSoTimeout(15000);
         return pairWithKey(secret, "qr", deviceName, model);
     }
 
-    private byte[] pairWithKey(byte[] key, String method, String deviceName, String model) throws Exception {
+    private SavedMacs.Identity pairWithKey(byte[] key, String method, String deviceName, String model) throws Exception {
         byte[] proof = PairingProof.proof(key, peerFingerprint, deviceFingerprint, true);
         String encoded = Base64.encodeToString(proof, Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
         JSONObject request = new JSONObject().put("v", 1).put("method", method).put("proof", encoded)
@@ -109,7 +118,8 @@ final class SillConnection implements Closeable {
         byte[] answer = Base64.decode(result.getString("proof"), Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
         if (!PairingProof.verifyMac(PairingProof.proof(key, peerFingerprint, deviceFingerprint, false), answer))
             throw new IOException("Mac pairing proof failed");
-        return peerFingerprint.clone();
+        return SavedMacs.Identity.pairingResult(peerFingerprint, result.optString("macID", null), result.optString("name", ""),
+                result.optString("recognitionKey", null));
     }
 
     StreamWire.Message read() throws IOException { return StreamWire.read(socket.getInputStream()); }
