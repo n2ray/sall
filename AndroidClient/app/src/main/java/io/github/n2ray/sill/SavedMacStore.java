@@ -62,16 +62,18 @@ final class SavedMacStore {
         List<SavedMacs.Mac> records = new ArrayList<>(all());
         List<SavedMacs.Endpoint> addresses = new ArrayList<>();
         SavedMacs.Identity savedIdentity = identity;
+        double issuedAt = 0;
         for (SavedMacs.Mac mac : records) if (mac.identity().macId().equals(identity.macId())) {
             if (!mac.identity().fingerprint().equals(identity.fingerprint()))
                 throw new IllegalArgumentException("Conflicting saved identity");
             addresses.addAll(mac.addresses());
-            if (identity.recognitionKey().isEmpty() && !mac.identity().recognitionKey().isEmpty())
+            issuedAt = mac.infoIssuedAt();
+            if (identity.recognitionKey().isEmpty() && (!mac.identity().recognitionKey().isEmpty() || !mac.identity().name().isEmpty()))
                 savedIdentity = mac.identity();
         }
         records.removeIf(mac -> mac.identity().macId().equals(identity.macId()));
         addresses.add(endpoint);
-        records.add(new SavedMacs.Mac(savedIdentity, addresses, endpoint));
+        records.add(new SavedMacs.Mac(savedIdentity, addresses, endpoint, issuedAt));
         // The old endpoint pin remains a rollback-compatible authoritative choice after re-pairing.
         write(records, preferences.edit().putString(endpoint.legacyKey(), identity.fingerprint())).apply();
     }
@@ -82,9 +84,29 @@ final class SavedMacStore {
             SavedMacs.Mac mac = records.get(i);
             if (!java.security.MessageDigest.isEqual(mac.identity().pin(), pin)) continue;
             List<SavedMacs.Endpoint> addresses = new ArrayList<>(mac.addresses()); addresses.add(endpoint);
-            records.set(i, new SavedMacs.Mac(mac.identity(), addresses, endpoint));
+            records.set(i, new SavedMacs.Mac(mac.identity(), addresses, endpoint, mac.infoIssuedAt()));
             write(records, preferences.edit()).apply(); return;
         }
+    }
+
+    // Call only after SignedMacInfo.verify has authenticated the payload against this TLS session.
+    synchronized boolean refresh(byte[] sessionPin, SignedMacInfo.Update info) {
+        if (sessionPin == null || sessionPin.length != 32 || !PairLink.macId(sessionPin).equals(info.macId())) return false;
+        List<SavedMacs.Mac> records = new ArrayList<>(all());
+        for (int i = 0; i < records.size(); i++) {
+            SavedMacs.Mac mac = records.get(i);
+            if (!mac.identity().macId().equals(info.macId()) || !java.security.MessageDigest.isEqual(mac.identity().pin(), sessionPin)
+                    || info.issuedAt() <= mac.infoIssuedAt()) continue;
+            SavedMacs.Identity next = new SavedMacs.Identity(info.macId(), mac.identity().fingerprint(), info.name(), mac.identity().recognitionKey());
+            if (next.name().isEmpty()) next = mac.identity();
+            List<SavedMacs.Endpoint> addresses = new ArrayList<>(mac.addresses());
+            // shortcut: old addresses lack origin metadata; keep them until typed/advertised address lifetimes are modeled.
+            if (info.remoteAccess()) addresses.addAll(info.addresses());
+            records.set(i, new SavedMacs.Mac(next, addresses, mac.lastWorked(), info.issuedAt()));
+            write(records, preferences.edit()).apply();
+            return true;
+        }
+        return false;
     }
 
     synchronized void forget(SavedMacs.Identity identity) {

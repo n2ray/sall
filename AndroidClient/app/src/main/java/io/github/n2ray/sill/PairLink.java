@@ -114,7 +114,7 @@ final class PairLink {
         if (!value.matches("[0-9]{1,5}")) throw new IllegalArgumentException();
         int p = Integer.parseInt(value); if (p < 1 || p > 65535) throw new IllegalArgumentException(); return p;
     }
-    private static Address address(String raw) throws Exception {
+    static Address address(String raw) throws Exception {
         String host = raw; int p = 0;
         if (raw.startsWith("[")) {
             int end = raw.indexOf(']'); if (end < 0) throw new IllegalArgumentException();

@@ -123,6 +123,7 @@ final class SillConnection implements Closeable {
     }
 
     StreamWire.Message read() throws IOException { return StreamWire.read(socket.getInputStream()); }
+    byte[] peerFingerprint() { return peerFingerprint.clone(); }
     void send(int kind, byte[] data) throws IOException { StreamWire.write(socket.getOutputStream(), kind, data); }
     void sessionTimeout() throws IOException { socket.setSoTimeout(0); }
     public void close() throws IOException { socket.close(); }

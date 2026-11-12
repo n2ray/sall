@@ -1365,6 +1365,37 @@ public final class MainActivity extends Activity {
     }
     private void handle(StreamWire.Message message, SillConnection messageSession) throws Exception {
         switch (message.kind()) {
+            case 18 -> {
+                if (messageSession != connection || message.payload().length > 98304) return;
+                try {
+                    JSONObject envelope = new JSONObject(new String(message.payload(), StandardCharsets.UTF_8));
+                    byte[] pin = messageSession.peerFingerprint();
+                    byte[] bytes = SignedMacInfo.verify(envelope.getString("info"), envelope.getString("key"), envelope.getString("sig"), pin);
+                    String json = StandardCharsets.UTF_8.newDecoder().onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                            .decode(ByteBuffer.wrap(bytes)).toString();
+                    JSONObject info = new JSONObject(json);
+                    String macId = info.getString("macID");
+                    if (!macId.equals(PairLink.macId(pin))) return;
+                    int defaultPort = info.getInt("remotePort");
+                    if (defaultPort < 1 || defaultPort > 65535 || info.getDouble("remotePort") != defaultPort) return;
+                    JSONArray advertised = info.getJSONArray("addresses");
+                    java.util.List<SavedMacs.Endpoint> addresses = new java.util.ArrayList<>();
+                    for (int i = 0; i < advertised.length(); i++) {
+                        JSONObject entry = advertised.getJSONObject(i);
+                        int port = entry.isNull("port") ? defaultPort : entry.getInt("port");
+                        if (!entry.isNull("port") && entry.getDouble("port") != port) continue;
+                        SavedMacs.Endpoint address = SignedMacInfo.address(entry.getString("host"), port);
+                        if (address != null && !addresses.contains(address)) addresses.add(address);
+                    }
+                    SignedMacInfo.Update update = new SignedMacInfo.Update(macId, info.getString("name"),
+                            info.getDouble("issuedAt"), info.getBoolean("remoteAccess"), addresses);
+                    ui.post(() -> {
+                        if (connection == messageSession && savedMacStore.refresh(pin, update)) refreshSavedMacs();
+                    });
+                } catch (java.security.GeneralSecurityException | IllegalArgumentException | org.json.JSONException | java.nio.charset.CharacterCodingException ignored) {
+                    android.util.Log.w("SillAndroid", "Rejected invalid signed Mac info");
+                }
+            }
             case 2 -> {
                 JSONObject list = new JSONObject(new String(message.payload(), StandardCharsets.UTF_8));
                 JSONArray windows = list.getJSONArray("windows");

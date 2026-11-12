@@ -95,6 +95,30 @@ public final class SavedMacsTest {
                 "Ambiguous tag must not choose an identity");
         discoveryStore.forget(discovered);
         check(discoveryStore.recognizedPin(discovered, tag) == null, "Forgotten identity cannot reconnect from a stale row");
+        MemoryPreferences infoPreferences = new MemoryPreferences();
+        infoPreferences.values.put(lan.legacyKey(), SavedMacs.encode(first));
+        SavedMacStore infoStore = new SavedMacStore(infoPreferences);
+        SignedMacInfo.Update update = new SignedMacInfo.Update(one.macId(), "Verified new name", 100.5, true, List.of(vpn));
+        check(!infoStore.refresh(second, update), "Info on another TLS session cannot refresh this Mac");
+        check(infoStore.refresh(first, update), "Fresh authenticated info updates a legacy saved identity");
+        SavedMacs.Mac updated = new SavedMacStore(infoPreferences).all().get(0);
+        check(updated.identity().name().equals("Verified new name") && updated.identity().recognitionKey().isEmpty(), "Info names the Mac but cannot invent a recognition key");
+        check(updated.addresses().containsAll(List.of(lan, vpn)), "Advertised addresses preserve manual and legacy entries");
+        check(updated.infoIssuedAt() == 100.5, "Timestamp persists across storage reload");
+        infoStore.paired(SavedMacs.Identity.migrated(first), lan);
+        check(infoStore.all().get(0).identity().name().equals("Verified new name"), "Pin-only pairing retains a previously signed name without a recognition key");
+        check(!new SavedMacStore(infoPreferences).refresh(first, update), "Equal timestamp replay cannot update storage");
+        check(!infoStore.refresh(first, new SignedMacInfo.Update(one.macId(), "Old", 99, true, List.of(ipv6))), "Older info cannot overwrite name or addresses");
+        check(infoStore.refresh(first, new SignedMacInfo.Update(one.macId(), "", 101, false, List.of(ipv6))), "Remote-off update advances timestamp");
+        updated = infoStore.all().get(0);
+        check(updated.identity().name().equals("Verified new name") && !updated.addresses().contains(ipv6), "Empty names and remote-off addresses do not erase or replace saved values");
+        check(infoStore.refresh(first, new SignedMacInfo.Update(one.macId(), "Verified new name", 102, true, List.of())), "Empty address list is accepted without erasing old paths");
+        infoStore.connected(first, lan);
+        infoStore.paired(one, lan);
+        check(!infoStore.refresh(first, update), "Connecting and re-pairing cannot reset the anti-replay timestamp");
+        check(infoStore.all().get(0).identity().recognitionKey().equals(key), "Info path preserves pairing recognition key");
+        infoStore.forget(one);
+        check(!infoStore.refresh(first, new SignedMacInfo.Update(one.macId(), "Revived", 103, true, List.of(vpn))), "A late info update cannot revive a forgotten Mac");
         System.out.println("Saved Mac identity, migration, persistence and forget checks passed");
     }
 

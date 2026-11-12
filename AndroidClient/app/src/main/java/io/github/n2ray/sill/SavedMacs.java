@@ -58,8 +58,10 @@ final class SavedMacs {
         }
     }
 
-    record Mac(Identity identity, List<Endpoint> addresses, Endpoint lastWorked) {
+    record Mac(Identity identity, List<Endpoint> addresses, Endpoint lastWorked, double infoIssuedAt) {
+        Mac(Identity identity, List<Endpoint> addresses, Endpoint lastWorked) { this(identity, addresses, lastWorked, 0); }
         Mac {
+            if (!Double.isFinite(infoIssuedAt) || infoIssuedAt < 0) throw new IllegalArgumentException("Invalid info timestamp");
             addresses = List.copyOf(new java.util.LinkedHashSet<>(addresses));
             if (addresses.isEmpty()) throw new IllegalArgumentException("Missing saved address");
             if (lastWorked != null && !addresses.contains(lastWorked)) lastWorked = null;
@@ -97,7 +99,9 @@ final class SavedMacs {
                         addresses.add(Endpoint.fromLegacyKey(address));
                 addresses.sort(java.util.Comparator.comparing(Endpoint::legacyKey));
                 String last = string(preferences, base + "lastWorked");
-                records.add(new Mac(identity, addresses, last.isEmpty() ? null : Endpoint.fromLegacyKey(last)));
+                String issued = string(preferences, base + "infoIssuedAt");
+                records.add(new Mac(identity, addresses, last.isEmpty() ? null : Endpoint.fromLegacyKey(last),
+                        issued.isEmpty() ? 0 : Double.parseDouble(issued)));
             } catch (IllegalArgumentException | ClassCastException | NullPointerException ignored) { }
         }
         records.sort(java.util.Comparator.comparing(mac -> mac.identity().macId()));
@@ -115,6 +119,7 @@ final class SavedMacs {
             for (Endpoint endpoint : mac.addresses()) addresses.add(endpoint.legacyKey());
             result.put(base + "addresses", addresses);
             result.put(base + "lastWorked", mac.lastWorked() == null ? "" : mac.lastWorked().legacyKey());
+            result.put(base + "infoIssuedAt", Double.toString(mac.infoIssuedAt()));
         }
         return result;
     }
@@ -130,8 +135,9 @@ final class SavedMacs {
         if (!old.identity().fingerprint().equals(incoming.identity().fingerprint()))
             throw new IllegalArgumentException("Conflicting saved identity");
         List<Endpoint> addresses = new ArrayList<>(old.addresses()); addresses.addAll(incoming.addresses());
-        Identity identity = old.identity().recognitionKey().isEmpty() ? incoming.identity() : old.identity();
-        merged.put(identity.macId(), new Mac(identity, addresses, old.lastWorked() != null ? old.lastWorked() : incoming.lastWorked()));
+        Identity identity = old.identity().recognitionKey().isEmpty() && old.identity().name().isEmpty() ? incoming.identity() : old.identity();
+        merged.put(identity.macId(), new Mac(identity, addresses, old.lastWorked() != null ? old.lastWorked() : incoming.lastWorked(),
+                Math.max(old.infoIssuedAt(), incoming.infoIssuedAt())));
     }
 
     static byte[] decodePin(String encoded) {
