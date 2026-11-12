@@ -21,7 +21,7 @@ final class TrackpadView extends View {
     private long downAt, lastScrollAt, momentumAt;
     private boolean moved, twoFinger, scrolling, dragging, touchActive, touchOwner, silenced, reversed, coasting, pictureBusy;
     private int scrollSign = 1;
-    private float momentumX, momentumY, momentumWidth;
+    private float momentumX, momentumY, momentumWidth, momentumHeight, verticalRatio = 1 / 1.6f;
     private VelocityTracker velocity;
     private Runnable beforeTwoFinger;
     private final ScrollMomentum momentum = new ScrollMomentum();
@@ -37,7 +37,7 @@ final class TrackpadView extends View {
             momentumAt = now;
             if (!momentum.advance(dt, getResources().getDisplayMetrics().density)) { stopMomentum(); return; }
             listener.scroll(null, momentumX, momentumY, (float) momentum.stepX(dt) / momentumWidth,
-                    (float) momentum.stepY(dt) / (momentumWidth / 1.6f));
+                    (float) momentum.stepY(dt) / momentumHeight);
             postDelayed(this, 16);
         }
     };
@@ -62,6 +62,7 @@ final class TrackpadView extends View {
     void setBeforeTwoFinger(Runnable action) { beforeTwoFinger = action; }
     void position(float x, float y) { this.x = clamp(x); this.y = clamp(y); }
     void setReverseScrolling(boolean reverse) { reversed = reverse; }
+    void setVerticalRatio(float ratio) { verticalRatio = Float.isFinite(ratio) && ratio > 0 ? ratio : 1 / 1.6f; }
     void setMacGesturesEnabled(boolean enabled) { macGesturesEnabled = enabled; }
     void cancelGestures() {
         removeCallbacks(longPress);
@@ -82,10 +83,10 @@ final class TrackpadView extends View {
         float vx = (velocity.getXVelocity(first) + velocity.getXVelocity(second)) / 2 * scrollSign;
         float vy = (velocity.getYVelocity(first) + velocity.getYVelocity(second)) / 2 * scrollSign;
         if (!momentum.start(vx, vy, getResources().getDisplayMetrics().density)) return;
-        momentumX = x; momentumY = y; momentumWidth = Math.max(1, areaWidth); coasting = true;
+        momentumX = x; momentumY = y; momentumWidth = Math.max(1, areaWidth); momentumHeight = Math.max(1, areaWidth * verticalRatio); coasting = true;
         listener.scroll("momentumBegan", momentumX, momentumY, 0, 0);
         listener.scroll(null, momentumX, momentumY, (float) momentum.firstX() / momentumWidth,
-                (float) momentum.firstY() / (momentumWidth / 1.6f));
+                (float) momentum.firstY() / momentumHeight);
         momentumAt = android.os.SystemClock.uptimeMillis(); postDelayed(coast, 16);
     }
     private static float clamp(float n) { return Math.max(0, Math.min(1, n)); }
@@ -156,7 +157,7 @@ final class TrackpadView extends View {
                         stopMomentum(); scrollSign = reversed ? -1 : 1; scrolling = true; listener.scroll("began", x, y, 0, 0);
                     }
                     if (scrolling && (cx != lastX || cy != lastY)) {
-                        listener.scroll(null, x, y, scrollSign * (cx - lastX) / Math.max(1, areaWidth), scrollSign * (cy - lastY) / Math.max(1, areaWidth / 1.6f));
+                        listener.scroll(null, x, y, scrollSign * (cx - lastX) / Math.max(1, areaWidth), scrollSign * (cy - lastY) / Math.max(1, areaWidth * verticalRatio));
                         lastScrollAt = event.getEventTime();
                     }
                     lastX = cx; lastY = cy;
@@ -167,7 +168,7 @@ final class TrackpadView extends View {
                     }
                     if (moved || dragging) {
                         x = clamp(x + (cx - lastX) * 1.25f / Math.max(1, areaWidth));
-                        y = clamp(y + (cy - lastY) * 1.25f / Math.max(1, areaWidth / 1.6f));
+                        y = clamp(y + (cy - lastY) * 1.25f / Math.max(1, areaWidth * verticalRatio));
                         listener.pointer("move", x, y);
                     }
                     lastX = cx; lastY = cy;

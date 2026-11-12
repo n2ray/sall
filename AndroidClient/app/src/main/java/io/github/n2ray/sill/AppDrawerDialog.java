@@ -48,10 +48,10 @@ final class AppDrawerDialog {
         root.setPadding(dp(14), dp(14), dp(14), dp(14)); root.setBackgroundColor(0xff181a1f);
         root.setFocusableInTouchMode(true);
         TextView title = text("应用和窗口", 19, Color.WHITE); root.addView(title);
-        search = new EditText(activity); search.setSingleLine(true); search.setHint("搜索应用或窗口");
+        search = new EditText(activity); search.setSingleLine(true); search.setHint("搜索应用");
         search.setTextColor(Color.WHITE); search.setHintTextColor(0xffadb3bd);
         search.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
-        search.setContentDescription("搜索 Mac 上的应用和窗口");
+        search.setContentDescription("搜索 Mac 上的应用");
         root.addView(search, new LinearLayout.LayoutParams(-1, dp(52)));
         scroll = new ScrollView(activity); scroll.setFillViewport(false);
         rows = new LinearLayout(activity); rows.setOrientation(LinearLayout.VERTICAL); scroll.addView(rows);
@@ -75,6 +75,7 @@ final class AppDrawerDialog {
     }
 
     void update(JSONArray windowList, JSONArray appList, Map<String, Bitmap> appIcons, long active) {
+        boolean sourceChanged = isShowing() && active >= 0 && active != activeWindow;
         List<AppDrawerModel.Window> nextWindows = new ArrayList<>();
         if (windowList != null) for (int i = 0; i < windowList.length(); i++) {
             JSONObject item = windowList.optJSONObject(i); if (item == null) continue;
@@ -95,6 +96,7 @@ final class AppDrawerDialog {
         }
         windows = java.util.Collections.unmodifiableList(nextWindows); apps = java.util.Collections.unmodifiableList(nextApps);
         icons = nextIcons; activeWindow = active;
+        if (sourceChanged) { dismiss(); return; }
         if (rows != null && (changed || rows.getChildCount() == 0)) render(true);
     }
 
@@ -109,21 +111,20 @@ final class AppDrawerDialog {
         if (!result.open().isEmpty()) {
             header("正在运行");
             for (AppDrawerModel.Group group : result.open()) {
-                LinearLayout label = row(group.name(), group.bundleId(), false);
+                boolean selected = group.windows().stream().anyMatch(window -> window.id() == activeWindow);
+                LinearLayout label = row(group.name(), group.bundleId(), true);
+                label.setBackground(background(selected ? 0xff39485e : 0xff24262c));
                 TextView count = text(group.windows().size() + " 个窗口", 12, 0xffadb3bd); label.addView(count);
+                label.setContentDescription(group.name() + "，" + group.windows().size() + " 个窗口" + (selected ? "，当前显示" : ""));
                 rows.addView(label);
-                for (AppDrawerModel.Window window : group.windows()) {
-                    TextView entry = text(window.title().trim().isEmpty() ? "未命名窗口" : window.title(), 14, Color.WHITE);
-                    entry.setPadding(dp(54), 0, dp(10), 0); entry.setGravity(Gravity.CENTER_VERTICAL);
-                    entry.setSingleLine(true); entry.setEllipsize(android.text.TextUtils.TruncateAt.END);
-                    entry.setBackground(background(window.id() == activeWindow ? 0xff39485e : 0xff24262c));
-                    entry.setContentDescription(group.name() + "窗口：" + window.title() + (window.id() == activeWindow ? "，当前显示" : ""));
-                    LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-1, dp(44)); p.setMargins(0, dp(2), 0, dp(2)); rows.addView(entry, p);
-                    entry.setOnClickListener(v -> {
-                        if (windows.stream().noneMatch(w -> w.id() == window.id())) { render(true); return; }
-                        dismiss(); listener.selectWindow(window.id());
-                    });
-                }
+                label.setOnClickListener(v -> {
+                    AppDrawerModel.Group current = AppDrawerModel.filter(windows, apps, "").open().stream()
+                            .filter(g -> g.bundleId().equals(group.bundleId()) && g.name().equals(group.name())).findFirst().orElse(null);
+                    if (current == null) { render(true); return; }
+                    long id = AppDrawerModel.nextWindow(current, activeWindow);
+                    if (id < 0) { render(true); return; }
+                    dismiss(); listener.selectWindow(id);
+                });
             }
         }
         if (!result.closed().isEmpty()) {
@@ -133,12 +134,12 @@ final class AppDrawerDialog {
                 entry.setContentDescription("打开 " + app.name());
                 entry.setOnClickListener(v -> {
                     if (apps.stream().noneMatch(a -> a.bundleId().equals(app.bundleId()))) { render(true); return; }
-                    dismiss(); listener.launchApp(app.bundleId());
+                    listener.launchApp(app.bundleId());
                 });
             }
         }
         if (result.open().isEmpty() && result.closed().isEmpty()) {
-            TextView empty = text(search.getText().toString().trim().isEmpty() ? "Mac 暂无可用应用或窗口" : "没有匹配的应用或窗口", 14, 0xffadb3bd);
+            TextView empty = text(search.getText().toString().trim().isEmpty() ? "Mac 暂无可用应用" : "没有匹配的应用", 14, 0xffadb3bd);
             empty.setPadding(dp(10), dp(24), dp(10), dp(24)); rows.addView(empty);
         }
         scroll.post(() -> scroll.scrollTo(0, y));

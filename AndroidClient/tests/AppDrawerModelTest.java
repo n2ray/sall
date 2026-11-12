@@ -11,9 +11,13 @@ public final class AppDrawerModelTest {
                 new AppDrawerModel.App("邮件", "mail"), new AppDrawerModel.App("Alpha", "alpha"));
         var all = AppDrawerModel.filter(windows, apps, "");
         assert all.open().size() == 2 && all.open().get(0).windows().size() == 2;
+        assert AppDrawerModel.nextWindow(all.open().get(0), -1) == 5;
+        assert AppDrawerModel.nextWindow(all.open().get(0), 5) == 6;
+        assert AppDrawerModel.nextWindow(all.open().get(0), 6) == 5;
+        assert AppDrawerModel.nextWindow(all.open().get(1), 5) == 7;
         assert all.closed().size() == 2 && all.closed().get(0).name().equals("Alpha");
         var title = AppDrawerModel.filter(windows, apps, " DRAFT ");
-        assert title.open().size() == 1 && title.open().get(0).windows().get(0).id() == 6 && title.closed().isEmpty();
+        assert title.open().isEmpty() && title.closed().isEmpty();
         var app = AppDrawerModel.filter(windows, apps, "邮件");
         assert app.open().size() == 1 && app.open().get(0).windows().size() == 2;
         assert AppDrawerModel.filter(windows, apps, "not found").open().isEmpty();

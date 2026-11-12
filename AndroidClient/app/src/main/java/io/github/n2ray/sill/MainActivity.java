@@ -67,6 +67,9 @@ public final class MainActivity extends Activity {
     private volatile boolean clipboardSubscribed;
     private Double textScale;
     private final Runnable viewportUpdate = this::sendViewport;
+    private Runnable updateSessionLayout;
+    private float portraitImeHeight;
+    private boolean largerPicture, largerPictureApplied, settingsOpen;
     private int lastViewportFps = -1;
     private boolean fpsObserversStarted, fpsDisplayRegistered, fpsNetworkRegistered, fpsPowerRegistered;
     private final android.hardware.display.DisplayManager.DisplayListener fpsDisplayListener = new android.hardware.display.DisplayManager.DisplayListener() {
@@ -107,7 +110,8 @@ public final class MainActivity extends Activity {
     private MacDiscovery discovery;
     private final java.util.Map<String, android.view.View> nearby = new java.util.HashMap<>();
     private volatile MediaCodec decoder;
-    private Surface decoderSurface;
+    private volatile Surface decoderSurface;
+    private volatile long surfaceEpoch, decoderEpoch = -1;
     private Hevc.Parameters lastParameters;
     private record FreshFrame(long generation, long presentationUs) { }
     private final java.util.concurrent.atomic.AtomicReference<FreshFrame> revealFrame = new java.util.concurrent.atomic.AtomicReference<>();
@@ -124,6 +128,8 @@ public final class MainActivity extends Activity {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        largerPicture = getPreferences(0).getBoolean("largerPicture", false);
+        portraitImeHeight = getPreferences(0).getFloat("portraitImeHeight", 0);
         getWindow().setFlags(android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN, android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN);
         root = new LinearLayout(this); root.setOrientation(LinearLayout.VERTICAL);
         int pad = (int) (12 * getResources().getDisplayMetrics().density);
@@ -139,6 +145,14 @@ public final class MainActivity extends Activity {
             if (android.os.Build.VERSION.SDK_INT >= 30) {
                 android.graphics.Insets bars = insets.getInsets(android.view.WindowInsets.Type.systemBars());
                 view.setPadding(pad + bars.left, pad + bars.top, pad + bars.right, pad + bars.bottom);
+                if (insets.isVisible(android.view.WindowInsets.Type.ime()) && view.getWidth() < view.getHeight()) {
+                    float height = insets.getInsets(android.view.WindowInsets.Type.ime()).bottom / getResources().getDisplayMetrics().density;
+                    if (height > 0 && Math.abs(height - portraitImeHeight) > 1) {
+                        portraitImeHeight = height;
+                        getPreferences(0).edit().putFloat("portraitImeHeight", height).apply();
+                        if (!settingsOpen && updateSessionLayout != null) view.post(updateSessionLayout);
+                    }
+                }
             } else {
                 view.setPadding(pad + insets.getSystemWindowInsetLeft(), pad + insets.getSystemWindowInsetTop(),
                         pad + insets.getSystemWindowInsetRight(), pad + insets.getSystemWindowInsetBottom());
@@ -158,6 +172,7 @@ public final class MainActivity extends Activity {
         host = field("Mac IP 或 Tailscale 地址", getPreferences(0).getString("host", ""));
         port = field("端口", getPreferences(0).getString("port", "7455")); port.setInputType(2);
         code = field("Mac 上显示的 12 位配对码", ""); code.setInputType(2);
+        button(connectionPanel, "扫描配对码", v -> startActivityForResult(new android.content.Intent(this, PairScannerActivity.class), 102));
         button(connectionPanel, "配对并连接", v -> connect());
         button(connectionPanel, "连接已配对的 Mac", v -> start(false));
         clipboardEnabled = getPreferences(0).getBoolean("shareClipboard", false);
@@ -183,6 +198,14 @@ public final class MainActivity extends Activity {
         super.onNewIntent(intent);
         handlePairIntent(intent);
         setIntent(intent);
+    }
+
+    @Override protected void onActivityResult(int request, int result, android.content.Intent data) {
+        super.onActivityResult(request, result, data);
+        if (request != 102 || result != RESULT_OK || data == null) return;
+        String raw = data.getStringExtra(PairScannerActivity.RESULT_LINK);
+        data.removeExtra(PairScannerActivity.RESULT_LINK);
+        if (raw != null) handlePairIntent(new android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(raw)));
     }
 
     private void handlePairIntent(android.content.Intent intent) {
@@ -290,13 +313,18 @@ public final class MainActivity extends Activity {
         video = new SurfaceView(this); picture.addView(video, new android.widget.FrameLayout.LayoutParams(-1, -1));
         video.getHolder().addCallback(new SurfaceHolder.Callback() {
             public void surfaceCreated(SurfaceHolder holder) {
-                synchronized (surfaceLock) { surface = holder.getSurface(); surfaceLock.notifyAll(); }
+                synchronized (surfaceLock) { surface = holder.getSurface(); surfaceEpoch++; surfaceLock.notifyAll(); }
+                // A still source may not produce another frame after its output surface returns.
+                // Keep recovery owed until a keyframe renders on the new surface.
+                recoveryFrame.set(null);
+                interruptPicture();
                 SillConnection c = connection;
                 if (c != null) input.execute(() -> { try { requestKeyframe(); } catch (Exception ignored) { } });
             }
             public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) { synchronized (surfaceLock) { surface = holder.getSurface(); surfaceLock.notifyAll(); } }
             public void surfaceDestroyed(SurfaceHolder holder) {
-                synchronized (surfaceLock) { surface = null; }
+                synchronized (surfaceLock) { surface = null; surfaceEpoch++; }
+                recoveryFrame.set(null);
                 interruptPicture();
             }
         });
@@ -378,25 +406,45 @@ public final class MainActivity extends Activity {
         });
         trackpad.setReverseScrolling(getPreferences(0).getBoolean("reverseScrolling", false));
         sessionPanel.addView(trackpad, new LinearLayout.LayoutParams(-1, 0, 1));
-        root.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, oright, ob) -> {
-            boolean landscape = r - l > b - t;
-            if (oright > ol && ob > ot && landscape != (oright - ol > ob - ot) && pictureInput != null) pictureInput.cancel();
+        updateSessionLayout = () -> {
+            int r = root.getWidth(), b = root.getHeight();
+            if (r <= 0 || b <= 0) return;
+            boolean landscape = r > b;
+            int width = r - root.getPaddingLeft() - root.getPaddingRight();
+            int height = b - root.getPaddingTop() - root.getPaddingBottom();
+            float density = getResources().getDisplayMetrics().density;
+            PhoneStreamLayout.Streaming streaming = activeWindowId >= 0 ? PhoneStreamLayout.Streaming.WINDOW
+                    : desktopActive ? PhoneStreamLayout.Streaming.DESKTOP : PhoneStreamLayout.Streaming.NOTHING;
+            if (settingsOpen) streaming = largerPictureApplied ? PhoneStreamLayout.Streaming.WINDOW : PhoneStreamLayout.Streaming.NOTHING;
+            PhoneStreamLayout geometry = PhoneStreamLayout.forSource(width / density, height / density,
+                    portraitImeHeight > 0 ? (double) portraitImeHeight : null, false,
+                    settingsOpen ? largerPictureApplied : largerPicture, streaming);
+            boolean large = geometry.largerPicture;
+            largerPictureApplied = large;
+            zoom.setTopAligned(large);
+            trackpad.setVerticalRatio(large && videoWidth > 0 && videoHeight > 0 ? (float) videoHeight / videoWidth : 1 / 1.6f);
             int visible = landscape ? android.view.View.GONE : android.view.View.VISIBLE;
             sessionStatus.setVisibility(visible); keys.setVisibility(visible); trackpad.setVisibility(visible);
-            stripRow.setVisibility(visible);
+            stripRow.setVisibility(landscape || large ? android.view.View.GONE : android.view.View.VISIBLE);
             if (landscape && strip.getParent() != bar) {
-                stripRow.removeView(strip); stripRow.removeView(menuButton); sessionPanel.removeView(bar);
+                stripRow.removeView(strip); if (menuButton.getParent() == stripRow) stripRow.removeView(menuButton); sessionPanel.removeView(bar);
                 bar.addView(strip, 1, new LinearLayout.LayoutParams(0, dp(52), 1));
+                if (menuButton.getParent() == bar) bar.removeView(menuButton);
                 bar.addView(menuButton, 2, new LinearLayout.LayoutParams(dp(48), dp(46)));
                 sessionPanel.addView(bar, 1);
             } else if (!landscape && strip.getParent() != stripRow) {
-                bar.removeView(strip); bar.removeView(menuButton); sessionPanel.removeView(bar);
+                bar.removeView(strip); if (menuButton.getParent() == bar) bar.removeView(menuButton); sessionPanel.removeView(bar);
                 stripRow.addView(strip, new LinearLayout.LayoutParams(0, -1, 1));
                 stripRow.addView(menuButton, new LinearLayout.LayoutParams(dp(50), dp(50)));
                 sessionPanel.addView(bar, 2);
             }
-            int width = r - l - root.getPaddingLeft() - root.getPaddingRight();
-            int height = b - t - root.getPaddingTop() - root.getPaddingBottom();
+            if (!landscape && large && menuButton.getParent() != bar) {
+                stripRow.removeView(menuButton);
+                bar.addView(menuButton, 1, new LinearLayout.LayoutParams(0, dp(50), 1));
+            } else if (!landscape && !large && menuButton.getParent() != stripRow) {
+                bar.removeView(menuButton);
+                stripRow.addView(menuButton, new LinearLayout.LayoutParams(dp(50), dp(50)));
+            }
             refreshMenuButton();
             for (Button button : new Button[]{appsButton, scaleButton, keyboardButton, desktopButton, settingsButton}) {
                 LinearLayout.LayoutParams bp = (LinearLayout.LayoutParams) button.getLayoutParams();
@@ -405,12 +453,19 @@ public final class MainActivity extends Activity {
                     bp.width = bw; bp.weight = weight; bp.height = dp(50); button.setLayoutParams(bp);
                 }
             }
-            int wanted = landscape ? 0 : PhoneStreamLayout.pictureHeight(width, height, dp(200), dp(120));
+            int wanted = landscape ? 0 : large ? Math.max(0, Math.min(dp((int) geometry.picture.height()),
+                    height - dp((int) portraitImeHeight) - sessionStatus.getMeasuredHeight() - dp(110)))
+                    : PhoneStreamLayout.pictureHeight(width, height, dp(200), dp(120));
             LinearLayout.LayoutParams params = (LinearLayout.LayoutParams) picture.getLayoutParams();
             int wantedWidth = -1; float weight = landscape ? 1 : 0;
             if (params.height != wanted || params.width != wantedWidth || params.weight != weight) {
                 params.height = wanted; params.width = wantedWidth; params.weight = weight; picture.setLayoutParams(params);
             }
+            layoutVideo(); cursor.invalidate();
+        };
+        root.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, oright, ob) -> {
+            if (oright > ol && ob > ot && (r - l > b - t) != (oright - ol > ob - ot) && pictureInput != null) pictureInput.cancel();
+            updateSessionLayout.run();
         });
         keyboard = new RemoteKeyboard(this, new RemoteKeyboard.Listener() {
             public void text(String value) { screenAwake.personActed(); sendText(value); }
@@ -694,8 +749,20 @@ public final class MainActivity extends Activity {
     private void settings() {
         boolean reverse = getPreferences(0).getBoolean("reverseScrolling", false);
         boolean gestures = getPreferences(0).getBoolean("macGestures", true);
-        String[] items = {"Mac 画质和帧率", clipboardEnabled ? "关闭剪贴板共享" : "开启剪贴板共享", "将手机剪贴板粘贴到 Mac", audioEnabled ? "关闭声音（重新连接后生效）" : "开启声音测试（重新连接后生效）", reverse ? "滚动方向：反向" : "滚动方向：自然", gestures ? "关闭多指 Mac 手势" : "开启多指 Mac 手势", "断开连接"};
-        new android.app.AlertDialog.Builder(this).setTitle("设置").setItems(items, (dialog, i) -> {
+        float density = getResources().getDisplayMetrics().density;
+        boolean offerLarge = portraitImeHeight <= 0 || PhoneStreamLayout.offersLargerPicture(
+                (root.getWidth() - root.getPaddingLeft() - root.getPaddingRight()) / density,
+                (root.getHeight() - root.getPaddingTop() - root.getPaddingBottom()) / density, portraitImeHeight, false);
+        java.util.ArrayList<String> labels = new java.util.ArrayList<>(java.util.Arrays.asList("Mac 画质和帧率", clipboardEnabled ? "关闭剪贴板共享" : "开启剪贴板共享", "将手机剪贴板粘贴到 Mac", audioEnabled ? "关闭声音（重新连接后生效）" : "开启声音测试（重新连接后生效）", reverse ? "滚动方向：反向" : "滚动方向：自然", gestures ? "关闭多指 Mac 手势" : "开启多指 Mac 手势"));
+        if (offerLarge) labels.add(android.os.Build.VERSION.SDK_INT < 30 ? "大画面：此 Android 版本暂不支持" : portraitImeHeight <= 0 ? "大画面：请先打开键盘以测量高度" : largerPicture ? "关闭大画面" : "开启大画面");
+        labels.add("断开连接");
+        String[] items = labels.toArray(new String[0]);
+        android.view.WindowInsets insets = root.getRootWindowInsets();
+        boolean restoreKeyboard = android.os.Build.VERSION.SDK_INT >= 30 && insets != null
+                ? insets.isVisible(android.view.WindowInsets.Type.ime()) : keyboard.hasFocus();
+        settingsOpen = true;
+        if (restoreKeyboard) ((android.view.inputmethod.InputMethodManager)getSystemService(INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(keyboard.getWindowToken(), 0);
+        android.app.AlertDialog dialog = new android.app.AlertDialog.Builder(this).setTitle("设置").setItems(items, (d, i) -> {
             if (i == 0) hostSettingsMenu();
             if (i == 1) { clipboardEnabled = !clipboardEnabled; getPreferences(0).edit().putBoolean("shareClipboard", clipboardEnabled).apply(); updateClipboard(); }
             if (i == 2) pasteClipboard();
@@ -706,8 +773,22 @@ public final class MainActivity extends Activity {
             }
             if (i == 4) { boolean next = !reverse; getPreferences(0).edit().putBoolean("reverseScrolling", next).apply(); trackpad.setReverseScrolling(next); show(next ? "已启用反向滚动" : "已启用自然滚动"); }
             if (i == 5) { boolean next = !gestures; getPreferences(0).edit().putBoolean("macGestures", next).apply(); trackpad.setMacGesturesEnabled(next && hostGestures >= 1); show(next ? "已开启多指手势" : "已关闭多指手势"); }
-            if (i == 6) disconnect();
-        }).show();
+            if (offerLarge && i == 6) {
+                if (android.os.Build.VERSION.SDK_INT < 30) show("大画面需要 Android 11 或更新版本，以读取键盘高度");
+                else if (portraitImeHeight <= 0) show("请先打开并关闭键盘，让 Sill 测量键盘高度");
+                else { largerPicture = !largerPicture; getPreferences(0).edit().putBoolean("largerPicture", largerPicture).apply(); }
+            }
+            if (i == items.length - 1) disconnect();
+        }).create();
+        dialog.setOnDismissListener(d -> {
+            settingsOpen = false;
+            if (updateSessionLayout != null) updateSessionLayout.run();
+            if (restoreKeyboard && connection != null) keyboard.post(() -> {
+                keyboard.requestFocus();
+                ((android.view.inputmethod.InputMethodManager)getSystemService(INPUT_METHOD_SERVICE)).showSoftInput(keyboard, 0);
+            });
+        });
+        dialog.show();
     }
     private void hostSettingsMenu() {
         JSONObject settings = hostSettings == null ? null : hostSettings.optJSONObject("settings");
@@ -968,6 +1049,7 @@ public final class MainActivity extends Activity {
                     long selectedId = selected == null ? -1 : selected.optLong("_0", -1);
                     if (activeWindowId != selectedId) {
                         activeWindowId = selectedId;
+                        if (!settingsOpen && updateSessionLayout != null) updateSessionLayout.run();
                         scheduleViewport();
                     }
                     for (int i = 0; i < choices.getChildCount(); i++) {
@@ -1119,22 +1201,26 @@ public final class MainActivity extends Activity {
                 Hevc.Parameters params = Hevc.parameters(message.payload()); nalSize = params.lengthSize();
                 lastParameters = params; releaseDecoder(); waitingForKeyframe = true;
                 HostLockState lock = hostLock;
-                if (lock == null || !lock.isCovered()) createDecoder(params);
+                if ((lock == null || !lock.isCovered()) && keyframeForeground && surface != null && surface.isValid()) createDecoder(params);
+                else interruptPicture();
             }
             case 1 -> {
                 HostLockState lock = hostLock;
                 if (lock == null || lock.isCovered()) return;
+                Surface target; long epoch;
+                synchronized (surfaceLock) { target = surface; epoch = surfaceEpoch; }
+                if (target == null || !target.isValid() || !keyframeForeground) { waitingForKeyframe = true; interruptPicture(); return; }
+                // SurfaceHolder can reuse the same Surface Java object after destroying its native
+                // surface. Always rebuild the codec after an epoch change, even if == still holds.
+                if (decoder != null && (decoderEpoch != epoch || target != decoderSurface)) {
+                    releaseDecoder(); waitingForKeyframe = true; interruptPicture();
+                }
                 if (decoder != null) drainVideo();
                 if (!lock.shouldDecode(message.keyframe(), recoveryGeneration)) { interruptPicture(); requestKeyframe(); return; }
                 if (decoder == null) {
-                    if (lastParameters == null) { interruptPicture(); requestKeyframe(); return; }
+                    if (lastParameters == null || !message.keyframe()) { interruptPicture(); requestKeyframe(); return; }
                     createDecoder(lastParameters);
-                }
-                Surface target = surface;
-                if (target == null || !target.isValid()) { waitingForKeyframe = true; interruptPicture(); return; }
-                if (target != decoderSurface) {
-                    decoder.setOutputSurface(target); decoderSurface = target; waitingForKeyframe = true;
-                    interruptPicture();
+                    if (decoder == null || decoderEpoch != surfaceEpoch) { releaseDecoder(); waitingForKeyframe = true; interruptPicture(); return; }
                 }
                 drainVideo();
                 if (waitingForKeyframe && !message.keyframe()) { interruptPicture(); requestKeyframe(); return; }
@@ -1163,7 +1249,7 @@ public final class MainActivity extends Activity {
                 drainVideo();
             }
             case 13 -> {
-                if (decoder != null && ((hostLock != null && hostLock.needsFreshFrame())
+                if (decoder != null && keyframeForeground && surface != null && decoderEpoch == surfaceEpoch && ((hostLock != null && hostLock.needsFreshFrame())
                         || (keyframeRecovery != null && keyframeRecovery.isOpen()))) drainVideo();
                 if (waitingForKeyframe && surface != null) interruptPicture();
                 requestKeyframe();
@@ -1172,13 +1258,17 @@ public final class MainActivity extends Activity {
         }
     }
     private void createDecoder(Hevc.Parameters params) throws Exception {
-        Surface target;
+        Surface target; long targetEpoch;
         synchronized (surfaceLock) {
             long until = android.os.SystemClock.uptimeMillis() + 3000;
             while (surface == null && android.os.SystemClock.uptimeMillis() < until) surfaceLock.wait(100);
-            target = surface;
+            target = surface; targetEpoch = surfaceEpoch;
         }
-        if (target == null || !target.isValid()) throw new IllegalStateException("视频画面不可用");
+        if (target == null || !target.isValid()) {
+            waitingForKeyframe = true;
+            interruptPicture();
+            return;
+        }
         MediaFormat format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_HEVC, 1920, 1080);
         format.setByteBuffer("csd-0", ByteBuffer.wrap(params.codecConfig()));
         SillConnection expected = connection; HostLockState lock = hostLock; KeyframeRecovery recovery = keyframeRecovery;
@@ -1186,7 +1276,10 @@ public final class MainActivity extends Activity {
         try {
             made.configure(format, target, null, 0);
             made.setOnFrameRenderedListener((codec, timeUs, nanoTime) -> {
-                if (connection != expected || hostLock != lock || keyframeRecovery != recovery || decoder != made || lock == null || lock.isCovered()) return;
+                Surface renderedSurface = surface;
+                if (connection != expected || hostLock != lock || keyframeRecovery != recovery || decoder != made || lock == null || lock.isCovered()
+                        || !keyframeForeground || renderedSurface == null || !renderedSurface.isValid() || renderedSurface != decoderSurface
+                        || surfaceEpoch != targetEpoch || decoderEpoch != targetEpoch) return;
                 RecoveryFrame recovered = recoveryFrame.get();
                 if (recovery != null && recovered != null && timeUs >= recovered.presentationUs() && recoveryFrame.compareAndSet(recovered, null))
                     recovery.pictureBack(android.os.SystemClock.uptimeMillis(), keyframeForeground, recovered.generation());
@@ -1198,9 +1291,13 @@ public final class MainActivity extends Activity {
                 renderLockOverlay(lock, expected);
             }, ui);
             made.start(); made.setVideoScalingMode(MediaCodec.VIDEO_SCALING_MODE_SCALE_TO_FIT);
-            decoder = made; decoderSurface = target;
+            decoderSurface = target; decoderEpoch = targetEpoch; decoder = made;
             waitingForKeyframe = true;
-        } catch (Exception e) { made.release(); throw e; }
+        } catch (Exception e) {
+            made.release();
+            if (surfaceEpoch != targetEpoch || !keyframeForeground) { interruptPicture(); return; }
+            throw e;
+        }
     }
     private void renderLockOverlay(HostLockState lock, SillConnection expected) {
         if (connection != expected || hostLock != lock) return;
@@ -1232,7 +1329,7 @@ public final class MainActivity extends Activity {
                 int w = format.getInteger("width"), h = format.getInteger("height");
                 if (format.containsKey("crop-left") && format.containsKey("crop-right")) w = format.getInteger("crop-right") - format.getInteger("crop-left") + 1;
                 if (format.containsKey("crop-top") && format.containsKey("crop-bottom")) h = format.getInteger("crop-bottom") - format.getInteger("crop-top") + 1;
-                if (w > 0 && h > 0) { videoWidth = w; videoHeight = h; ui.post(() -> { layoutVideo(); cursor.invalidate(); }); }
+                if (w > 0 && h > 0) { videoWidth = w; videoHeight = h; ui.post(() -> { if (largerPictureApplied) trackpad.setVerticalRatio((float) videoHeight / videoWidth); layoutVideo(); cursor.invalidate(); }); }
             } else break;
         }
     }
@@ -1273,11 +1370,11 @@ public final class MainActivity extends Activity {
             }).show(); return true;
         });
     }
-    private void releaseDecoder() { recoveryFrame.set(null); revealFrame.set(null); recoveryGeneration = -1; if (decoder != null) { try { decoder.stop(); } catch (Exception ignored) { } decoder.release(); decoder = null; decoderSurface = null; } }
+    private void releaseDecoder() { decoderEpoch = -1; recoveryFrame.set(null); revealFrame.set(null); recoveryGeneration = -1; if (decoder != null) { try { decoder.stop(); } catch (Exception ignored) { } decoder.release(); decoder = null; decoderSurface = null; } }
     private void resetCursorShape() { cursorBitmap = null; cursorShape = null; cursor.invalidate(); }
     @Override protected void onStart() { super.onStart(); if (discovery != null) discovery.start(); startFpsObservers(); }
     @Override protected void onResume() { super.onResume(); keyframeForeground = true; if (screenAwake != null) screenAwake.setForeground(true); }
-    @Override protected void onPause() { keyframeForeground = false; if (keyframeRecovery != null) keyframeRecovery.leftForeground(); if (screenAwake != null) screenAwake.setForeground(false); super.onPause(); }
+    @Override protected void onPause() { keyframeForeground = false; synchronized (surfaceLock) { surfaceEpoch++; } recoveryFrame.set(null); interruptPicture(); if (keyframeRecovery != null) keyframeRecovery.leftForeground(); if (screenAwake != null) screenAwake.setForeground(false); super.onPause(); }
     @Override public void onUserInteraction() { super.onUserInteraction(); if (screenAwake != null) screenAwake.personActed(); }
     @Override protected void onStop() { stopFpsObservers(); clipboardReceipt.cancel(); if (pictureInput != null) pictureInput.cancel(); if (trackpad != null) trackpad.cancelGestures(); if (discovery != null) discovery.stop(); nearby.clear(); nearbyMacs.removeAllViews(); super.onStop(); }
     @Override protected void onDestroy() {

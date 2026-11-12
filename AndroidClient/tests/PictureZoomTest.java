@@ -17,6 +17,21 @@ public class PictureZoomTest {
         assert zoom.frame(200, 100, 200, 100).width() == 1000;
         zoom.reset();
         assert zoom.frame(200, 100, 200, 100).width() == 200;
+        zoom.setTopAligned(true);
+        assert zoom.frame(200, 200, 200, 100).top() == 0;
+        zoom.change(2, 100, 50, 0, 0, 200, 200, 200, 100);
+        assert zoom.frame(200, 200, 200, 100).top() == -50;
+        zoom.change(1, 100, 50, 0, 1000, 200, 200, 200, 100);
+        assert zoom.frame(200, 200, 200, 100).top() == 0;
+        zoom.change(1, 100, 50, 0, -1000, 200, 200, 200, 100);
+        assert zoom.frame(200, 200, 200, 100).top() == -100;
+        var resizedVideo = zoom.frame(200, 200, 200, 50);
+        assert resizedVideo.top() == -50 && resizedVideo.height() == 100;
+        zoom.change(1, 100, 50, 0, 1000, 200, 200, 200, 50);
+        assert zoom.frame(200, 200, 200, 50).top() == 0;
+        zoom.setTopAligned(false);
+        zoom.reset();
+        assert zoom.frame(200, 200, 200, 100).top() == 50;
         System.out.println("Picture zoom checks passed");
     }
 }

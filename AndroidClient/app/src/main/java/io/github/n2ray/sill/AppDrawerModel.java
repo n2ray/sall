@@ -1,7 +1,7 @@
 package io.github.n2ray.sill;
 
 import java.util.ArrayList;
-import java.util.Comparator;
+import java.text.Collator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -26,10 +26,7 @@ final class AppDrawerModel {
         for (var entry : grouped.entrySet()) {
             List<Window> all = entry.getValue();
             String name = all.get(0).appName();
-            List<Window> visible = new ArrayList<>();
-            for (Window window : all)
-                if (matches(name, needle) || matches(window.title(), needle)) visible.add(window);
-            if (!visible.isEmpty()) open.add(new Group(name, safe(all.get(0).bundleId()), java.util.Collections.unmodifiableList(visible)));
+            if (matches(name, needle)) open.add(new Group(name, safe(all.get(0).bundleId()), java.util.Collections.unmodifiableList(all)));
         }
         List<App> closed = new ArrayList<>();
         java.util.Set<String> seen = new java.util.HashSet<>();
@@ -38,8 +35,16 @@ final class AppDrawerModel {
                     || !seen.add(app.bundleId()) || !matches(app.name(), needle)) continue;
             closed.add(app);
         }
-        closed.sort(Comparator.comparing(app -> safe(app.name()).toLowerCase(Locale.ROOT)));
+        Collator collator = Collator.getInstance();
+        closed.sort((a, b) -> collator.compare(safe(a.name()), safe(b.name())));
         return new Results(java.util.Collections.unmodifiableList(open), java.util.Collections.unmodifiableList(closed));
+    }
+    static long nextWindow(Group group, long active) {
+        List<Window> windows = group.windows();
+        if (windows.isEmpty()) return -1;
+        for (int i = 0; i < windows.size(); i++)
+            if (windows.get(i).id() == active) return windows.get((i + 1) % windows.size()).id();
+        return windows.get(0).id();
     }
     private static String safe(String text) { return text == null ? "" : text; }
     private static boolean matches(String text, String needle) { return safe(text).toLowerCase(Locale.ROOT).contains(needle); }

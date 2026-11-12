@@ -8,18 +8,18 @@ Product direction: follow the iOS client's layout and interaction by default. Ea
 
 - [ ] Paired mutual TLS, certificate pinning, incorrect/expired codes, identity changes and revocation: core path works on the Xiaomi over Tailscale; remaining error cases need end-to-end checks.
 - [ ] Discovery and saved Macs: basic local discovery and address/port records exist; add stable Mac identity, names, multiple addresses, route recovery, IPv6, and service-loss handling.
-- [ ] QR/deep-link pairing: Android accepts validated pairing links with explicit identity confirmation; camera scanning, discovery for links without addresses and end-to-end verification remain.
+- [ ] QR/deep-link pairing: Android accepts validated pairing links and has a camera scanner with explicit identity confirmation. Scanner presentation differs from iOS; discovery for links without addresses and end-to-end verification remain.
 - [ ] Reconnect and recovery: bounded retry and keyframe recovery are implemented; verify real Wi-Fi/mobile transitions, Mac sleep/restart, revocation, stalled connections, source continuity, explicit cancellation and interrupted or static video. Handle host goodbye reasons as iOS does.
 - [ ] Host locked/off-console state: ordinary lock and other-user states have separate handling, with a cover until a newly decoded frame is presented. Normal streaming was verified on the Xiaomi; lock/unlock and other-user transitions still require real-device verification.
 
 ## Windows and picture
 
-- [ ] Window catalog, app icons, app launching, menu and thumbnail commands exist. The searchable grouped application drawer was verified on the Xiaomi (search and open); drag-to-reorder, configurable hold time, full menu state and accessible actions remain.
+- [ ] Window catalog, app icons, app launching, menu and thumbnail commands exist. The application drawer now follows iOS app-name search and cycles windows per application; the revised behavior needs Xiaomi verification. iOS-style presentation, drag-to-reorder, configurable hold time, full menu state and accessible actions remain.
 - [ ] Selected-window fitting: iOS starts with Aa off and fits the complete picture without stretching. Test repeated source changes, rotation, app minimum sizes and host refusal; some applications cannot fill the picture without cropping.
 - [ ] Stage Manager may cause the Mac host to supply a tilted thumbnail. The iOS client displays the host thumbnail; Android follows that behavior. Test window closure, source changes and cache cleanup.
 - [ ] Desktop display cycling is implemented only when the host advertises it. The tested Mac 0.6.1 does not; the Android client cannot add the missing host capability.
 - [ ] Zoom, pan and gesture ownership: current 1–5× pinch is present. On 2026-11-12 the user confirmed portrait tap and pinch on the Xiaomi; still test the complete finger lifecycle, cancellation, rotation and focal-point preservation against `StreamZoom.swift`.
-- [ ] Portrait Larger Picture, soft keyboard accommodation and responsive layouts; on 2026-11-12 the user confirmed the landscape top toolbar and large picture. IME behavior, detailed proportions and Larger Picture still need real-device checks.
+- [ ] Portrait Larger Picture, soft keyboard accommodation and responsive layouts; on 2026-11-12 the user confirmed the landscape top toolbar and large picture. Larger Picture is connected, but IME height, detailed proportions and interaction still need real-device checks; its layout and drawer presentation are not yet identical to iOS. Android 10 cannot currently measure the IME height.
 
 ## Input and local interaction
 
