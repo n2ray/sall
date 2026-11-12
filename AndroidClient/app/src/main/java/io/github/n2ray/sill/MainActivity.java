@@ -11,8 +11,6 @@ import android.view.MotionEvent;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
-import android.view.View;
-import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -28,6 +26,8 @@ import java.util.concurrent.Executors;
 /** Initial device client: manually addressed, paired connections to Sill's remote door. */
 public final class MainActivity extends Activity {
     private final ExecutorService network = Executors.newSingleThreadExecutor();
+    private final ExecutorService input = Executors.newSingleThreadExecutor();
+    private final java.util.concurrent.ScheduledExecutorService heartbeat = Executors.newSingleThreadScheduledExecutor();
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final Object outputLock = new Object();
     private volatile SillConnection connection;
@@ -44,9 +44,19 @@ public final class MainActivity extends Activity {
         root = new LinearLayout(this); root.setOrientation(LinearLayout.VERTICAL);
         int pad = (int) (12 * getResources().getDisplayMetrics().density);
         root.setPadding(pad, pad, pad, pad); setContentView(root);
-        status = new TextView(this); status.setText("输入 Mac 地址和配对码，Mac 端需启用 Remote Access。"); root.addView(status);
+        root.setOnApplyWindowInsetsListener((view, insets) -> {
+            if (android.os.Build.VERSION.SDK_INT >= 30) {
+                android.graphics.Insets bars = insets.getInsets(android.view.WindowInsets.Type.systemBars());
+                view.setPadding(pad + bars.left, pad + bars.top, pad + bars.right, pad + bars.bottom);
+            } else {
+                view.setPadding(pad + insets.getSystemWindowInsetLeft(), pad + insets.getSystemWindowInsetTop(),
+                        pad + insets.getSystemWindowInsetRight(), pad + insets.getSystemWindowInsetBottom());
+            }
+            return insets;
+        });
+        status = new TextView(this); status.setText("输入 Mac 地址和配对码；跨网络连接需启用 Remote Access。"); root.addView(status);
         host = field("Mac IP 或 Tailscale 地址", getPreferences(0).getString("host", ""));
-        port = field("端口", "7455"); port.setInputType(2);
+        port = field("端口", getPreferences(0).getString("port", "7455")); port.setInputType(2);
         code = field("Mac 上显示的 12 位配对码", ""); code.setInputType(2);
         Button connect = new Button(this); connect.setText("配对并连接"); root.addView(connect);
         connect.setOnClickListener(v -> connect());
@@ -70,7 +80,7 @@ public final class MainActivity extends Activity {
                 case MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> "leftUp";
                 default -> null;
             };
-            if (action != null) try { sendJson(8, new JSONObject().put("pointer", new JSONObject().put("_0", action).put("x", x).put("y", y))); }
+            if (action != null) try { sendAsync(8, new JSONObject().put("pointer", new JSONObject().put("_0", action).put("x", x).put("y", y))); }
             catch (Exception e) { show("输入失败: " + e.getMessage()); }
             return true;
         });
@@ -78,7 +88,7 @@ public final class MainActivity extends Activity {
         Button send = new Button(this); send.setText("发送文字"); root.addView(send);
         send.setOnClickListener(v -> {
             String text = typing.getText().toString();
-            try { sendJson(8, new JSONObject().put("text", new JSONObject().put("_0", text))); typing.setText(""); }
+            try { sendAsync(8, new JSONObject().put("text", new JSONObject().put("_0", text))); typing.setText(""); }
             catch (Exception e) { show("输入失败: " + e.getMessage()); }
         });
     }
@@ -95,7 +105,7 @@ public final class MainActivity extends Activity {
         try { number = Integer.parseInt(port.getText().toString()); if (address.isEmpty() || number < 1 || number > 65535) throw new IllegalArgumentException(); }
         catch (Exception e) { show("请填写有效地址和端口。"); return; }
         if (running) { show("已有连接，请退出后重试。"); return; }
-        running = true; getPreferences(0).edit().putString("host", address).apply();
+        running = true; getPreferences(0).edit().putString("host", address).putString("port", String.valueOf(number)).apply();
         network.execute(() -> {
             try {
                 String pinKey = "pin:" + address + ":" + number;
@@ -116,8 +126,12 @@ public final class MainActivity extends Activity {
                 try (SillConnection session = SillConnection.connect(address, number, "sill/1", pin)) {
                     connection = session; session.sessionTimeout();
                     sendJson(23, new JSONObject().put("protocol", 1).put("appVersion", "0.1.0").put("device", android.os.Build.MODEL));
+                    var ping = heartbeat.scheduleAtFixedRate(() -> {
+                        try { synchronized (outputLock) { session.send(10, ByteBuffer.allocate(8).putDouble(System.nanoTime() / 1e9).array()); } }
+                        catch (Exception e) { try { session.close(); } catch (Exception ignored) { } }
+                    }, 0, 1, java.util.concurrent.TimeUnit.SECONDS);
                     show("已连接，选择一个窗口或桌面。");
-                    while (running) handle(session.read());
+                    try { while (running) handle(session.read()); } finally { ping.cancel(false); }
                 }
             } catch (Exception e) { android.util.Log.e("SillAndroid", "Connection failed", e); show("连接结束: " + e.getMessage()); }
             finally { connection = null; running = false; releaseDecoder(); }
@@ -129,6 +143,12 @@ public final class MainActivity extends Activity {
             if (c == null) throw new IllegalStateException("尚未连接");
             c.send(kind, value.toString().getBytes(StandardCharsets.UTF_8));
         }
+    }
+    private void sendAsync(int kind, JSONObject value) {
+        input.execute(() -> {
+            try { sendJson(kind, value); }
+            catch (Exception e) { show("发送失败: " + e.getClass().getSimpleName()); }
+        });
     }
     private void handle(StreamWire.Message message) throws Exception {
         switch (message.kind()) {
@@ -172,13 +192,13 @@ public final class MainActivity extends Activity {
     private void addChoice(String title, JSONObject source) {
         Button button = new Button(this); button.setText(title); choices.addView(button);
         button.setOnClickListener(v -> {
-            try { sendJson(6, new JSONObject().put(source.length() == 0 ? "desktop" : "window", source)); }
+            try { sendAsync(6, new JSONObject().put(source.length() == 0 ? "desktop" : "window", source)); }
             catch (Exception e) { show("选择窗口失败: " + e.getMessage()); }
         });
     }
     private void releaseDecoder() { if (decoder != null) { try { decoder.stop(); } catch (Exception ignored) { } decoder.release(); decoder = null; } }
     @Override protected void onDestroy() {
         running = false; SillConnection c = connection; if (c != null) try { c.close(); } catch (Exception ignored) { }
-        network.shutdownNow(); super.onDestroy();
+        network.shutdownNow(); input.shutdownNow(); heartbeat.shutdownNow(); super.onDestroy();
     }
 }

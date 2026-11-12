@@ -24,7 +24,7 @@ import javax.net.ssl.X509TrustManager;
 
 /** A pairing exchange authenticates the temporary peer key before it can be saved. */
 final class SillConnection implements Closeable {
-    private static final String ALIAS = "sill-client-identity";
+    private static final String ALIAS = "sill-client-identity-v2";
     private final SSLSocket socket;
     private final byte[] deviceFingerprint;
     private final byte[] peerFingerprint;
@@ -39,7 +39,7 @@ final class SillConnection implements Closeable {
             KeyPairGenerator generator = KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, "AndroidKeyStore");
             generator.initialize(new KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_SIGN | KeyProperties.PURPOSE_VERIFY)
                     .setAlgorithmParameterSpec(new java.security.spec.ECGenParameterSpec("secp256r1"))
-                    .setDigests(KeyProperties.DIGEST_SHA256).build());
+                    .setDigests(KeyProperties.DIGEST_NONE, KeyProperties.DIGEST_SHA256).build());
             generator.generateKeyPair();
         }
         byte[] own = MessageDigest.getInstance("SHA-256").digest(keys.getCertificate(ALIAS).getPublicKey().getEncoded());
@@ -50,6 +50,7 @@ final class SillConnection implements Closeable {
             public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
             public void checkClientTrusted(X509Certificate[] chain, String authType) throws CertificateException { throw new CertificateException("Unexpected client certificate"); }
             public void checkServerTrusted(X509Certificate[] chain, String authType) throws CertificateException {
+                android.util.Log.i("SillAndroid", "Checking server certificate (" + authType + ")");
                 if (chain == null || chain.length == 0 || !(chain[0].getPublicKey() instanceof ECPublicKey)
                         || ((ECPublicKey) chain[0].getPublicKey()).getParams().getCurve().getField().getFieldSize() != 256)
                     throw new CertificateException("Invalid Sill identity");
