@@ -58,7 +58,9 @@ public final class SavedMacsTest {
         check(java.util.Arrays.equals(store.pin(lan), second), "Explicit re-pairing updates the address pin");
         check(store.all().size() == 2, "Reused address must not merge different Macs");
         check(java.util.Arrays.equals(store.pin(one, lan), first), "Choosing a saved Mac must keep its own pin even when its address is reused");
-        store.forget(one);
+        check(!store.forgetPin(new byte[31]), "Malformed certificate cannot revoke an identity");
+        check(store.forgetPin(first), "Verified certificate can revoke its own identity");
+        check(!store.forgetPin(first), "Repeating a removal cannot affect another identity");
         check(store.pin(one, lan) == null, "A stale saved-Mac dialog cannot reconnect a forgotten identity");
         check(!preferences.values.containsKey(vpn.legacyKey()), "Forget must remove old pins for this Mac");
         check(java.util.Arrays.equals(store.pin(lan), second), "Forget must keep a newer pin at the reused address");

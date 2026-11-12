@@ -32,6 +32,7 @@ public final class MainActivity extends Activity {
     private final Object outputLock = new Object();
     private final Object reconnectLock = new Object();
     private volatile SillConnection connection;
+    private volatile RemoteDial.Attempt pendingDial;
     // Accessed only under outputLock: serializes an automatic first pick with user picks.
     private InitialSourcePolicy initialSource;
     private volatile HostLockState hostLock;
@@ -69,6 +70,7 @@ public final class MainActivity extends Activity {
     private volatile String clipboardSource = "";
     private boolean audioEnabled;
     private volatile AudioPlayer audio;
+    private LocalAudioControl localAudio;
     private PipController pip;
     private boolean pipEnabled, pipUi;
     private int pipReturnWidthDp, pipReturnHeightDp;
@@ -86,6 +88,7 @@ public final class MainActivity extends Activity {
     private android.window.OnBackInvokedCallback settingsBack;
     private android.app.AlertDialog settingsChild;
     private android.app.AlertDialog settingsDialog;
+    private Runnable refreshSettingsMute;
     private boolean settingsRestoreKeyboard;
     private SillConnection settingsSession;
     private int lastViewportFps = -1;
@@ -205,8 +208,16 @@ public final class MainActivity extends Activity {
         button(connectionPanel, "扫描配对码", v -> startActivityForResult(new android.content.Intent(this, PairScannerActivity.class), 102));
         button(connectionPanel, "配对并连接", v -> connect());
         button(connectionPanel, "连接已配对的 Mac", v -> start(false));
+        button(connectionPanel, "取消连接", v -> { if (running) { disconnect(); displayStatus("已取消连接。"); } });
         clipboardEnabled = getPreferences(0).getBoolean("shareClipboard", false);
         audioEnabled = getPreferences(0).getBoolean("experimentalAudio", false);
+        localAudio = new LocalAudioControl(this, getPreferences(0).getBoolean("soundMuted", false), muted -> {
+            getPreferences(0).edit().putBoolean("soundMuted", muted).apply();
+            runOnUiThread(() -> { if (refreshSettingsMute != null) refreshSettingsMute.run(); });
+        }, () -> {
+            show("耳机已断开，本机声音已静音");
+            if (root != null) root.announceForAccessibility("耳机已断开，本机声音已静音");
+        });
         refreshSavedMacs();
         buildSession();
         initializePip();
@@ -323,14 +334,7 @@ public final class MainActivity extends Activity {
         for (SavedMacs.Mac mac : savedMacStore.all()) {
             String label = mac.displayName() + "  ·  " + mac.preferred().display();
             if (mac.addresses().size() > 1) label += "  (" + mac.addresses().size() + " 个地址)";
-            Button row = button(savedMacs, label, v -> {
-                if (mac.addresses().size() == 1) { connectSavedMac(mac.identity(), mac.preferred()); return; }
-                java.util.List<SavedMacs.Endpoint> endpoints = new java.util.ArrayList<>(mac.addresses());
-                endpoints.remove(mac.preferred()); endpoints.add(0, mac.preferred());
-                String[] labels = endpoints.stream().map(SavedMacs.Endpoint::display).toArray(String[]::new);
-                new android.app.AlertDialog.Builder(this).setTitle(mac.displayName()).setItems(labels,
-                        (dialog, which) -> connectSavedMac(mac.identity(), endpoints.get(which))).setNegativeButton("取消", null).show();
-            });
+            Button row = button(savedMacs, label, v -> connectSavedMac(mac.identity(), mac.preferred()));
             row.setOnLongClickListener(v -> {
                 new android.app.AlertDialog.Builder(this).setTitle("移除本机记录？")
                     .setMessage("这只移除手机上的记录；如需撤销 Mac 的信任，请在 Mac 的 Sill 设置中移除设备。")
@@ -954,6 +958,9 @@ public final class MainActivity extends Activity {
         int holdIndex = labels.size();
         int holdTenths = Math.max(2, Math.min(20, getPreferences(0).getInt("thumbnailHoldTenths", 5)));
         labels.add("窗口控制长按时间：" + (holdTenths / 10f) + " 秒");
+        int muteIndex = labels.size();
+        labels.add(localAudio.muted() ? "取消本机静音" : "本机静音");
+        boolean[] muteShown = {localAudio.muted()};
         labels.add("断开连接");
         String[] items = labels.toArray(new String[0]);
         if (!reanchor) {
@@ -986,6 +993,7 @@ public final class MainActivity extends Activity {
                 else { largerPicture = !largerPicture; getPreferences(0).edit().putBoolean("largerPicture", largerPicture).apply(); }
             }
             if (i == pipIndex && pip != null && pip.supported()) { pipEnabled = !pipEnabled; getPreferences(0).edit().putBoolean("pictureInPicture", pipEnabled).apply(); }
+            if (i == muteIndex) localAudio.setMuted(!muteShown[0]);
             if (i == holdIndex) {
                 String[] durations = new String[19];
                 for (int n = 0; n < durations.length; n++) durations[n] = ((n + 2) / 10f) + " 秒";
@@ -1017,6 +1025,10 @@ public final class MainActivity extends Activity {
                 final int index = n;
                 TextView row = new TextView(this); row.setText(items[n]); row.setTextColor(-1); row.setTextSize(15);
                 if (n == holdIndex) row.setTag("thumbnailHold");
+                if (n == muteIndex) {
+                    row.setTag("localAudioMute");
+                    refreshSettingsMute = () -> { muteShown[0] = localAudio.muted(); row.setText(muteShown[0] ? "取消本机静音" : "本机静音"); };
+                }
                 row.setGravity(android.view.Gravity.CENTER_VERTICAL); row.setPadding(dp(12), 0, dp(12), 0); row.setMinHeight(dp(48));
                 row.setOnClickListener(v -> {
                     choose.accept(index);
@@ -1040,8 +1052,14 @@ public final class MainActivity extends Activity {
                 getOnBackInvokedDispatcher().registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, settingsBack);
             }
         } else {
-            android.app.AlertDialog dialog = new android.app.AlertDialog.Builder(this).setTitle("设置").setItems(items, (d, i) -> choose.accept(i)).create();
+            android.widget.ArrayAdapter<String> adapter = new android.widget.ArrayAdapter<>(this, android.R.layout.select_dialog_item, items);
+            android.app.AlertDialog dialog = new android.app.AlertDialog.Builder(this).setTitle("设置").setAdapter(adapter, (d, i) -> choose.accept(i)).create();
             settingsDialog = dialog;
+            refreshSettingsMute = () -> {
+                muteShown[0] = localAudio.muted();
+                items[muteIndex] = muteShown[0] ? "取消本机静音" : "本机静音";
+                adapter.notifyDataSetChanged();
+            };
             dialog.setOnDismissListener(d -> {
                 android.util.Log.i("SillAndroid", "Settings: dialog dismissed current=" + (settingsDialog == dialog) + " child=" + (settingsChild != null));
                 if (settingsDialog != dialog) return; settingsDialog = null; if (!settingsReanchoring && settingsChild == null) finishSettings();
@@ -1099,6 +1117,7 @@ public final class MainActivity extends Activity {
     }
     private void finishSettings() {
         if (!settingsOpen) return;
+        refreshSettingsMute = null;
         android.util.Log.i("SillAndroid", "Settings: finished");
         settingsOpen = false;
         if (updateSessionLayout != null) updateSessionLayout.run();
@@ -1184,7 +1203,9 @@ public final class MainActivity extends Activity {
         dismissWindowControls(); cancelWindowDrag();
         pictureInput.cancel();
         trackpad.cancelGestures();
-        clipboardReceipt.cancel(); keyboard.finishAndForget(); closing = true; SillConnection c = connection;
+        clipboardReceipt.cancel(); keyboard.finishAndForget(); closing = true;
+        RemoteDial.Attempt dial = pendingDial; if (dial != null) dial.close();
+        SillConnection c = connection;
         synchronized (reconnectLock) { reconnectLock.notifyAll(); }
         if (c != null) try { c.close(); } catch (Exception ignored) { }
     }
@@ -1227,9 +1248,15 @@ public final class MainActivity extends Activity {
                 if (pairing) {
                     show("正在配对…");
                     SavedMacs.Identity identity;
-                    try (SillConnection pair = SillConnection.connect(address, number, "sill-pair/1", null)) {
-                        identity = pair.pairIdentity(password, android.os.Build.MODEL, android.os.Build.DEVICE);
-                    }
+                    RemoteDial.Attempt pairingAttempt = new RemoteDial.Attempt();
+                    pendingDial = pairingAttempt;
+                    try {
+                        if (!running || closing) pairingAttempt.close();
+                        try (SillConnection pair = SillConnection.connect(address, number, "sill-pair/1", null, 10000, 15000, pairingAttempt)) {
+                            identity = pair.pairIdentity(password, android.os.Build.MODEL, android.os.Build.DEVICE);
+                            pairingAttempt.check();
+                        }
+                    } finally { pairingAttempt.close(); pendingDial = null; }
                     savedMacStore.paired(identity, endpoint); pin = identity.pin();
                     ui.post(() -> { code.setText(""); refreshSavedMacs(); });
                 } else {
@@ -1244,19 +1271,53 @@ public final class MainActivity extends Activity {
                     long connectedAt = 0;
                     try {
                         if (!established) show("正在连接…");
-                        try (SillConnection session = SillConnection.connect(address, number, "sill/1", pin)) {
+                        RemoteDial.Attempt dial = new RemoteDial.Attempt();
+                        pendingDial = dial;
+                        boolean wantsAudio = audioEnabled && AudioPlayer.supported();
+                        JSONObject greeting = new JSONObject().put("protocol", 1).put("appVersion", "0.1.0").put("device", android.os.Build.MODEL);
+                        if (wantsAudio) greeting.put("audio", new JSONArray().put("aac-eld"));
+                        RemoteDial.Connected<ReadyStream> route;
+                        try {
+                            if (!running || closing) dial.close();
+                            route = RemoteDial.connect(RemoteDial.order(savedMacStore.all(), pin, endpoint,
+                                    !established && (selectedIdentity == null || recognitionTag != null)), pin, dial,
+                                    (candidate, identityPin, attempt) -> {
+                                        SillConnection candidateSession = SillConnection.connect(candidate.host(), candidate.port(),
+                                                "sill/1", identityPin, RemoteDial.CONNECT_MS, RemoteDial.HANDSHAKE_MS, attempt);
+                                        try {
+                                            candidateSession.send(23, greeting.toString().getBytes(StandardCharsets.UTF_8));
+                                            candidateSession.send(27, new JSONObject().toString().getBytes(StandardCharsets.UTF_8));
+                                            var initial = FirstWindowList.await(candidateSession::readUntil, message -> {
+                                                if (message.kind() == 22) {
+                                                    synchronized (attempt) {
+                                                        attempt.check();
+                                                        if (pendingDial != attempt || !running || closing) throw new java.util.concurrent.CancellationException();
+                                                        handle(message, candidateSession, attempt);
+                                                    }
+                                                    return;
+                                                }
+                                                String json = StandardCharsets.UTF_8.newDecoder().onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                                                        .decode(ByteBuffer.wrap(message.payload())).toString();
+                                                org.json.JSONTokener tokener = new org.json.JSONTokener(json);
+                                                Object value = tokener.nextValue();
+                                                if (!(value instanceof JSONObject object) || tokener.nextClean() != 0
+                                                        || !(object.opt("windows") instanceof JSONArray)) throw new java.io.IOException("Invalid Mac window list");
+                                            });
+                                            return new ReadyStream(candidateSession, initial);
+                                        } catch (Exception error) { RemoteDial.closeAfterFailure(candidateSession, error); throw error; }
+                                    });
+                        } finally { pendingDial = null; }
+                        try (SillConnection session = route.value().session()) {
                             if (!running || closing) break;
-                            savedMacStore.connected(pin, endpoint);
+                            savedMacStore.connected(pin, route.endpoint());
                             HostLockState sessionLock = new HostLockState(false); sessionLock.requireFreshFrame();
                             picturePresented = false; hostLock = sessionLock; keyframeRecovery = new KeyframeRecovery(); keyframeStreaming = false; keyframeWorstRtt = 0; keyframeRttWindow = 0; recoveryFrame.set(null); lastParameters = null; revealFrame.set(null); recoveryGeneration = -1;
                             pointerSync = new PointerSync();
                             synchronized (outputLock) { initialSource = new InitialSourcePolicy(); connection = session; }
                             session.sessionTimeout();
                             ui.post(() -> { if (connection == session) { renderLockOverlay(sessionLock, session); connectionContainer.setVisibility(android.view.View.GONE); sessionPanel.setVisibility(android.view.View.VISIBLE); picture.post(this::sendViewport); } });
-                            JSONObject hello = new JSONObject().put("protocol", 1).put("appVersion", "0.1.0").put("device", android.os.Build.MODEL);
-                            if (audioEnabled && AudioPlayer.supported()) { audio = new AudioPlayer(text -> showFor(session, text)); audio.setPlaybackEnabled(pictureWatched()); hello.put("audio", new JSONArray().put("aac-eld")); }
-                            sendJson(23, hello);
-                            sendJson(27, new JSONObject());
+                            if (wantsAudio) { audio = new AudioPlayer(text -> showFor(session, text)); localAudio.setWatched(pictureWatched()); localAudio.setPlayer(audio); }
+                            for (StreamWire.Message initial : route.value().initial()) handle(initial, session);
                             KeyframeRecovery sessionRecovery = keyframeRecovery;
                             var ping = heartbeat.scheduleAtFixedRate(() -> {
                                 try { synchronized (outputLock) { if (connection != session) return; session.send(10, ByteBuffer.allocate(8).putDouble(System.nanoTime() / 1e9).array()); } requestKeyframe(session, sessionRecovery); }
@@ -1272,11 +1333,14 @@ public final class MainActivity extends Activity {
                         if (pip != null && pip.active()) { ui.post(pip::stop); break; }
                         if (connectedAt != 0 && android.os.SystemClock.uptimeMillis() - connectedAt >= 10000) retries = 0;
                         long delay = ReconnectPolicy.delayMillis(retries);
-                        if (!established || !ReconnectPolicy.retryable(error) || delay < 0) throw error;
+                        GoodbyePolicy.Outcome goodbye = error instanceof GoodbyePolicy.Ended ended ? ended.outcome : null;
+                        // Local-only redial needs authenticated discovery route metadata; stop until it exists.
+                        if (goodbye != null && (!goodbye.reconnect() || !goodbye.remoteAllowed())) throw error;
+                        if (!established || (goodbye == null && !ReconnectPolicy.retryable(error)) || delay < 0) throw error;
                         retries++;
                         if (pip != null && pip.active()) ui.post(pip::stop);
                 connection = null; hostLock = null; keyframeRecovery = null; keyframeStreaming = false; recoveryFrame.set(null); lastParameters = null; revealFrame.set(null); recoveryGeneration = -1; pointerSync = null; clipboardSubscribed = false; hostClipboardAvailable = false; clipboardSource = ""; clipboardReceipt.cancel(); releaseDecoder();
-                        if (audio != null) { audio.close(); audio = null; }
+                        if (audio != null) { localAudio.setPlayer(null); audio.close(); audio = null; }
                         ui.post(() -> {
                             dismissSettings(false); dismissStaleMenu(); dismissWindowControls(); cancelWindowDrag();
                             hostSettings = null; pendingSettingsToken = 0; desktopDisplays = -1; desktopDisplay = 0; desktopActive = false; hostGestures = 0; hostKeyRepeat = false; hostKeyRepeatKnown = false; trackpad.setMacGesturesEnabled(false);
@@ -1285,18 +1349,24 @@ public final class MainActivity extends Activity {
                             screenAwake.setStreaming(false); pictureInput.cancel(); trackpad.cancelGestures(); keyboard.discard(); resetCursorShape();
                             modifiers = heldModifiers = 0; for (android.view.View button : modifierViews.values()) button.setBackground(shape(0xff272a30, 12));
                         });
-                        show("连接中断，正在重新连接（" + retries + "/4）…");
+                        show(goodbye == null ? "连接中断，正在重新连接（" + retries + "/4）…" : goodbye.text());
                         synchronized (reconnectLock) { if (running && !closing) reconnectLock.wait(delay); }
                     }
                 }
-            } catch (Exception e) { if (!closing) { android.util.Log.e("SillAndroid", "Connection failed", e); ui.post(() -> displayStatus("连接结束: " + e.getMessage())); } }
+            } catch (Exception e) { if (!closing) {
+                if (e instanceof GoodbyePolicy.Ended ended) ui.post(() -> displayStatus(ended.outcome.text()));
+                else { android.util.Log.e("SillAndroid", "Connection failed", e); ui.post(() -> displayStatus("连接结束: " + e.getMessage())); }
+            } }
             finally {
                 if (pip != null && pip.active()) ui.post(pip::stop);
                 connection = null; hostLock = null; keyframeRecovery = null; keyframeStreaming = false; recoveryFrame.set(null); lastParameters = null; revealFrame.set(null); recoveryGeneration = -1; pointerSync = null; clipboardSubscribed = false; hostClipboardAvailable = false; clipboardSource = ""; clipboardReceipt.cancel(); releaseDecoder();
-                if (audio != null) { audio.close(); audio = null; }
+                if (audio != null) { localAudio.setPlayer(null); audio.close(); audio = null; }
                 ui.post(() -> { dismissSettings(false); dismissStaleMenu(); dismissWindowControls(); cancelWindowDrag(); hostSettings = null; pendingSettingsToken = 0; desktopDisplays = -1; desktopDisplay = 0; desktopActive = false; hostGestures = 0; hostKeyRepeat = false; hostKeyRepeatKnown = false; trackpad.setMacGesturesEnabled(false); desktopButton.setText("桌面"); thumbnailImages.clear(); appIcons.clear(); iconBadges.clear(); activeWindowId = -1; if (appDrawer != null) appDrawer.dismiss(); drawerWindows = new JSONArray(); appList = new JSONArray(); zoom.reset(); screenAwake.setStreaming(false); pictureInput.cancel(); trackpad.cancelGestures(); keyboard.discard(); resetCursorShape(); modifiers = heldModifiers = 0; for (android.view.View button : modifierViews.values()) button.setBackground(shape(0xff272a30, 12)); sessionPanel.setVisibility(android.view.View.GONE); connectionContainer.setVisibility(android.view.View.VISIBLE); running = false; });
             }
         });
+    }
+    private record ReadyStream(SillConnection session, java.util.List<StreamWire.Message> initial) implements java.io.Closeable {
+        @Override public void close() throws java.io.IOException { session.close(); }
     }
     private void sendJson(int kind, JSONObject value) throws Exception {
         synchronized (outputLock) {
@@ -1364,6 +1434,9 @@ public final class MainActivity extends Activity {
                 || scroll != null && ("ended".equals(scroll.optString("_0")) || "momentumEnded".equals(scroll.optString("_0")));
     }
     private void handle(StreamWire.Message message, SillConnection messageSession) throws Exception {
+        handle(message, messageSession, null);
+    }
+    private void handle(StreamWire.Message message, SillConnection messageSession, RemoteDial.Attempt candidateAttempt) throws Exception {
         switch (message.kind()) {
             case 18 -> {
                 if (messageSession != connection || message.payload().length > 98304) return;
@@ -1626,7 +1699,7 @@ public final class MainActivity extends Activity {
                     });
                 }
             }
-            case 43 -> { if (audio != null) audio.receive(message.payload()); }
+            case 43 -> { AudioPlayer player = audio; if (player != null) { byte[] data = message.payload(); localAudio.received(data); player.receive(data); } }
             case 0 -> {
                 Hevc.Parameters params = Hevc.parameters(message.payload()); nalSize = params.lengthSize();
                 lastParameters = params;
@@ -1688,7 +1761,30 @@ public final class MainActivity extends Activity {
                 if (waitingForKeyframe && surface != null) interruptPicture();
                 requestKeyframe();
             }
-            case 22 -> throw new IllegalStateException(new String(message.payload(), StandardCharsets.UTF_8));
+            case 22 -> {
+                java.util.Map<String, Object> fields = new java.util.HashMap<>();
+                try {
+                    String json = StandardCharsets.UTF_8.newDecoder().onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                            .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+                            .decode(ByteBuffer.wrap(message.payload())).toString();
+                    org.json.JSONTokener tokener = new org.json.JSONTokener(json);
+                    Object parsed = tokener.nextValue();
+                    if (!(parsed instanceof JSONObject object) || tokener.nextClean() != 0)
+                        throw new org.json.JSONException("Invalid goodbye");
+                    for (String key : new String[]{"reason", "message", "minimumVersion", "reconnect"})
+                        if (object.has(key) && !object.isNull(key)) fields.put(key, object.get(key));
+                } catch (org.json.JSONException | java.nio.charset.CharacterCodingException ignored) { fields.clear(); }
+                GoodbyePolicy.Goodbye goodbye = GoodbyePolicy.decode(fields);
+                byte[] pin = messageSession.peerFingerprint();
+                SavedMacs.Identity identity = null;
+                for (SavedMacs.Mac mac : savedMacStore.all())
+                    if (java.security.MessageDigest.isEqual(pin, mac.identity().pin())) { identity = mac.identity(); break; }
+                GoodbyePolicy.Outcome result = GoodbyePolicy.outcome(goodbye, identity == null ? "Mac" : identity.name(), identity != null);
+                if ("removed".equals(goodbye.reason()) && (connection == messageSession
+                        || candidateAttempt != null && pendingDial == candidateAttempt && running && !closing) && savedMacStore.forgetPin(pin))
+                    ui.post(this::refreshSavedMacs);
+                throw new GoodbyePolicy.Ended(result);
+            }
         }
     }
     private void createDecoder(Hevc.Parameters params) throws Exception {
@@ -2018,7 +2114,7 @@ public final class MainActivity extends Activity {
             if (updateSessionLayout != null) updateSessionLayout.run();
             picture.post(this::sendViewport);
         }
-        if (audio != null) audio.setPlaybackEnabled(pictureWatched());
+        if (localAudio != null) localAudio.setWatched(pictureWatched());
         if (pictureWatched()) interruptPicture();
     }
     private void layoutPip() {
@@ -2030,7 +2126,7 @@ public final class MainActivity extends Activity {
     @Override protected void onResume() {
         super.onResume(); keyframeForeground = true;
         android.util.Log.i("SillAndroid", "Recovery: foreground");
-        if (audio != null) audio.setPlaybackEnabled(pictureWatched());
+        if (localAudio != null) localAudio.setWatched(pictureWatched());
         if (screenAwake != null) screenAwake.setForeground(true);
         if (picture != null) picture.post(this::sendViewport);
     }
@@ -2042,7 +2138,7 @@ public final class MainActivity extends Activity {
             recoveryFrame.set(null); interruptPicture();
             if (keyframeRecovery != null) keyframeRecovery.leftForeground();
         }
-        if (audio != null) audio.setPlaybackEnabled(pictureWatched());
+        if (localAudio != null) localAudio.setWatched(pictureWatched());
         if (screenAwake != null) screenAwake.setForeground(false);
         super.onPause();
     }
@@ -2060,9 +2156,10 @@ public final class MainActivity extends Activity {
     @Override protected void onStop() { if (pip != null && pip.active()) pip.stop(); dismissSettings(false); dismissMenu(); if (appDrawer != null) appDrawer.dismiss(); dismissWindowControls(); cancelWindowDrag(); stopFpsObservers(); clipboardReceipt.cancel(); if (pictureInput != null) pictureInput.cancel(); if (trackpad != null) trackpad.cancelGestures(); if (discovery != null) discovery.stop(); nearby.clear(); nearbyMacs.removeAllViews(); super.onStop(); }
     @Override protected void onDestroy() {
         if (pip != null) pip.close();
+        if (localAudio != null) localAudio.close();
         stopFpsObservers();
         if (screenAwake != null) screenAwake.close();
-        running = false; SillConnection c = connection; if (c != null) try { c.close(); } catch (Exception ignored) { }
+        running = false; RemoteDial.Attempt dial = pendingDial; if (dial != null) dial.close(); SillConnection c = connection; if (c != null) try { c.close(); } catch (Exception ignored) { }
         synchronized (reconnectLock) { reconnectLock.notifyAll(); }
         network.shutdownNow(); input.shutdownNow(); heartbeat.shutdownNow(); super.onDestroy();
     }

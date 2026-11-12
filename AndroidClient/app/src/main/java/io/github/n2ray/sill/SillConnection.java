@@ -38,6 +38,11 @@ final class SillConnection implements Closeable {
     }
 
     static SillConnection connect(String host, int port, String alpn, byte[] pin, int connectTimeout, int readTimeout) throws Exception {
+        return connect(host, port, alpn, pin, connectTimeout, readTimeout, null);
+    }
+
+    static SillConnection connect(String host, int port, String alpn, byte[] pin, int connectTimeout, int readTimeout,
+                                  RemoteDial.Attempt attempt) throws Exception {
         KeyStore keys = KeyStore.getInstance("AndroidKeyStore"); keys.load(null);
         if (!keys.containsAlias(ALIAS)) {
             KeyPairGenerator generator = KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, "AndroidKeyStore");
@@ -69,6 +74,7 @@ final class SillConnection implements Closeable {
         context.init(km.getKeyManagers(), new TrustManager[] {trust}, new SecureRandom());
         Socket tcp = new Socket();
         try {
+            if (attempt != null) attempt.attach(tcp);
             tcp.connect(new InetSocketAddress(host, port), connectTimeout); tcp.setTcpNoDelay(true); tcp.setSoTimeout(readTimeout);
             SSLSocket tls = (SSLSocket) context.getSocketFactory().createSocket(tcp, host, port, true);
             tls.setSoTimeout(readTimeout);
@@ -123,6 +129,17 @@ final class SillConnection implements Closeable {
     }
 
     StreamWire.Message read() throws IOException { return StreamWire.read(socket.getInputStream()); }
+    StreamWire.Message readUntil(long deadlineNanos) throws IOException {
+        return StreamWire.read(new java.io.FilterInputStream(socket.getInputStream()) {
+            private void remaining() throws IOException {
+                long nanos = deadlineNanos - System.nanoTime();
+                if (nanos <= 0) throw new java.net.SocketTimeoutException("Mac did not send its window list");
+                socket.setSoTimeout((int) Math.max(1, java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(nanos)));
+            }
+            @Override public int read() throws IOException { remaining(); return in.read(); }
+            @Override public int read(byte[] bytes, int offset, int length) throws IOException { remaining(); return in.read(bytes, offset, length); }
+        });
+    }
     byte[] peerFingerprint() { return peerFingerprint.clone(); }
     void send(int kind, byte[] data) throws IOException { StreamWire.write(socket.getOutputStream(), kind, data); }
     void sessionTimeout() throws IOException { socket.setSoTimeout(0); }

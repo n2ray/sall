@@ -12,6 +12,8 @@ java -ea -cp "$test_dir" io.github.n2ray.sill.PictureZoomTest
 java -ea -cp "$test_dir" io.github.n2ray.sill.AudioPacketsTest
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/AudioPcmWriter.java "$root"/tests/AudioPcmWriterTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sill.AudioPcmWriterTest
+javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/AudioMutePolicy.java "$root"/tests/AudioMutePolicyTest.java
+java -ea -cp "$test_dir" io.github.n2ray.sill.AudioMutePolicyTest
 java -ea -cp "$test_dir" io.github.n2ray.sill.DesktopNavigationTest
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/RemoteTextState.java "$root"/tests/RemoteTextStateTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sill.RemoteTextStateTest
@@ -21,6 +23,8 @@ javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/CursorShapeB
 java -ea -cp "$test_dir" io.github.n2ray.sill.CursorShapeBlobTest
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/ReconnectPolicy.java "$root"/tests/ReconnectPolicyTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sill.ReconnectPolicyTest
+javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/GoodbyePolicy.java "$root"/tests/GoodbyePolicyTest.java
+java -ea -cp "$test_dir" io.github.n2ray.sill.GoodbyePolicyTest
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/AppIconBlob.java "$root"/tests/AppIconBlobTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sill.AppIconBlobTest
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/ClipboardReceipt.java "$root"/tests/ClipboardReceiptTest.java
@@ -71,3 +75,7 @@ javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/PipPolicy.ja
 java -ea -cp "$test_dir" io.github.n2ray.sill.PipPolicyTest
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/PairLink.java "$root"/app/src/main/java/io/github/n2ray/sill/SavedMacs.java "$root"/app/src/main/java/io/github/n2ray/sill/SignedMacInfo.java "$root"/tests/SignedMacInfoTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sill.SignedMacInfoTest "$root"/tests/fixtures/mac-info/cryptokit.properties
+javac -cp "$test_dir" -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/RemoteDial.java "$root"/tests/RemoteDialTest.java
+java -ea -cp "$test_dir" io.github.n2ray.sill.RemoteDialTest
+javac -cp "$test_dir" -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/FirstWindowList.java "$root"/tests/FirstWindowListTest.java
+java -ea -cp "$test_dir" io.github.n2ray.sill.FirstWindowListTest

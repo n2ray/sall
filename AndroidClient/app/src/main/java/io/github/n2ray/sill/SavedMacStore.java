@@ -122,6 +122,16 @@ final class SavedMacStore {
         edit.apply();
     }
 
+    /** A removal notice may revoke only the full certificate identity of its TLS session. */
+    synchronized boolean forgetPin(byte[] pin) {
+        if (pin == null || pin.length != 32) return false;
+        for (SavedMacs.Mac mac : all()) if (java.security.MessageDigest.isEqual(pin, mac.identity().pin())) {
+            forget(mac.identity());
+            return true;
+        }
+        return false;
+    }
+
     private static SharedPreferences.Editor write(List<SavedMacs.Mac> records, SharedPreferences.Editor edit) {
         for (Map.Entry<String, Object> entry : SavedMacs.encode(records).entrySet()) {
             if (entry.getValue() instanceof String value) edit.putString(entry.getKey(), value);
