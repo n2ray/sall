@@ -40,6 +40,7 @@ public final class MainActivity extends Activity {
     private RemoteKeyboard keyboard;
     private TrackpadView trackpad;
     private android.widget.FrameLayout picture;
+    private SurfaceView video;
     private android.view.View cursor;
     private final java.util.Map<Long, android.widget.ImageView> thumbnails = new java.util.HashMap<>();
     private final Object surfaceLock = new Object();
@@ -47,7 +48,10 @@ public final class MainActivity extends Activity {
     private boolean audioEnabled;
     private AudioPlayer audio;
     private boolean clipboardSubscribed;
-    private Double textScale;
+    private Double textScale = .75;
+    private int desktopDisplays = -1, desktopDisplay;
+    private boolean desktopActive;
+    private Button desktopButton, orientationButton;
     private volatile boolean closing;
     private long modifiers;
     private JSONArray appList = new JSONArray(), macMenus = new JSONArray();
@@ -155,9 +159,9 @@ public final class MainActivity extends Activity {
         picture = new android.widget.FrameLayout(this); picture.setBackground(shape(0xff000000, 12));
         sessionPanel.addView(picture, new LinearLayout.LayoutParams(-1, dp(230)));
         picture.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, oright, ob) -> {
-            if ((r - l) != (oright - ol) || (b - t) != (ob - ot)) picture.post(this::sendViewport);
+            if ((r - l) != (oright - ol) || (b - t) != (ob - ot)) picture.post(() -> { layoutVideo(); sendViewport(); });
         });
-        SurfaceView video = new SurfaceView(this); picture.addView(video, new android.widget.FrameLayout.LayoutParams(-1, -1));
+        video = new SurfaceView(this); picture.addView(video, new android.widget.FrameLayout.LayoutParams(-1, -1));
         video.getHolder().addCallback(new SurfaceHolder.Callback() {
             public void surfaceCreated(SurfaceHolder holder) {
                 synchronized (surfaceLock) { surface = holder.getSurface(); surfaceLock.notifyAll(); }
@@ -187,6 +191,9 @@ public final class MainActivity extends Activity {
             if (connection == null) return false;
             if (view.getWidth() == 0 || view.getHeight() == 0) return false;
             FrameGeometry.Rect frame = FrameGeometry.fit(view.getWidth(), view.getHeight(), videoWidth, videoHeight);
+            if (event.getActionMasked() == MotionEvent.ACTION_DOWN &&
+                    (event.getX() < frame.left() || event.getX() > frame.left() + frame.width() ||
+                     event.getY() < frame.top() || event.getY() > frame.top() + frame.height())) return false;
             float x = frame.x(event.getX()), y = frame.y(event.getY());
             String action = switch (event.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN -> "leftDown"; case MotionEvent.ACTION_MOVE -> "move";
@@ -200,21 +207,15 @@ public final class MainActivity extends Activity {
         barButton(bar, "菜单", v -> showMenu(macMenus, "Mac 菜单", menuVersion));
         barButton(bar, "Aa", v -> chooseScale());
         barButton(bar, "键盘", v -> { keyboard.requestFocus(); ((android.view.inputmethod.InputMethodManager)getSystemService(INPUT_METHOD_SERVICE)).showSoftInput(keyboard, 0); });
-        barButton(bar, "桌面", v -> select(new JSONObject(), true));
+        desktopButton = barButton(bar, "桌面", v -> tapDesktop());
+        orientationButton = barButton(bar, "横屏", v -> setRequestedOrientation(
+                getResources().getConfiguration().orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
+                        ? android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                        : android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE));
         barButton(bar, "设置", v -> settings());
         android.widget.HorizontalScrollView strip = new android.widget.HorizontalScrollView(this);
         strip.setHorizontalScrollBarEnabled(false); choices = new LinearLayout(this); choices.setOrientation(LinearLayout.HORIZONTAL);
         strip.addView(choices); sessionPanel.addView(strip, new LinearLayout.LayoutParams(-1, dp(72)));
-        root.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, oright, ob) -> {
-            boolean landscape = r - l > b - t;
-            strip.setVisibility(landscape ? android.view.View.GONE : android.view.View.VISIBLE);
-            int width = r - l - root.getPaddingLeft() - root.getPaddingRight();
-            int height = b - t - root.getPaddingTop() - root.getPaddingBottom();
-            int wanted = Math.min(Math.round(width / 1.6f), Math.round(height * (landscape ? .35f : .42f)));
-            if (wanted > 0 && picture.getLayoutParams().height != wanted) {
-                picture.getLayoutParams().height = wanted; picture.requestLayout();
-            }
-        });
         LinearLayout keys = new LinearLayout(this); keyRow = keys; sessionPanel.addView(keys);
         barButton(keys, "esc", v -> tapKey(41)); barButton(keys, "tab", v -> tapKey(43));
         modifier(keys, "ctrl", 1L << 18); modifier(keys, "opt", 1L << 19);
@@ -224,15 +225,51 @@ public final class MainActivity extends Activity {
             public void scroll(String phase, float x, float y, float dx, float dy) { sendScroll(phase, x, y, dx, dy); }
         });
         sessionPanel.addView(trackpad, new LinearLayout.LayoutParams(-1, 0, 1));
+        LinearLayout rightPane = new LinearLayout(this); rightPane.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout keysSecond = new LinearLayout(this);
+        root.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, oright, ob) -> {
+            boolean landscape = r - l > b - t;
+            int visible = landscape ? android.view.View.GONE : android.view.View.VISIBLE;
+            sessionStatus.setVisibility(visible); strip.setVisibility(visible);
+            orientationButton.setText(landscape ? "竖屏" : "横屏");
+            if (landscape && rightPane.getParent() == null) {
+                sessionPanel.removeView(bar); sessionPanel.removeView(keys); sessionPanel.removeView(trackpad);
+                for (int i = 0; i < 3; i++) { android.view.View key = keys.getChildAt(3); keys.removeViewAt(3); keysSecond.addView(key); }
+                rightPane.addView(keys); rightPane.addView(keysSecond); rightPane.addView(trackpad, new LinearLayout.LayoutParams(-1, 0, 1));
+                sessionPanel.setOrientation(LinearLayout.HORIZONTAL);
+                sessionPanel.addView(bar, 1, new LinearLayout.LayoutParams(dp(65), -1));
+                sessionPanel.addView(rightPane, sessionPanel.indexOfChild(strip) + 1, new LinearLayout.LayoutParams(dp(150), -1));
+                bar.setOrientation(LinearLayout.VERTICAL);
+                for (int i = 0; i < bar.getChildCount(); i++) bar.getChildAt(i).setLayoutParams(new LinearLayout.LayoutParams(-1, 0, 1));
+            } else if (!landscape && rightPane.getParent() != null) {
+                sessionPanel.removeView(bar); sessionPanel.removeView(rightPane);
+                rightPane.removeView(keys); rightPane.removeView(keysSecond); rightPane.removeView(trackpad);
+                while (keysSecond.getChildCount() > 0) { android.view.View key = keysSecond.getChildAt(0); keysSecond.removeViewAt(0); keys.addView(key); }
+                sessionPanel.setOrientation(LinearLayout.VERTICAL); bar.setOrientation(LinearLayout.HORIZONTAL);
+                sessionPanel.addView(bar, 2, new LinearLayout.LayoutParams(-1, -2));
+                sessionPanel.addView(keys, sessionPanel.indexOfChild(strip) + 1, new LinearLayout.LayoutParams(-1, -2));
+                sessionPanel.addView(trackpad, sessionPanel.indexOfChild(keys) + 1, new LinearLayout.LayoutParams(-1, 0, 1));
+                for (int i = 0; i < bar.getChildCount(); i++) bar.getChildAt(i).setLayoutParams(new LinearLayout.LayoutParams(0, dp(46), 1));
+            }
+            int width = r - l - root.getPaddingLeft() - root.getPaddingRight();
+            int height = b - t - root.getPaddingTop() - root.getPaddingBottom();
+            int wanted = landscape ? -1 : Math.min(Math.round(width / 1.6f), Math.round(height * .42f));
+            LinearLayout.LayoutParams params = (LinearLayout.LayoutParams) picture.getLayoutParams();
+            int wantedWidth = landscape ? 0 : -1; float weight = landscape ? 1 : 0;
+            if (params.height != wanted || params.width != wantedWidth || params.weight != weight) {
+                params.height = wanted; params.width = wantedWidth; params.weight = weight; picture.setLayoutParams(params);
+            }
+        });
         keyboard = new RemoteKeyboard(this, new RemoteKeyboard.Listener() {
             public void text(String value) { sendText(value); }
             public void key(int usage, boolean down) { sendKey(usage, down); }
         });
         sessionPanel.addView(keyboard, new LinearLayout.LayoutParams(1, 1));
     }
-    private void barButton(LinearLayout row, String label, android.view.View.OnClickListener action) {
+    private Button barButton(LinearLayout row, String label, android.view.View.OnClickListener action) {
         Button b = button(row, label, action); LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, dp(46), 1);
         p.setMargins(dp(2), dp(3), dp(2), dp(3)); b.setLayoutParams(p); b.setPadding(0, 0, 0, 0);
+        return b;
     }
     private void modifier(LinearLayout row, String label, long flag) {
         barButton(row, label, v -> {
@@ -300,8 +337,12 @@ public final class MainActivity extends Activity {
         } catch (Exception e) { show("滚动发送失败"); }
     }
     private void select(JSONObject source, boolean desktop) {
-        try { sendAsync(6, new JSONObject().put(desktop ? "desktop" : "window", source)); }
+        try { sendViewport(); sendAsync(6, new JSONObject().put(desktop ? "desktop" : "window", source)); }
         catch (Exception e) { show("选择窗口失败"); }
+    }
+    private void tapDesktop() {
+        if (DesktopNavigation.next(desktopActive, desktopDisplays, desktopDisplay)) sendAsync(47, new JSONObject(), true);
+        else select(new JSONObject(), true);
     }
     private void showWindows() {
         if (choices.getChildCount() == 0) return;
@@ -351,6 +392,15 @@ public final class MainActivity extends Activity {
             JSONObject v = new JSONObject().put("width", picture.getWidth() / density).put("height", picture.getHeight() / density).put("fps", 60);
             if (textScale != null) v.put("scale", textScale); sendAsync(9, v);
         } catch (Exception e) { show("画面尺寸发送失败"); }
+    }
+    private void layoutVideo() {
+        if (picture.getWidth() <= 0 || picture.getHeight() <= 0) return;
+        FrameGeometry.Rect frame = FrameGeometry.fit(picture.getWidth(), picture.getHeight(), videoWidth, videoHeight);
+        int width = Math.max(1, Math.round(frame.width())), height = Math.max(1, Math.round(frame.height()));
+        android.widget.FrameLayout.LayoutParams params = (android.widget.FrameLayout.LayoutParams) video.getLayoutParams();
+        if (params.width != width || params.height != height || params.gravity != android.view.Gravity.CENTER) {
+            params.width = width; params.height = height; params.gravity = android.view.Gravity.CENTER; video.setLayoutParams(params);
+        }
     }
     private void settings() {
         String[] items = {"Mac 画质和帧率", clipboardEnabled ? "关闭剪贴板共享" : "开启剪贴板共享", "将手机剪贴板粘贴到 Mac", audioEnabled ? "关闭声音（重新连接后生效）" : "开启声音测试（重新连接后生效）", "断开连接"};
@@ -467,7 +517,7 @@ public final class MainActivity extends Activity {
             finally {
                 connection = null; running = false; clipboardSubscribed = false; releaseDecoder();
                 if (audio != null) { audio.close(); audio = null; }
-                ui.post(() -> { hostSettings = null; pendingSettingsToken = 0; modifiers = 0; for (int i = 2; i < keyRow.getChildCount(); i++) keyRow.getChildAt(i).setBackground(shape(0xff272a30, 12)); sessionPanel.setVisibility(android.view.View.GONE); connectionContainer.setVisibility(android.view.View.VISIBLE); });
+                ui.post(() -> { hostSettings = null; pendingSettingsToken = 0; desktopDisplays = -1; desktopDisplay = 0; desktopActive = false; desktopButton.setText("桌面"); modifiers = 0; for (int i = 2; i < keyRow.getChildCount(); i++) keyRow.getChildAt(i).setBackground(shape(0xff272a30, 12)); sessionPanel.setVisibility(android.view.View.GONE); connectionContainer.setVisibility(android.view.View.VISIBLE); });
             }
         });
     }
@@ -479,12 +529,15 @@ public final class MainActivity extends Activity {
         }
     }
     private void sendAsync(int kind, JSONObject value) {
+        sendAsync(kind, value, false);
+    }
+    private void sendAsync(int kind, JSONObject value, boolean empty) {
         SillConnection expected = connection;
         if (expected == null) return;
         input.execute(() -> {
             try {
                 synchronized (outputLock) {
-                    if (connection == expected) expected.send(kind, value.toString().getBytes(StandardCharsets.UTF_8));
+                    if (connection == expected) expected.send(kind, empty ? new byte[0] : value.toString().getBytes(StandardCharsets.UTF_8));
                 }
             }
             catch (Exception e) { show("发送失败: " + e.getClass().getSimpleName()); }
@@ -497,6 +550,13 @@ public final class MainActivity extends Activity {
                 JSONArray windows = list.getJSONArray("windows");
                 if (clipboardEnabled && !clipboardSubscribed && list.optInt("clipboard", 0) >= 1) updateClipboard();
                 ui.post(() -> {
+                    int count = list.optInt("desktopDisplays", 0), current = list.optInt("desktopDisplay", 0);
+                    JSONObject active = list.optJSONObject("active"); boolean isDesktop = active != null && active.has("desktop");
+                    if (count != desktopDisplays || current != desktopDisplay || isDesktop != desktopActive)
+                        android.util.Log.i("SillAndroid", "Host " + list.optString("hostVersion", "unknown") + ": desktop " + current + "/" + count + ", active=" + isDesktop);
+                    desktopDisplays = count; desktopDisplay = current; desktopActive = isDesktop;
+                    desktopButton.setText(desktopDisplays >= 2 && desktopDisplay > 0 ? "桌面 " + desktopDisplay + "/" + desktopDisplays : "桌面");
+                    desktopButton.setContentDescription(desktopDisplays >= 2 ? "桌面 " + desktopDisplay + " / " + desktopDisplays + "，再次点击切换显示器" : "桌面");
                     choices.removeAllViews(); thumbnails.clear();
                     addChoice("整个桌面", new JSONObject());
                     for (int i = 0; i < windows.length(); i++) {
@@ -613,7 +673,7 @@ public final class MainActivity extends Activity {
                 int w = format.getInteger("width"), h = format.getInteger("height");
                 if (format.containsKey("crop-left") && format.containsKey("crop-right")) w = format.getInteger("crop-right") - format.getInteger("crop-left") + 1;
                 if (format.containsKey("crop-top") && format.containsKey("crop-bottom")) h = format.getInteger("crop-bottom") - format.getInteger("crop-top") + 1;
-                if (w > 0 && h > 0) { videoWidth = w; videoHeight = h; ui.post(cursor::invalidate); }
+                if (w > 0 && h > 0) { videoWidth = w; videoHeight = h; ui.post(() -> { layoutVideo(); cursor.invalidate(); }); }
             } else break;
         }
     }
