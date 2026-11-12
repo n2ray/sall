@@ -58,7 +58,11 @@ public final class MainActivity extends Activity {
     private boolean audioEnabled;
     private AudioPlayer audio;
     private boolean clipboardSubscribed;
-    private Double textScale = .6;
+    private Double textScale = .6, effectiveScale = .6;
+    private int fitAttempts;
+    private long fitAttemptAt, videoFormatAt;
+    private double activeWindowWidth, activeWindowHeight;
+    private final Runnable viewportUpdate = this::sendViewport;
     private int desktopDisplays = -1, desktopDisplay;
     private boolean desktopActive;
     private Button desktopButton, orientationButton;
@@ -179,7 +183,9 @@ public final class MainActivity extends Activity {
         picture = new android.widget.FrameLayout(this); picture.setBackground(shape(0xff000000, 12));
         sessionPanel.addView(picture, new LinearLayout.LayoutParams(-1, dp(230)));
         picture.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, oright, ob) -> {
-            if ((r - l) != (oright - ol) || (b - t) != (ob - ot)) picture.post(() -> { layoutVideo(); sendViewport(); });
+            if ((r - l) != (oright - ol) || (b - t) != (ob - ot)) picture.post(() -> {
+                layoutVideo(); resetWindowFit(); scheduleViewport();
+            });
         });
         video = new SurfaceView(this); picture.addView(video, new android.widget.FrameLayout.LayoutParams(-1, -1));
         video.getHolder().addCallback(new SurfaceHolder.Callback() {
@@ -398,7 +404,7 @@ public final class MainActivity extends Activity {
         } catch (Exception e) { show("滚动发送失败"); }
     }
     private void select(JSONObject source, boolean desktop) {
-        try { keyboard.finishAndForget(); zoom.reset(); layoutVideo(); cursor.invalidate(); sendViewport(); sendAsync(6, new JSONObject().put(desktop ? "desktop" : "window", source)); }
+        try { keyboard.finishAndForget(); zoom.reset(); layoutVideo(); cursor.invalidate(); resetWindowFit(); sendViewport(); sendAsync(6, new JSONObject().put(desktop ? "desktop" : "window", source)); }
         catch (Exception e) { show("选择窗口失败"); }
     }
     private void tapDesktop() {
@@ -443,15 +449,21 @@ public final class MainActivity extends Activity {
     private void chooseScale() {
         String[] labels = {"不调整", "0.5×", "0.6×", "0.75×", "1×", "1.25×", "1.5×"};
         new android.app.AlertDialog.Builder(this).setTitle("文字大小").setItems(labels, (dialog, index) -> {
-            textScale = index == 0 ? null : new double[]{0, .5, .6, .75, 1, 1.25, 1.5}[index]; sendViewport();
+            textScale = index == 0 ? null : new double[]{0, .5, .6, .75, 1, 1.25, 1.5}[index]; resetWindowFit(); scheduleViewport();
         }).show();
+    }
+    private void resetWindowFit() {
+        effectiveScale = textScale; fitAttempts = 0; fitAttemptAt = android.os.SystemClock.uptimeMillis();
+    }
+    private void scheduleViewport() {
+        ui.removeCallbacks(viewportUpdate); ui.postDelayed(viewportUpdate, 250);
     }
     private void sendViewport() {
         if (connection == null || picture.getWidth() <= 0 || picture.getHeight() <= 0) return;
         try {
             float density = getResources().getDisplayMetrics().density;
             JSONObject v = new JSONObject().put("width", picture.getWidth() / density).put("height", picture.getHeight() / density).put("fps", 60);
-            if (textScale != null) v.put("scale", textScale); sendAsync(9, v);
+            if (effectiveScale != null) v.put("scale", effectiveScale); sendAsync(9, v);
         } catch (Exception e) { show("画面尺寸发送失败"); }
     }
     private void layoutVideo() {
@@ -667,7 +679,17 @@ public final class MainActivity extends Activity {
                     }
                     JSONObject selected = active == null ? null : active.optJSONObject("window");
                     long selectedId = selected == null ? -1 : selected.optLong("_0", -1);
-                    if (activeWindowId != selectedId) { activeWindowId = selectedId; activeChangedAt = android.os.SystemClock.uptimeMillis(); }
+                    if (activeWindowId != selectedId) {
+                        activeWindowId = selectedId; activeChangedAt = android.os.SystemClock.uptimeMillis();
+                        activeWindowWidth = activeWindowHeight = 0; resetWindowFit(); scheduleViewport();
+                    }
+                    activeWindowWidth = activeWindowHeight = 0;
+                    if (selectedId >= 0) for (int i = 0; i < windows.length(); i++) {
+                        JSONObject window = windows.optJSONObject(i);
+                        if (window != null && window.optLong("id", -1) == selectedId) {
+                            activeWindowWidth = window.optDouble("width", 0); activeWindowHeight = window.optDouble("height", 0); break;
+                        }
+                    }
                     for (int i = 0; i < choices.getChildCount(); i++) {
                         android.view.View tile = choices.getChildAt(i);
                         boolean chosen = i == 0 ? isDesktop : tile.getTag() instanceof Long && ((Long) tile.getTag()) == selectedId;
@@ -836,12 +858,13 @@ public final class MainActivity extends Activity {
                 int w = format.getInteger("width"), h = format.getInteger("height");
                 if (format.containsKey("crop-left") && format.containsKey("crop-right")) w = format.getInteger("crop-right") - format.getInteger("crop-left") + 1;
                 if (format.containsKey("crop-top") && format.containsKey("crop-bottom")) h = format.getInteger("crop-bottom") - format.getInteger("crop-top") + 1;
-                if (w > 0 && h > 0) { videoWidth = w; videoHeight = h; ui.post(() -> { layoutVideo(); cursor.invalidate(); }); }
+                if (w > 0 && h > 0) { videoWidth = w; videoHeight = h; ui.post(() -> { videoFormatAt = android.os.SystemClock.uptimeMillis(); layoutVideo(); cursor.invalidate(); }); }
             } else break;
         }
     }
     private void captureActivePreview() {
         long id = activeWindowId; SillConnection expected = connection;
+        adjustWindowFit();
         if (id < 0 || expected == null || !thumbnails.containsKey(id) ||
                 android.os.SystemClock.uptimeMillis() - activeChangedAt < 1000 ||
                 video.getWidth() < 2 || video.getHeight() < 2 || !video.getHolder().getSurface().isValid()) return;
@@ -855,6 +878,19 @@ public final class MainActivity extends Activity {
                 if (image != null) { streamedPreviews.add(id); thumbnailImages.put(id, bitmap); image.setImageBitmap(bitmap); }
             }, ui);
         } catch (IllegalArgumentException ignored) { }
+    }
+    private void adjustWindowFit() {
+        long now = android.os.SystemClock.uptimeMillis();
+        if (connection == null || activeWindowId < 0 || effectiveScale == null || fitAttempts >= 2 ||
+                now - activeChangedAt < 3000 || now - videoFormatAt < 2000 || now - fitAttemptAt < 4000 ||
+                picture.getWidth() <= 0 || picture.getHeight() <= 0) return;
+        float density = getResources().getDisplayMetrics().density;
+        double next = WindowFit.next(effectiveScale, picture.getWidth() / density, picture.getHeight() / density,
+                videoWidth, videoHeight, activeWindowWidth, activeWindowHeight);
+        if (next < effectiveScale) {
+            effectiveScale = next; fitAttempts++; fitAttemptAt = now; scheduleViewport();
+            android.util.Log.i("SillAndroid", "Adjusting window fit (attempt " + fitAttempts + ")");
+        }
     }
     private boolean sameWindowChoices(JSONArray windows) {
         if (choices.getChildCount() != windows.length() + 1) return false;

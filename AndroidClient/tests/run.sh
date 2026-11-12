@@ -22,3 +22,5 @@ javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/ReconnectPol
 java -ea -cp "$test_dir" io.github.n2ray.sill.ReconnectPolicyTest
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/AppIconBlob.java "$root"/tests/AppIconBlobTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sill.AppIconBlobTest
+javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/WindowFit.java "$root"/tests/WindowFitTest.java
+java -ea -cp "$test_dir" io.github.n2ray.sill.WindowFitTest
