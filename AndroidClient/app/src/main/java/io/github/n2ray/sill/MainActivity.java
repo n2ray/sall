@@ -43,12 +43,14 @@ public final class MainActivity extends Activity {
     private SurfaceView video;
     private android.view.View cursor;
     private final java.util.Map<Long, android.widget.ImageView> thumbnails = new java.util.HashMap<>();
+    private final java.util.Map<Long, android.graphics.Bitmap> thumbnailImages = new java.util.HashMap<>();
+    private final PictureZoom zoom = new PictureZoom();
     private final Object surfaceLock = new Object();
     private volatile boolean clipboardEnabled;
     private boolean audioEnabled;
     private AudioPlayer audio;
     private boolean clipboardSubscribed;
-    private Double textScale = .75;
+    private Double textScale = .6;
     private int desktopDisplays = -1, desktopDisplay;
     private boolean desktopActive;
     private Button desktopButton, orientationButton;
@@ -71,9 +73,17 @@ public final class MainActivity extends Activity {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        getWindow().setFlags(android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN, android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN);
         root = new LinearLayout(this); root.setOrientation(LinearLayout.VERTICAL);
         int pad = (int) (12 * getResources().getDisplayMetrics().density);
         root.setPadding(pad, pad, pad, pad); setContentView(root);
+        if (android.os.Build.VERSION.SDK_INT >= 30) root.post(() -> {
+            android.view.WindowInsetsController controller = root.getWindowInsetsController();
+            if (controller != null) {
+                controller.hide(android.view.WindowInsets.Type.statusBars());
+                controller.setSystemBarsBehavior(android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+            }
+        });
         root.setOnApplyWindowInsetsListener((view, insets) -> {
             if (android.os.Build.VERSION.SDK_INT >= 30) {
                 android.graphics.Insets bars = insets.getInsets(android.view.WindowInsets.Type.systemBars());
@@ -178,7 +188,7 @@ public final class MainActivity extends Activity {
             @Override protected void onDraw(android.graphics.Canvas canvas) {
                 if (trackpad == null) return;
                 if (getWidth() == 0 || getHeight() == 0) return;
-                FrameGeometry.Rect frame = FrameGeometry.fit(getWidth(), getHeight(), videoWidth, videoHeight);
+                FrameGeometry.Rect frame = zoom.frame(getWidth(), getHeight(), videoWidth, videoHeight);
                 float x = frame.left() + trackpad.pointerX() * frame.width(), y = frame.top() + trackpad.pointerY() * frame.height();
                 android.graphics.Path arrow = new android.graphics.Path(); arrow.moveTo(x, y); arrow.lineTo(x + dp(5), y + dp(16));
                 arrow.lineTo(x + dp(8), y + dp(10)); arrow.lineTo(x + dp(13), y + dp(9)); arrow.close();
@@ -187,19 +197,56 @@ public final class MainActivity extends Activity {
             }
         };
         picture.addView(cursor, new android.widget.FrameLayout.LayoutParams(-1, -1));
+        android.view.ScaleGestureDetector scaleGesture = new android.view.ScaleGestureDetector(this, new android.view.ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            private float lastX, lastY;
+            @Override public boolean onScaleBegin(android.view.ScaleGestureDetector detector) { lastX = detector.getFocusX(); lastY = detector.getFocusY(); return true; }
+            @Override public boolean onScale(android.view.ScaleGestureDetector detector) {
+                float x = detector.getFocusX(), y = detector.getFocusY();
+                zoom.change(detector.getScaleFactor(), lastX, lastY, x - lastX, y - lastY,
+                        picture.getWidth(), picture.getHeight(), videoWidth, videoHeight);
+                lastX = x; lastY = y; layoutVideo(); cursor.invalidate(); return true;
+            }
+        });
+        final boolean[] pinching = {false};
+        final boolean[] directPressed = {false};
+        final float[] directStart = new float[4];
         cursor.setOnTouchListener((view, event) -> {
             if (connection == null) return false;
             if (view.getWidth() == 0 || view.getHeight() == 0) return false;
-            FrameGeometry.Rect frame = FrameGeometry.fit(view.getWidth(), view.getHeight(), videoWidth, videoHeight);
+            boolean landscape = getResources().getConfiguration().orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE;
+            if (event.getActionMasked() == MotionEvent.ACTION_DOWN) pinching[0] = false;
+            if (event.getActionMasked() == MotionEvent.ACTION_POINTER_DOWN && !pinching[0]) {
+                pinching[0] = true;
+                if (landscape) {
+                    MotionEvent cancel = MotionEvent.obtain(event); cancel.setAction(MotionEvent.ACTION_CANCEL);
+                    trackpad.touch(cancel, view.getWidth()); cancel.recycle();
+                } else if (directPressed[0]) { pointer("leftUp", trackpad.pointerX(), trackpad.pointerY()); directPressed[0] = false; }
+            }
+            scaleGesture.onTouchEvent(event);
+            if (pinching[0]) return true;
+            if (landscape) return trackpad.touch(event, view.getWidth());
+            FrameGeometry.Rect frame = zoom.frame(view.getWidth(), view.getHeight(), videoWidth, videoHeight);
             if (event.getActionMasked() == MotionEvent.ACTION_DOWN &&
                     (event.getX() < frame.left() || event.getX() > frame.left() + frame.width() ||
                      event.getY() < frame.top() || event.getY() > frame.top() + frame.height())) return false;
             float x = frame.x(event.getX()), y = frame.y(event.getY());
-            String action = switch (event.getActionMasked()) {
-                case MotionEvent.ACTION_DOWN -> "leftDown"; case MotionEvent.ACTION_MOVE -> "move";
-                case MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> "leftUp"; default -> null;
-            };
-            if (action != null) { trackpad.position(x, y); cursor.invalidate(); pointer(action, x, y); }
+            switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN -> {
+                    directPressed[0] = false; directStart[0] = event.getX(); directStart[1] = event.getY();
+                    directStart[2] = x; directStart[3] = y; trackpad.position(x, y); cursor.invalidate();
+                }
+                case MotionEvent.ACTION_MOVE -> {
+                    if (!directPressed[0] && Math.hypot(event.getX() - directStart[0], event.getY() - directStart[1]) > dp(5)) {
+                        pointer("leftDown", directStart[2], directStart[3]); directPressed[0] = true;
+                    }
+                    if (directPressed[0]) { trackpad.position(x, y); cursor.invalidate(); pointer("move", x, y); }
+                }
+                case MotionEvent.ACTION_UP -> {
+                    if (!directPressed[0]) pointer("leftDown", x, y);
+                    trackpad.position(x, y); cursor.invalidate(); pointer("leftUp", x, y); directPressed[0] = false;
+                }
+                case MotionEvent.ACTION_CANCEL -> { if (directPressed[0]) pointer("leftUp", x, y); directPressed[0] = false; }
+            }
             return true;
         });
         LinearLayout bar = new LinearLayout(this); sessionPanel.addView(bar);
@@ -337,7 +384,7 @@ public final class MainActivity extends Activity {
         } catch (Exception e) { show("滚动发送失败"); }
     }
     private void select(JSONObject source, boolean desktop) {
-        try { sendViewport(); sendAsync(6, new JSONObject().put(desktop ? "desktop" : "window", source)); }
+        try { zoom.reset(); layoutVideo(); cursor.invalidate(); sendViewport(); sendAsync(6, new JSONObject().put(desktop ? "desktop" : "window", source)); }
         catch (Exception e) { show("选择窗口失败"); }
     }
     private void tapDesktop() {
@@ -380,9 +427,9 @@ public final class MainActivity extends Activity {
         }).show();
     }
     private void chooseScale() {
-        String[] labels = {"不调整", "0.5×", "0.75×", "1×", "1.25×", "1.5×"};
+        String[] labels = {"不调整", "0.5×", "0.6×", "0.75×", "1×", "1.25×", "1.5×"};
         new android.app.AlertDialog.Builder(this).setTitle("文字大小").setItems(labels, (dialog, index) -> {
-            textScale = index == 0 ? null : new double[]{0, .5, .75, 1, 1.25, 1.5}[index]; sendViewport();
+            textScale = index == 0 ? null : new double[]{0, .5, .6, .75, 1, 1.25, 1.5}[index]; sendViewport();
         }).show();
     }
     private void sendViewport() {
@@ -401,6 +448,11 @@ public final class MainActivity extends Activity {
         if (params.width != width || params.height != height || params.gravity != android.view.Gravity.CENTER) {
             params.width = width; params.height = height; params.gravity = android.view.Gravity.CENTER; video.setLayoutParams(params);
         }
+        FrameGeometry.Rect enlarged = zoom.frame(picture.getWidth(), picture.getHeight(), videoWidth, videoHeight);
+        float factor = enlarged.width() / frame.width();
+        video.setScaleX(factor); video.setScaleY(factor);
+        video.setTranslationX(enlarged.left() + enlarged.width() / 2 - picture.getWidth() / 2f);
+        video.setTranslationY(enlarged.top() + enlarged.height() / 2 - picture.getHeight() / 2f);
     }
     private void settings() {
         String[] items = {"Mac 画质和帧率", clipboardEnabled ? "关闭剪贴板共享" : "开启剪贴板共享", "将手机剪贴板粘贴到 Mac", audioEnabled ? "关闭声音（重新连接后生效）" : "开启声音测试（重新连接后生效）", "断开连接"};
@@ -517,7 +569,7 @@ public final class MainActivity extends Activity {
             finally {
                 connection = null; running = false; clipboardSubscribed = false; releaseDecoder();
                 if (audio != null) { audio.close(); audio = null; }
-                ui.post(() -> { hostSettings = null; pendingSettingsToken = 0; desktopDisplays = -1; desktopDisplay = 0; desktopActive = false; desktopButton.setText("桌面"); modifiers = 0; for (int i = 2; i < keyRow.getChildCount(); i++) keyRow.getChildAt(i).setBackground(shape(0xff272a30, 12)); sessionPanel.setVisibility(android.view.View.GONE); connectionContainer.setVisibility(android.view.View.VISIBLE); });
+                ui.post(() -> { hostSettings = null; pendingSettingsToken = 0; desktopDisplays = -1; desktopDisplay = 0; desktopActive = false; desktopButton.setText("桌面"); thumbnailImages.clear(); zoom.reset(); modifiers = 0; for (int i = 2; i < keyRow.getChildCount(); i++) keyRow.getChildAt(i).setBackground(shape(0xff272a30, 12)); sessionPanel.setVisibility(android.view.View.GONE); connectionContainer.setVisibility(android.view.View.VISIBLE); });
             }
         });
     }
@@ -564,6 +616,7 @@ public final class MainActivity extends Activity {
                         try { addChoice(item.optString("appName") + " — " + item.optString("title"), new JSONObject().put("_0", item.getLong("id"))); }
                         catch (Exception ignored) { }
                     }
+                    thumbnailImages.keySet().retainAll(thumbnails.keySet());
                 });
             }
             case 3 -> {
@@ -571,7 +624,7 @@ public final class MainActivity extends Activity {
                 if (bytes.length > 4) {
                     long id = Integer.toUnsignedLong(ByteBuffer.wrap(bytes, 0, 4).getInt());
                     android.graphics.Bitmap bitmap = android.graphics.BitmapFactory.decodeByteArray(bytes, 4, bytes.length - 4);
-                    if (bitmap != null) ui.post(() -> { android.widget.ImageView image = thumbnails.get(id); if (image != null) image.setImageBitmap(bitmap); });
+                    if (bitmap != null) ui.post(() -> { android.widget.ImageView image = thumbnails.get(id); if (image != null) { thumbnailImages.put(id, bitmap); image.setImageBitmap(bitmap); } });
                 }
             }
             case 5 -> {
@@ -681,10 +734,10 @@ public final class MainActivity extends Activity {
         LinearLayout tile = new LinearLayout(this); tile.setOrientation(LinearLayout.VERTICAL); tile.setContentDescription(title);
         tile.setBackground(shape(0xff272a30, 10));
         LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(dp(100), dp(66)); p.setMargins(0, dp(3), dp(6), dp(3)); choices.addView(tile, p);
-        android.widget.ImageView image = new android.widget.ImageView(this); image.setScaleType(android.widget.ImageView.ScaleType.CENTER_CROP);
+        android.widget.ImageView image = new android.widget.ImageView(this); image.setScaleType(android.widget.ImageView.ScaleType.FIT_CENTER);
         tile.addView(image, new LinearLayout.LayoutParams(-1, 0, 1));
         TextView label = new TextView(this); label.setText(title); label.setSingleLine(true); label.setTextSize(10); label.setTextColor(-1);
-        tile.addView(label); if (source.length() != 0) thumbnails.put(source.optLong("_0"), image);
+        tile.addView(label); if (source.length() != 0) { long id = source.optLong("_0"); thumbnails.put(id, image); image.setImageBitmap(thumbnailImages.get(id)); }
         tile.setOnClickListener(v -> select(source, source.length() == 0));
         if (source.length() != 0) tile.setOnLongClickListener(v -> {
             String[] labels = {"最小化", "全屏", "关闭窗口"};

@@ -46,6 +46,9 @@ final class TrackpadView extends View {
             for (float py = step / 2; py < getHeight(); py += step) canvas.drawCircle(px, py, step / 24, paint);
     }
     @Override public boolean onTouchEvent(MotionEvent event) {
+        return touch(event, getWidth());
+    }
+    boolean touch(MotionEvent event, float areaWidth) {
         switch (event.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
                 lastX = startX = event.getX(); lastY = startY = event.getY();
@@ -64,7 +67,7 @@ final class TrackpadView extends View {
                     if (!scrolling && Math.hypot(cx - startX, cy - startY) > 8 * getResources().getDisplayMetrics().density) {
                         scrolling = true; listener.scroll("began", x, y, 0, 0);
                     }
-                    if (scrolling) listener.scroll(null, x, y, (cx - lastX) / Math.max(1, getWidth()), (cy - lastY) / Math.max(1, getWidth() / 1.6f));
+                    if (scrolling) listener.scroll(null, x, y, (cx - lastX) / Math.max(1, areaWidth), (cy - lastY) / Math.max(1, areaWidth / 1.6f));
                     lastX = cx; lastY = cy;
                 } else if (!twoFinger) {
                     float cx = event.getX(), cy = event.getY();
@@ -72,8 +75,8 @@ final class TrackpadView extends View {
                         moved = true; removeCallbacks(longPress);
                     }
                     if (moved || dragging) {
-                        x = clamp(x + (cx - lastX) * 1.25f / Math.max(1, getWidth()));
-                        y = clamp(y + (cy - lastY) * 1.25f / Math.max(1, getWidth() / 1.6f));
+                        x = clamp(x + (cx - lastX) * 1.25f / Math.max(1, areaWidth));
+                        y = clamp(y + (cy - lastY) * 1.25f / Math.max(1, areaWidth / 1.6f));
                         listener.pointer("move", x, y);
                     }
                     lastX = cx; lastY = cy;
