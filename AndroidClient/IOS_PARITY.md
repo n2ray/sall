@@ -33,7 +33,7 @@ Product direction: follow the iOS client's layout and interaction by default. Ea
 
 - [ ] Viewport frame rate follows display capability with a 60 fps cap on remote or power-saving connections; verify dynamic changes on hardware. Android VPN route classification may not identify every split-tunnel route.
 - [ ] Sound: AAC-ELD decoding is experimental and off by default. Partial PCM writes are retried with cancellation and logic tests; test real playback and implement iOS-quality timing, mute, output-route changes, reconnect and audio/video synchronization.
-- [ ] Complete host settings and local preferences, with capability gating, host acknowledgements and failure handling; include scrolling, gestures, long-press duration and Larger Picture. Landscape settings now open at the right of the picture, but rotation currently dismisses the panel instead of reanchoring it; device verification remains.
+- [ ] Complete host settings and local preferences, with capability gating, host acknowledgements and failure handling; include scrolling, gestures, long-press duration and Larger Picture. Landscape settings open at the right of the picture and reanchor after rotation; these changes need device verification.
 - [ ] Picture in Picture and foreground/background handling; idle-screen policy and foreground-only clipboard updates have logic checks but need device lifecycle verification.
 - [ ] TalkBack, larger fonts, announcements and actions; connection/error/version/slow-network status and first-run guidance.
 - [ ] Foldables and external displays: design for Android's own device capabilities after phone functionality is verified; do not claim iPhone Duo-specific behavior is already supported.

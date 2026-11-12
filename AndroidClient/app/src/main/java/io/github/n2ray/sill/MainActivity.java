@@ -70,10 +70,11 @@ public final class MainActivity extends Activity {
     private AudioPlayer audio;
     private volatile boolean clipboardSubscribed;
     private Double textScale;
+    private TextScaleControl scaleControl;
     private final Runnable viewportUpdate = this::sendViewport;
     private Runnable updateSessionLayout;
     private float portraitImeHeight;
-    private boolean largerPicture, largerPictureApplied, settingsOpen;
+    private boolean largerPicture, largerPictureApplied, settingsOpen, settingsHeldLargerPicture, settingsReanchoring, settingsReanchorPending;
     private android.widget.FrameLayout settingsOverlay;
     private android.window.OnBackInvokedCallback settingsBack;
     private android.app.AlertDialog settingsChild;
@@ -418,7 +419,26 @@ public final class MainActivity extends Activity {
         LinearLayout bar = new LinearLayout(this); sessionPanel.addView(bar);
         Button appsButton = barButton(bar, "应用", v -> showWindows());
         menuButton = barButton(bar, "菜单", v -> showMenu(macMenus, "Mac 菜单", menuVersion));
-        Button scaleButton = barButton(bar, "Aa", v -> chooseScale());
+        TextScaleControl scaleButton = new TextScaleControl(this, new TextScaleControl.Delegate() {
+            private SillConnection owner;
+            private long window;
+            private boolean offered;
+            public boolean available() { return connection != null && activeWindowId >= 0 && !desktopActive && (hostLock == null || (!hostLock.isCovered() && !hostLock.viewOnly())); }
+            public boolean offersOff() {
+                JSONObject settings = hostSettings == null ? null : hostSettings.optJSONObject("settings");
+                JSONObject stream = hostSettings == null ? null : hostSettings.optJSONObject("stream");
+                Boolean configured = settings != null && settings.has("virtualDisplay") ? settings.optBoolean("virtualDisplay") : null;
+                Boolean running = activeWindowId >= 0 && stream != null && stream.has("onVirtualDisplay") ? stream.optBoolean("onVirtualDisplay") : null;
+                return TextScale.offersOff(configured, running);
+            }
+            public Double scale() { return textScale; }
+            public void begin() { dismissSettings(false); dismissMenu(); if (appDrawer != null) appDrawer.dismiss(); owner = connection; window = activeWindowId; offered = offersOff(); }
+            public boolean canCommit() { return available() && connection == owner && activeWindowId == window && offered == offersOff(); }
+            public void commit(Double scale) { textScale = scale; scheduleViewport(); }
+        });
+        scaleControl = scaleButton; scaleButton.setTextColor(-1); scaleButton.setTextSize(12); scaleButton.setBackground(shape(0xff272a30, 12));
+        LinearLayout.LayoutParams scaleParams = new LinearLayout.LayoutParams(0, dp(46), 1);
+        scaleParams.setMargins(dp(2), dp(3), dp(2), dp(3)); bar.addView(scaleButton, scaleParams); scaleButton.setPadding(0, 0, 0, 0);
         Button keyboardButton = barButton(bar, "键盘", v -> toggleKeyboard());
         desktopButton = barButton(bar, "桌面", v -> tapDesktop());
         Button settingsButton = barButton(bar, "设置", v -> settings());
@@ -453,10 +473,10 @@ public final class MainActivity extends Activity {
             float density = getResources().getDisplayMetrics().density;
             PhoneStreamLayout.Streaming streaming = activeWindowId >= 0 ? PhoneStreamLayout.Streaming.WINDOW
                     : desktopActive ? PhoneStreamLayout.Streaming.DESKTOP : PhoneStreamLayout.Streaming.NOTHING;
-            if (settingsOpen) streaming = largerPictureApplied ? PhoneStreamLayout.Streaming.WINDOW : PhoneStreamLayout.Streaming.NOTHING;
+            if (settingsOpen) streaming = settingsHeldLargerPicture ? PhoneStreamLayout.Streaming.WINDOW : PhoneStreamLayout.Streaming.NOTHING;
             PhoneStreamLayout geometry = PhoneStreamLayout.forSource(width / density, height / density,
                     portraitImeHeight > 0 ? (double) portraitImeHeight : null, false,
-                    settingsOpen ? largerPictureApplied : largerPicture, streaming);
+                    settingsOpen ? settingsHeldLargerPicture : largerPicture, streaming);
             boolean large = geometry.largerPicture;
             if (large != largerPictureApplied) { dismissWindowControls(); cancelWindowDrag(); }
             largerPictureApplied = large;
@@ -505,11 +525,14 @@ public final class MainActivity extends Activity {
             layoutVideo(); cursor.invalidate();
         };
         root.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, oright, ob) -> {
-            if (r - l != oright - ol || b - t != ob - ot) { dismissWindowControls(); cancelWindowDrag(); }
+            if (r - l != oright - ol || b - t != ob - ot) { dismissWindowControls(); cancelWindowDrag(); if (scaleControl != null) scaleControl.cancel(); }
             if (oright > ol && ob > ot && (r - l > b - t) != (oright - ol > ob - ot)) {
                 if (pictureInput != null) pictureInput.cancel();
                 if (appDrawer != null) appDrawer.dismiss();
-                dismissSettings(false);
+                if (settingsOpen) {
+                    settingsReanchorPending = true;
+                    root.post(this::reanchorSettings);
+                }
             }
             updateSessionLayout.run();
         });
@@ -784,16 +807,6 @@ public final class MainActivity extends Activity {
             } catch (Exception e) { showFor(owner, "菜单请求失败"); }
         });
     }
-    private void chooseScale() {
-        dismissSettings(false);
-        dismissMenu();
-        if (appDrawer != null) appDrawer.dismiss();
-        if (desktopActive) { show("文字大小只用于调整单个窗口；桌面保持原来的尺寸。"); return; }
-        String[] labels = {"不调整", "0.5×", "0.6×", "0.75×", "1×", "1.25×", "1.5×"};
-        new android.app.AlertDialog.Builder(this).setTitle("文字大小").setItems(labels, (dialog, index) -> {
-            textScale = index == 0 ? null : new double[]{0, .5, .6, .75, 1, 1.25, 1.5}[index]; scheduleViewport();
-        }).show();
-    }
     private void scheduleViewport() {
         ui.removeCallbacks(viewportUpdate); ui.postDelayed(viewportUpdate, 250);
     }
@@ -873,11 +886,14 @@ public final class MainActivity extends Activity {
         video.setTranslationX(enlarged.left() + enlarged.width() / 2 - picture.getWidth() / 2f);
         video.setTranslationY(enlarged.top() + enlarged.height() / 2 - picture.getHeight() / 2f);
     }
-    private void settings() {
-        if (settingsOverlay != null) { dismissSettings(); return; }
-        dismissMenu();
-        if (appDrawer != null) appDrawer.dismiss();
-        if (connection == null) return;
+    private void settings() { settings(false); }
+    private void settings(boolean reanchor) {
+        if (!reanchor && settingsOverlay != null) { dismissSettings(); return; }
+        if (!reanchor) {
+            dismissMenu();
+            if (appDrawer != null) appDrawer.dismiss();
+            if (connection == null) return;
+        }
         boolean reverse = getPreferences(0).getBoolean("reverseScrolling", false);
         boolean gestures = getPreferences(0).getBoolean("macGestures", true);
         float density = getResources().getDisplayMetrics().density;
@@ -891,15 +907,18 @@ public final class MainActivity extends Activity {
         labels.add("窗口控制长按时间：" + (holdTenths / 10f) + " 秒");
         labels.add("断开连接");
         String[] items = labels.toArray(new String[0]);
-        android.view.WindowInsets insets = root.getRootWindowInsets();
-        boolean restoreKeyboard = android.os.Build.VERSION.SDK_INT >= 30 && insets != null
-                ? insets.isVisible(android.view.WindowInsets.Type.ime()) : keyboard.hasFocus();
-        settingsOpen = true;
-        settingsRestoreKeyboard = restoreKeyboard;
-        settingsSession = connection;
-        releaseHardwareKeys(); keyboard.finishAndForget();
-        if (restoreKeyboard) ((android.view.inputmethod.InputMethodManager)getSystemService(INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(keyboard.getWindowToken(), 0);
-        keyboard.clearFocus();
+        if (!reanchor) {
+            android.view.WindowInsets insets = root.getRootWindowInsets();
+            boolean restoreKeyboard = android.os.Build.VERSION.SDK_INT >= 30 && insets != null
+                    ? insets.isVisible(android.view.WindowInsets.Type.ime()) : keyboard.hasFocus();
+            settingsOpen = true;
+            settingsHeldLargerPicture = largerPicture && activeWindowId >= 0;
+            settingsRestoreKeyboard = restoreKeyboard;
+            settingsSession = connection;
+            releaseHardwareKeys(); keyboard.finishAndForget();
+            if (restoreKeyboard) ((android.view.inputmethod.InputMethodManager)getSystemService(INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(keyboard.getWindowToken(), 0);
+            keyboard.clearFocus();
+        }
         java.util.function.IntConsumer choose = i -> {
             if (i == 0) hostSettingsMenu();
             if (i == 1) { clipboardEnabled = !clipboardEnabled; getPreferences(0).edit().putBoolean("shareClipboard", clipboardEnabled).apply(); updateClipboard(); }
@@ -971,7 +990,7 @@ public final class MainActivity extends Activity {
         } else {
             android.app.AlertDialog dialog = new android.app.AlertDialog.Builder(this).setTitle("设置").setItems(items, (d, i) -> choose.accept(i)).create();
             settingsDialog = dialog;
-            dialog.setOnDismissListener(d -> { if (settingsDialog == dialog) settingsDialog = null; if (settingsChild == null) finishSettings(); });
+            dialog.setOnDismissListener(d -> { if (settingsDialog != dialog) return; settingsDialog = null; if (!settingsReanchoring && settingsChild == null) finishSettings(); });
             dialog.show();
         }
     }
@@ -980,12 +999,14 @@ public final class MainActivity extends Activity {
         dialog.setOnDismissListener(d -> {
             if (settingsChild != dialog) return;
             settingsChild = null;
+            if (settingsReanchorPending && settingsOpen) { reanchorSettings(); return; }
             if (settingsOverlay == null && settingsDialog == null) finishSettings();
         });
         dialog.show();
     }
     private void dismissSettings() { dismissSettings(true); }
     private void dismissSettings(boolean restoreKeyboard) {
+        settingsReanchorPending = false;
         if (!restoreKeyboard) settingsRestoreKeyboard = false;
         if (android.os.Build.VERSION.SDK_INT >= 33 && settingsBack != null) {
             getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(settingsBack); settingsBack = null;
@@ -997,6 +1018,22 @@ public final class MainActivity extends Activity {
         android.app.AlertDialog dialog = settingsDialog; settingsDialog = null;
         if (dialog != null) dialog.dismiss();
         finishSettings();
+    }
+    private void reanchorSettings() {
+        if (!settingsReanchorPending || !settingsOpen || settingsChild != null) return;
+        if (connection == null || connection != settingsSession) { dismissSettings(false); return; }
+        settingsReanchorPending = false;
+        settingsReanchoring = true;
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= 33 && settingsBack != null) {
+                getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(settingsBack); settingsBack = null;
+            }
+            android.widget.FrameLayout overlay = settingsOverlay; settingsOverlay = null;
+            if (overlay != null && overlay.getParent() instanceof android.view.ViewGroup parent) parent.removeView(overlay);
+            android.app.AlertDialog dialog = settingsDialog; settingsDialog = null;
+            if (dialog != null) dialog.dismiss();
+            settings(true);
+        } finally { settingsReanchoring = false; }
     }
     private void finishSettings() {
         if (!settingsOpen) return;
@@ -1320,6 +1357,7 @@ public final class MainActivity extends Activity {
                     long selectedId = selected == null ? -1 : selected.optLong("_0", -1);
                     if (activeWindowId != selectedId) {
                         activeWindowId = selectedId;
+                        if (scaleControl != null) scaleControl.refresh();
                         if (!settingsOpen && updateSessionLayout != null) updateSessionLayout.run();
                         scheduleViewport();
                     }
@@ -1410,6 +1448,7 @@ public final class MainActivity extends Activity {
                 JSONObject state = new JSONObject(new String(message.payload(), StandardCharsets.UTF_8));
                 ui.post(() -> {
                     hostSettings = state;
+                    if (scaleControl != null) scaleControl.refresh();
                     if (pendingSettingsToken != 0 && state.optInt("answering", -1) == pendingSettingsToken) {
                         JSONObject s = state.optJSONObject("settings"); Object actual = s == null ? null : s.opt(pendingSettingsField);
                         boolean accepted = actual instanceof Number && pendingSettingsValue instanceof Number
@@ -1580,6 +1619,7 @@ public final class MainActivity extends Activity {
     }
     private void renderLockOverlay(HostLockState lock, SillConnection expected) {
         if (connection != expected || hostLock != lock) return;
+        if (scaleControl != null) scaleControl.refresh();
         if (!lock.isCovered() && !lock.needsFreshFrame()) { lockOverlay.setVisibility(android.view.View.GONE); return; }
         lockOverlay.setText(lock.isCovered() ? "另一位用户正在使用这台 Mac。请切回你的账号以继续。" : "正在等待 Mac 画面…");
         lockOverlay.setVisibility(android.view.View.VISIBLE);
@@ -1816,7 +1856,7 @@ public final class MainActivity extends Activity {
     private void resetCursorShape() { cursorBitmap = null; cursorShape = null; cursor.invalidate(); }
     @Override protected void onStart() { super.onStart(); if (discovery != null) discovery.start(); startFpsObservers(); }
     @Override protected void onResume() { super.onResume(); keyframeForeground = true; android.util.Log.i("SillAndroid", "Recovery: foreground"); if (screenAwake != null) screenAwake.setForeground(true); }
-    @Override protected void onPause() { android.util.Log.i("SillAndroid", "Recovery: background"); keyframeForeground = false; synchronized (surfaceLock) { surfaceEpoch++; } recoveryFrame.set(null); interruptPicture(); if (keyframeRecovery != null) keyframeRecovery.leftForeground(); if (screenAwake != null) screenAwake.setForeground(false); super.onPause(); }
+    @Override protected void onPause() { if (scaleControl != null) scaleControl.cancel(); android.util.Log.i("SillAndroid", "Recovery: background"); keyframeForeground = false; synchronized (surfaceLock) { surfaceEpoch++; } recoveryFrame.set(null); interruptPicture(); if (keyframeRecovery != null) keyframeRecovery.leftForeground(); if (screenAwake != null) screenAwake.setForeground(false); super.onPause(); }
     @Override public void onUserInteraction() { super.onUserInteraction(); if (screenAwake != null) screenAwake.personActed(); }
     @Override protected void onStop() { dismissSettings(false); dismissMenu(); if (appDrawer != null) appDrawer.dismiss(); dismissWindowControls(); cancelWindowDrag(); stopFpsObservers(); clipboardReceipt.cancel(); if (pictureInput != null) pictureInput.cancel(); if (trackpad != null) trackpad.cancelGestures(); if (discovery != null) discovery.stop(); nearby.clear(); nearbyMacs.removeAllViews(); super.onStop(); }
     @Override protected void onDestroy() {

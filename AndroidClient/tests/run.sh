@@ -59,3 +59,5 @@ javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/WindowOrder.
 java -ea -cp "$test_dir" io.github.n2ray.sill.WindowOrderTest
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/InitialSourcePolicy.java "$root"/tests/InitialSourcePolicyTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sill.InitialSourcePolicyTest
+javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/TextScale.java "$root"/tests/TextScaleTest.java
+java -ea -cp "$test_dir" io.github.n2ray.sill.TextScaleTest
