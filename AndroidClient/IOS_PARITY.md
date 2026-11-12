@@ -14,7 +14,7 @@ Product direction: follow the iOS client's layout and interaction by default. Ea
 
 ## Windows and picture
 
-- [ ] Window catalog, app icons, app launching, menu and thumbnail commands exist. The application drawer follows iOS app-name search and cycles windows per application; the window strip has a configurable hold time, anchored action menu, per-Mac drag ordering and accessibility actions. These changes need Xiaomi verification. iOS-style presentation, real-time drag animation and full menu state remain.
+- [ ] Window catalog, app icons, app launching, menu and thumbnail commands exist. The application drawer follows iOS app-name search and cycles windows per application; its landscape version opens at the left over the picture. The window strip has a configurable hold time, anchored action menu, per-Mac drag ordering and accessibility actions. These changes need Xiaomi verification. iOS-style portrait presentation, real-time drag animation and full menu state remain.
 - [ ] Selected-window fitting: iOS starts with Aa off and fits the complete picture without stretching. Test repeated source changes, rotation, app minimum sizes and host refusal; some applications cannot fill the picture without cropping.
 - [ ] Stage Manager may cause the Mac host to supply a tilted thumbnail. The iOS client displays the host thumbnail; Android follows that behavior. Test window closure, source changes and cache cleanup.
 - [ ] Desktop display cycling is implemented only when the host advertises it. The tested Mac 0.6.1 does not; the Android client cannot add the missing host capability.

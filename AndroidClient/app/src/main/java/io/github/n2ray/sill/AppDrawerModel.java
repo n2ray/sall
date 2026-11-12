@@ -14,6 +14,10 @@ final class AppDrawerModel {
     record Group(String name, String bundleId, List<Window> windows) { }
     record Results(List<Group> open, List<App> closed) { }
 
+    static boolean sourceChanged(long before, boolean beforeDesktop, long after, boolean afterDesktop) {
+        return (after >= 0 || afterDesktop) && (before != after || beforeDesktop != afterDesktop);
+    }
+
     static Results filter(List<Window> windows, List<App> apps, String query) {
         String needle = query == null ? "" : query.trim().toLowerCase(Locale.ROOT);
         Map<String, List<Window>> grouped = new LinkedHashMap<>();

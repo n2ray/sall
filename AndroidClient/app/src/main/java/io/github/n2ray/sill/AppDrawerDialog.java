@@ -13,6 +13,7 @@ import android.view.View;
 import android.view.Window;
 import android.view.WindowManager;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -31,6 +32,8 @@ final class AppDrawerDialog {
     private final Activity activity;
     private final Listener listener;
     private AlertDialog dialog;
+    private FrameLayout overlay;
+    private android.window.OnBackInvokedCallback overlayBack;
     private EditText search;
     private ScrollView scroll;
     private LinearLayout rows;
@@ -39,15 +42,17 @@ final class AppDrawerDialog {
     private Map<String, Bitmap> icons = java.util.Collections.emptyMap();
     private final Map<String, List<ImageView>> badgeViews = new HashMap<>();
     private long activeWindow = -1;
+    private boolean activeDesktop;
 
     AppDrawerDialog(Activity activity, Listener listener) { this.activity = activity; this.listener = listener; }
 
-    void show(JSONArray windowList, JSONArray appList, Map<String, Bitmap> appIcons, long active) {
-        if (isShowing()) { update(windowList, appList, appIcons, active); return; }
+    void show(JSONArray windowList, JSONArray appList, Map<String, Bitmap> appIcons, long active,
+              boolean desktop, FrameLayout picture, boolean landscape) {
+        if (isShowing()) { dismiss(); return; }
         LinearLayout root = new LinearLayout(activity); root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(14), dp(14), dp(14), dp(14)); root.setBackgroundColor(0xff181a1f);
+        root.setPadding(dp(14), dp(14), dp(14), dp(14)); root.setBackground(background(0xff181a1f, 20));
         root.setFocusableInTouchMode(true);
-        TextView title = text("应用和窗口", 19, Color.WHITE); root.addView(title);
+        if (!landscape) { TextView title = text("应用和窗口", 19, Color.WHITE); root.addView(title); }
         search = new EditText(activity); search.setSingleLine(true); search.setHint("搜索应用");
         search.setTextColor(Color.WHITE); search.setHintTextColor(0xffadb3bd);
         search.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
@@ -56,14 +61,31 @@ final class AppDrawerDialog {
         scroll = new ScrollView(activity); scroll.setFillViewport(false);
         rows = new LinearLayout(activity); rows.setOrientation(LinearLayout.VERTICAL); scroll.addView(rows);
         int height = Math.min(dp(500), Math.max(dp(180), activity.getResources().getDisplayMetrics().heightPixels * 3 / 5));
-        root.addView(scroll, new LinearLayout.LayoutParams(-1, height));
-        dialog = new AlertDialog.Builder(activity).setView(root).setNegativeButton("关闭", (d, which) -> { }).create();
+        root.addView(scroll, landscape ? new LinearLayout.LayoutParams(-1, 0, 1) : new LinearLayout.LayoutParams(-1, height));
         search.addTextChangedListener(new TextWatcher() {
             public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
             public void onTextChanged(CharSequence s, int start, int before, int count) { render(false); }
             public void afterTextChanged(Editable value) { }
         });
-        update(windowList, appList, appIcons, active);
+        update(windowList, appList, appIcons, active, desktop);
+        if (landscape) {
+            overlay = new FrameLayout(activity);
+            overlay.setBackgroundColor(0x94000000);
+            overlay.setOnClickListener(v -> dismiss());
+            FrameLayout.LayoutParams panel = new FrameLayout.LayoutParams(Math.min(dp(380), Math.max(dp(160), picture.getWidth() - dp(44))), -1, Gravity.TOP | Gravity.START);
+            panel.setMargins(dp(22), dp(8), dp(22), dp(14));
+            root.setOnClickListener(v -> { });
+            overlay.addView(root, panel);
+            picture.addView(overlay, new FrameLayout.LayoutParams(-1, -1));
+            if (android.os.Build.VERSION.SDK_INT >= 33) {
+                overlayBack = this::handleBack;
+                activity.getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                        android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, overlayBack);
+            }
+            root.requestFocus();
+            return;
+        }
+        dialog = new AlertDialog.Builder(activity).setView(root).setNegativeButton("关闭", (d, which) -> { }).create();
         dialog.show();
         Window window = dialog.getWindow();
         if (window != null) {
@@ -74,8 +96,8 @@ final class AppDrawerDialog {
         root.requestFocus();
     }
 
-    void update(JSONArray windowList, JSONArray appList, Map<String, Bitmap> appIcons, long active) {
-        boolean sourceChanged = isShowing() && active >= 0 && active != activeWindow;
+    void update(JSONArray windowList, JSONArray appList, Map<String, Bitmap> appIcons, long active, boolean desktop) {
+        boolean sourceChanged = isShowing() && AppDrawerModel.sourceChanged(activeWindow, activeDesktop, active, desktop);
         List<AppDrawerModel.Window> nextWindows = new ArrayList<>();
         if (windowList != null) for (int i = 0; i < windowList.length(); i++) {
             JSONObject item = windowList.optJSONObject(i); if (item == null) continue;
@@ -95,13 +117,39 @@ final class AppDrawerDialog {
             if (before != after) for (ImageView badge : entry.getValue()) badge.setImageBitmap(after);
         }
         windows = java.util.Collections.unmodifiableList(nextWindows); apps = java.util.Collections.unmodifiableList(nextApps);
-        icons = nextIcons; activeWindow = active;
+        icons = nextIcons; activeWindow = active; activeDesktop = desktop;
         if (sourceChanged) { dismiss(); return; }
         if (rows != null && (changed || rows.getChildCount() == 0)) render(true);
     }
 
-    boolean isShowing() { return dialog != null && dialog.isShowing(); }
-    void dismiss() { if (dialog != null) dialog.dismiss(); }
+    boolean isShowing() { return overlay != null || (dialog != null && dialog.isShowing()); }
+    void handleBack() {
+        if (overlay == null) { dismiss(); return; }
+        android.view.WindowInsets insets = overlay.getRootWindowInsets();
+        boolean imeVisible = android.os.Build.VERSION.SDK_INT >= 30 && insets != null
+                ? insets.isVisible(android.view.WindowInsets.Type.ime()) : search != null && search.hasFocus();
+        if (imeVisible && search != null && search.hasFocus()) {
+            ((android.view.inputmethod.InputMethodManager) activity.getSystemService(Activity.INPUT_METHOD_SERVICE))
+                    .hideSoftInputFromWindow(search.getWindowToken(), 0);
+            search.clearFocus();
+        } else dismiss();
+    }
+    void dismiss() {
+        if (android.os.Build.VERSION.SDK_INT >= 33 && overlayBack != null) {
+            activity.getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(overlayBack);
+            overlayBack = null;
+        }
+        if (overlay != null) {
+            if (search != null && search.hasFocus()) {
+                ((android.view.inputmethod.InputMethodManager) activity.getSystemService(Activity.INPUT_METHOD_SERVICE))
+                        .hideSoftInputFromWindow(search.getWindowToken(), 0);
+                search.clearFocus();
+            }
+            if (overlay.getParent() instanceof android.view.ViewGroup parent) parent.removeView(overlay);
+            overlay = null;
+        }
+        if (dialog != null) { dialog.dismiss(); dialog = null; }
+    }
 
     private void render(boolean keepScroll) {
         if (rows == null) return;
@@ -163,8 +211,9 @@ final class AppDrawerDialog {
     private TextView text(String value, int size, int color) {
         TextView v = new TextView(activity); v.setText(value); v.setTextSize(size); v.setTextColor(color); return v;
     }
-    private GradientDrawable background(int color) {
-        GradientDrawable d = new GradientDrawable(); d.setColor(color); d.setCornerRadius(dp(9)); return d;
+    private GradientDrawable background(int color) { return background(color, 9); }
+    private GradientDrawable background(int color, int radius) {
+        GradientDrawable d = new GradientDrawable(); d.setColor(color); d.setCornerRadius(dp(radius)); return d;
     }
     private int dp(float value) { return Math.round(value * activity.getResources().getDisplayMetrics().density); }
 }

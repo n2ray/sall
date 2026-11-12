@@ -111,7 +111,7 @@ public final class MainActivity extends Activity {
     private static final int MOVE_LEFT_ACTION = 0x00ff0001, MOVE_RIGHT_ACTION = 0x00ff0002;
     private static final int CLOSE_WINDOW_ACTION = 0x00ff0003, MINIMIZE_WINDOW_ACTION = 0x00ff0004, FULL_SCREEN_ACTION = 0x00ff0005;
     private final Runnable drawerUpdate = () -> {
-        if (appDrawer != null && appDrawer.isShowing()) appDrawer.update(drawerWindows, appList, appIcons, activeWindowId);
+        if (appDrawer != null && appDrawer.isShowing()) appDrawer.update(drawerWindows, appList, appIcons, activeWindowId, desktopActive);
     };
     private int menuVersion, menuToken, pendingMenuToken;
     private JSONObject hostSettings;
@@ -496,7 +496,10 @@ public final class MainActivity extends Activity {
         };
         root.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, oright, ob) -> {
             if (r - l != oright - ol || b - t != ob - ot) { dismissWindowControls(); cancelWindowDrag(); }
-            if (oright > ol && ob > ot && (r - l > b - t) != (oright - ol > ob - ot) && pictureInput != null) pictureInput.cancel();
+            if (oright > ol && ob > ot && (r - l > b - t) != (oright - ol > ob - ot)) {
+                if (pictureInput != null) pictureInput.cancel();
+                if (appDrawer != null) appDrawer.dismiss();
+            }
             updateSessionLayout.run();
         });
         keyboard = new RemoteKeyboard(this, new RemoteKeyboard.Listener() {
@@ -511,6 +514,7 @@ public final class MainActivity extends Activity {
         return b;
     }
     private void toggleKeyboard() {
+        if (appDrawer != null) appDrawer.dismiss();
         android.view.inputmethod.InputMethodManager manager = (android.view.inputmethod.InputMethodManager)getSystemService(INPUT_METHOD_SERVICE);
         android.view.WindowInsets insets = root.getRootWindowInsets();
         boolean visible = android.os.Build.VERSION.SDK_INT >= 30 && insets != null
@@ -559,6 +563,14 @@ public final class MainActivity extends Activity {
         catch (Exception e) { show("按键发送失败"); }
     }
     @Override public boolean dispatchKeyEvent(android.view.KeyEvent event) {
+        if (appDrawer != null && appDrawer.isShowing()) {
+            releaseHardwareKeys();
+            if (event.getKeyCode() == android.view.KeyEvent.KEYCODE_BACK) {
+                if (event.getAction() == android.view.KeyEvent.ACTION_UP) appDrawer.handleBack();
+                return true;
+            }
+            return super.dispatchKeyEvent(event);
+        }
         android.view.View focused = getCurrentFocus();
         if (!HardwareKeyGate.sendRemote(connection != null, hasWindowFocus(), sessionPanel.getVisibility() == android.view.View.VISIBLE,
                 focused != null && focused != keyboard && focused.onCheckIsTextEditor())) {
@@ -670,10 +682,19 @@ public final class MainActivity extends Activity {
                 catch (Exception e) { show("无法打开应用"); }
             }
         });
-        appDrawer.show(drawerWindows, appList, appIcons, activeWindowId);
+        dismissWindowControls();
+        pictureInput.cancel();
+        releaseHardwareKeys();
+        if (!appDrawer.isShowing()) keyboard.finishAndForget();
+        if (!appDrawer.isShowing() && root.getWidth() > root.getHeight()) {
+            ((android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(keyboard.getWindowToken(), 0);
+            keyboard.clearFocus();
+        }
+        appDrawer.show(drawerWindows, appList, appIcons, activeWindowId, desktopActive, picture, root.getWidth() > root.getHeight());
     }
     private void refreshDrawer() { ui.removeCallbacks(drawerUpdate); ui.postDelayed(drawerUpdate, 250); }
     private void showMenu(JSONArray items, String title, int version) {
+        if (appDrawer != null) appDrawer.dismiss();
         if (items.length() == 0) { show("当前应用没有可用菜单"); return; }
         String[] names = new String[items.length()];
         for (int i = 0; i < names.length; i++) {
@@ -693,6 +714,7 @@ public final class MainActivity extends Activity {
         }).show();
     }
     private void chooseScale() {
+        if (appDrawer != null) appDrawer.dismiss();
         if (desktopActive) { show("文字大小只用于调整单个窗口；桌面保持原来的尺寸。"); return; }
         String[] labels = {"不调整", "0.5×", "0.6×", "0.75×", "1×", "1.25×", "1.5×"};
         new android.app.AlertDialog.Builder(this).setTitle("文字大小").setItems(labels, (dialog, index) -> {
@@ -779,6 +801,7 @@ public final class MainActivity extends Activity {
         video.setTranslationY(enlarged.top() + enlarged.height() / 2 - picture.getHeight() / 2f);
     }
     private void settings() {
+        if (appDrawer != null) appDrawer.dismiss();
         boolean reverse = getPreferences(0).getBoolean("reverseScrolling", false);
         boolean gestures = getPreferences(0).getBoolean("macGestures", true);
         float density = getResources().getDisplayMetrics().density;
@@ -902,6 +925,7 @@ public final class MainActivity extends Activity {
         catch (Exception e) { show("剪贴板发送失败"); }
     }
     private void disconnect() {
+        if (appDrawer != null) appDrawer.dismiss();
         dismissWindowControls(); cancelWindowDrag();
         pictureInput.cancel();
         trackpad.cancelGestures();
@@ -1635,7 +1659,7 @@ public final class MainActivity extends Activity {
     @Override protected void onResume() { super.onResume(); keyframeForeground = true; android.util.Log.i("SillAndroid", "Recovery: foreground"); if (screenAwake != null) screenAwake.setForeground(true); }
     @Override protected void onPause() { android.util.Log.i("SillAndroid", "Recovery: background"); keyframeForeground = false; synchronized (surfaceLock) { surfaceEpoch++; } recoveryFrame.set(null); interruptPicture(); if (keyframeRecovery != null) keyframeRecovery.leftForeground(); if (screenAwake != null) screenAwake.setForeground(false); super.onPause(); }
     @Override public void onUserInteraction() { super.onUserInteraction(); if (screenAwake != null) screenAwake.personActed(); }
-    @Override protected void onStop() { dismissWindowControls(); cancelWindowDrag(); stopFpsObservers(); clipboardReceipt.cancel(); if (pictureInput != null) pictureInput.cancel(); if (trackpad != null) trackpad.cancelGestures(); if (discovery != null) discovery.stop(); nearby.clear(); nearbyMacs.removeAllViews(); super.onStop(); }
+    @Override protected void onStop() { if (appDrawer != null) appDrawer.dismiss(); dismissWindowControls(); cancelWindowDrag(); stopFpsObservers(); clipboardReceipt.cancel(); if (pictureInput != null) pictureInput.cancel(); if (trackpad != null) trackpad.cancelGestures(); if (discovery != null) discovery.stop(); nearby.clear(); nearbyMacs.removeAllViews(); super.onStop(); }
     @Override protected void onDestroy() {
         stopFpsObservers();
         if (screenAwake != null) screenAwake.close();

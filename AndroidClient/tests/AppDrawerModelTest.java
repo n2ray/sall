@@ -15,6 +15,10 @@ public final class AppDrawerModelTest {
         assert AppDrawerModel.nextWindow(all.open().get(0), 5) == 6;
         assert AppDrawerModel.nextWindow(all.open().get(0), 6) == 5;
         assert AppDrawerModel.nextWindow(all.open().get(1), 5) == 7;
+        assert AppDrawerModel.sourceChanged(5, false, -1, true);
+        assert AppDrawerModel.sourceChanged(-1, true, 5, false);
+        assert !AppDrawerModel.sourceChanged(5, false, 5, false);
+        assert !AppDrawerModel.sourceChanged(5, false, -1, false);
         assert all.closed().size() == 2 && all.closed().get(0).name().equals("Alpha");
         var title = AppDrawerModel.filter(windows, apps, " DRAFT ");
         assert title.open().isEmpty() && title.closed().isEmpty();
