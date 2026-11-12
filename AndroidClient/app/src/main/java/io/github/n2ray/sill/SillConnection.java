@@ -81,10 +81,18 @@ final class SillConnection implements Closeable {
     byte[] pair(String code, String deviceName, String model) throws Exception {
         android.util.Log.i("SillAndroid", "Deriving pairing proof");
         byte[] key = PairingProof.codeKey(code, peerFingerprint);
-        android.util.Log.i("SillAndroid", "Sending pairing proof");
+        return pairWithKey(key, "code", deviceName, model);
+    }
+
+    byte[] pairQr(byte[] secret, String deviceName, String model) throws Exception {
+        if (secret == null || secret.length != 16) throw new IllegalArgumentException("Invalid QR secret");
+        return pairWithKey(secret, "qr", deviceName, model);
+    }
+
+    private byte[] pairWithKey(byte[] key, String method, String deviceName, String model) throws Exception {
         byte[] proof = PairingProof.proof(key, peerFingerprint, deviceFingerprint, true);
         String encoded = Base64.encodeToString(proof, Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
-        JSONObject request = new JSONObject().put("v", 1).put("method", "code").put("proof", encoded)
+        JSONObject request = new JSONObject().put("v", 1).put("method", method).put("proof", encoded)
                 .put("name", deviceName).put("model", model);
         StreamWire.write(socket.getOutputStream(), 19, request.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
         StreamWire.Message response = StreamWire.read(socket.getInputStream(), 4096);

@@ -8,8 +8,8 @@ Product direction: follow the iOS client's layout and interaction by default. Ea
 
 - [ ] Paired mutual TLS, certificate pinning, incorrect/expired codes, identity changes and revocation: core path works on the Xiaomi over Tailscale; remaining error cases need end-to-end checks.
 - [ ] Discovery and saved Macs: basic local discovery and address/port records exist; add stable Mac identity, names, multiple addresses, route recovery, IPv6, and service-loss handling.
-- [ ] QR/deep-link pairing with an explicit identity confirmation; iOS has it, Android does not.
-- [ ] Reconnect and recovery: bounded retry exists; verify real Wi-Fi/mobile transitions, Mac sleep/restart, revocation, stalled connections, source continuity and explicit cancellation. Handle host goodbye reasons and keyframe recovery as iOS does.
+- [ ] QR/deep-link pairing: Android accepts validated pairing links with explicit identity confirmation; camera scanning, discovery for links without addresses and end-to-end verification remain.
+- [ ] Reconnect and recovery: bounded retry and keyframe recovery are implemented; verify real Wi-Fi/mobile transitions, Mac sleep/restart, revocation, stalled connections, source continuity, explicit cancellation and interrupted or static video. Handle host goodbye reasons as iOS does.
 - [ ] Host locked/off-console state: ordinary lock and other-user states have separate handling, with a cover until a newly decoded frame is presented. Normal streaming was verified on the Xiaomi; lock/unlock and other-user transitions still require real-device verification.
 
 ## Windows and picture
@@ -18,8 +18,8 @@ Product direction: follow the iOS client's layout and interaction by default. Ea
 - [ ] Selected-window fitting: iOS starts with Aa off and fits the complete picture without stretching. Test repeated source changes, rotation, app minimum sizes and host refusal; some applications cannot fill the picture without cropping.
 - [ ] Stage Manager may cause the Mac host to supply a tilted thumbnail. The iOS client displays the host thumbnail; Android follows that behavior. Test window closure, source changes and cache cleanup.
 - [ ] Desktop display cycling is implemented only when the host advertises it. The tested Mac 0.6.1 does not; the Android client cannot add the missing host capability.
-- [ ] Zoom, pan and gesture ownership: current 1–5× pinch is present; test the complete finger lifecycle, cancellation, rotation and focal-point preservation against `StreamZoom.swift`.
-- [ ] Portrait Larger Picture, soft keyboard accommodation and responsive layouts; the standard portrait and landscape structures now follow iOS and still need real-device checks.
+- [ ] Zoom, pan and gesture ownership: current 1–5× pinch is present. On 2026-11-12 the user confirmed portrait tap and pinch on the Xiaomi; still test the complete finger lifecycle, cancellation, rotation and focal-point preservation against `StreamZoom.swift`.
+- [ ] Portrait Larger Picture, soft keyboard accommodation and responsive layouts; on 2026-11-12 the user confirmed the landscape top toolbar and large picture. IME behavior, detailed proportions and Larger Picture still need real-device checks.
 
 ## Input and local interaction
 
@@ -31,6 +31,7 @@ Product direction: follow the iOS client's layout and interaction by default. Ea
 
 ## Audio, settings and lifecycle
 
+- [ ] Viewport frame rate follows display capability with a 60 fps cap on remote or power-saving connections; verify dynamic changes on hardware. Android VPN route classification may not identify every split-tunnel route.
 - [ ] Sound: AAC-ELD decoding is experimental and off by default. Test real playback and implement iOS-quality timing, mute, output-route changes, reconnect and audio/video synchronization.
 - [ ] Complete host settings and local preferences, with capability gating, host acknowledgements and failure handling; include scrolling, gestures, long-press duration and Larger Picture.
 - [ ] Picture in Picture and foreground/background handling; idle-screen policy and foreground-only clipboard updates have logic checks but need device lifecycle verification.

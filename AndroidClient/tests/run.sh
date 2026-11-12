@@ -43,3 +43,9 @@ javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/PhoneStreamL
 java -ea -cp "$test_dir" io.github.n2ray.sill.PhoneStreamLayoutTest
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/PictureStroke.java "$root"/tests/PictureStrokeTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sill.PictureStrokeTest
+javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/ViewportFps.java "$root"/tests/ViewportFpsTest.java
+java -ea -cp "$test_dir" io.github.n2ray.sill.ViewportFpsTest
+javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/PairLink.java "$root"/tests/PairLinkTest.java
+java -ea -cp "$test_dir" io.github.n2ray.sill.PairLinkTest
+javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/KeyframeRecovery.java "$root"/tests/KeyframeRecoveryTest.java
+java -ea -cp "$test_dir" io.github.n2ray.sill.KeyframeRecoveryTest
