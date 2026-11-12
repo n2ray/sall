@@ -17,6 +17,18 @@ public final class PairLinkTest {
         PairLink link = PairLink.parse(base + "&n=Tom%20%26%20Jerry%E2%80%99s%20Mac%3Dmini%3F&a=100.101.102.103&a=%5Bfd7a%3A115c%3Aa1e0%3A%3A1234%5D%3A17455");
         assert link.name.equals("Tom & Jerry’s Mac=mini?");
         assert link.port == 7455 && link.addresses.size() == 2;
+        assert PairLink.pairingDoor(java.util.Set.of("p"));
+        assert PairLink.pairingDoor(java.util.Set.of("P"));
+        assert !PairLink.pairingDoor(java.util.Set.of("r"));
+        PairLink.Address local = new PairLink.Address("192.168.1.9", 17455);
+        assert PairLink.parse(base).candidates(java.util.List.of(local)).equals(java.util.List.of(local));
+        assert link.candidates(java.util.List.of(local, local)).equals(java.util.List.of(local, new PairLink.Address("100.101.102.103", 7455), new PairLink.Address("fd7a:115c:a1e0::1234", 17455)));
+        java.util.List<PairLink.Address> many = new java.util.ArrayList<>();
+        for (int i = 1; i <= 10; i++) many.add(new PairLink.Address("192.168.1." + i, 7455));
+        assert link.localCandidates(many).size() == 2;
+        assert PairLink.parse(base).localCandidates(many).size() == 8;
+        PairLink.Address remote = new PairLink.Address("100.101.102.103", 7455);
+        assert link.candidates(java.util.List.of(remote)).stream().filter(a -> a.equals(remote)).count() == 2;
         assert link.addresses.get(1).host().equals("fd7a:115c:a1e0::1234") && link.addresses.get(1).port() == 17455;
         byte[] copy = link.secret(); copy[0] = 1; assert link.secret()[0] == 0;
         assert PairLink.parse(base).name.equals("Mac");

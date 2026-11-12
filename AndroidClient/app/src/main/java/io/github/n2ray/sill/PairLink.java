@@ -30,6 +30,30 @@ final class PairLink {
     byte[] secret() { return secret.clone(); }
     void clearSecret() { java.util.Arrays.fill(secret, (byte) 0); }
 
+    static boolean pairingDoor(java.util.Set<String> keys) {
+        for (String key : keys) if (key.equalsIgnoreCase("p")) return true;
+        return false;
+    }
+
+    List<Address> localCandidates(List<Address> local) {
+        List<Address> result = new ArrayList<>();
+        int limit = addresses.isEmpty() ? 8 : 2;
+        for (Address a : local) if (!result.contains(a) && result.size() < limit) result.add(a);
+        return result;
+    }
+
+    List<Address> candidates(List<Address> local) {
+        List<Address> result = new ArrayList<>(localCandidates(local));
+        List<Address> explicit = new ArrayList<>();
+        List<Address> advertised = new ArrayList<>(addresses);
+        advertised.sort(java.util.Comparator.comparingInt(a -> a.host().equals("127.0.0.1") || a.host().equals("::1") ? 1 : 0));
+        for (Address a : advertised) {
+            Address effective = new Address(a.host(), a.port() == 0 ? port : a.port());
+            if (!explicit.contains(effective)) { explicit.add(effective); result.add(effective); }
+        }
+        return result;
+    }
+
     static PairLink parse(String text) {
         try {
             if (text == null || text.length() > 8192) throw new IllegalArgumentException();

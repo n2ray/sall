@@ -6,6 +6,11 @@ import android.net.nsd.NsdServiceInfo;
 import android.os.Handler;
 import android.os.Looper;
 import java.util.ArrayDeque;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.HashSet;
+import java.util.Set;
 
 /** Local discovery is a hint only; every connection still requires a paired TLS key. */
 final class MacDiscovery {
@@ -13,6 +18,8 @@ final class MacDiscovery {
     private final NsdManager manager;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ArrayDeque<NsdServiceInfo> pending = new ArrayDeque<>();
+    private final Map<String, PairLink.Address> pairingDoors = new LinkedHashMap<>();
+    private final Set<String> present = new HashSet<>();
     private final Listener listener;
     private boolean active, resolving;
     MacDiscovery(Context context, Listener listener) {
@@ -23,8 +30,8 @@ final class MacDiscovery {
         public void onStopDiscoveryFailed(String type, int error) { }
         public void onDiscoveryStarted(String type) { }
         public void onDiscoveryStopped(String type) { }
-        public void onServiceFound(NsdServiceInfo info) { main.post(() -> { if (active) { pending.add(info); resolveNext(); } }); }
-        public void onServiceLost(NsdServiceInfo info) { main.post(() -> { pending.removeIf(p -> p.getServiceName().equals(info.getServiceName())); listener.lost(info.getServiceName()); }); }
+        public void onServiceFound(NsdServiceInfo info) { main.post(() -> { if (active) { present.add(info.getServiceName()); pending.add(info); resolveNext(); } }); }
+        public void onServiceLost(NsdServiceInfo info) { main.post(() -> { present.remove(info.getServiceName()); pending.removeIf(p -> p.getServiceName().equals(info.getServiceName())); pairingDoors.remove(info.getServiceName()); listener.lost(info.getServiceName()); }); }
     };
     void start() {
         if (active || manager == null) return;
@@ -34,9 +41,10 @@ final class MacDiscovery {
     }
     void stop() {
         if (!active) return;
-        active = false; pending.clear();
+        active = false; pending.clear(); pairingDoors.clear(); present.clear();
         try { manager.stopServiceDiscovery(discovery); } catch (IllegalArgumentException ignored) { }
     }
+    List<PairLink.Address> pairingDoors() { return List.copyOf(pairingDoors.values()); }
     private void resolveNext() {
         if (!active || resolving || pending.isEmpty()) return;
         resolving = true; NsdServiceInfo service = pending.removeFirst();
@@ -45,7 +53,12 @@ final class MacDiscovery {
                 public void onResolveFailed(NsdServiceInfo s, int error) { main.post(() -> { resolving = false; resolveNext(); }); }
                 public void onServiceResolved(NsdServiceInfo s) { main.post(() -> {
                     resolving = false;
-                    if (active && s.getHost() != null && s.getPort() > 0) listener.found(s.getServiceName(), s.getHost().getHostAddress(), s.getPort());
+                    if (active && present.contains(s.getServiceName()) && s.getHost() != null && s.getPort() > 0 && s.getPort() <= 65535) {
+                        boolean tls = PairLink.pairingDoor(s.getAttributes().keySet());
+                        if (tls) pairingDoors.put(s.getServiceName(), new PairLink.Address(s.getHost().getHostAddress(), s.getPort()));
+                        else pairingDoors.remove(s.getServiceName());
+                        listener.found(s.getServiceName(), s.getHost().getHostAddress(), s.getPort());
+                    }
                     resolveNext();
                 }); }
             });

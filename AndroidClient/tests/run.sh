@@ -55,3 +55,5 @@ javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/WindowHold.j
 java -ea -cp "$test_dir" io.github.n2ray.sill.WindowHoldTest
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/WindowOrder.java "$root"/tests/WindowOrderTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sill.WindowOrderTest
+javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/InitialSourcePolicy.java "$root"/tests/InitialSourcePolicyTest.java
+java -ea -cp "$test_dir" io.github.n2ray.sill.InitialSourcePolicyTest

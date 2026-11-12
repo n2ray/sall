@@ -34,6 +34,10 @@ final class SillConnection implements Closeable {
     }
 
     static SillConnection connect(String host, int port, String alpn, byte[] pin) throws Exception {
+        return connect(host, port, alpn, pin, 10000, 15000);
+    }
+
+    static SillConnection connect(String host, int port, String alpn, byte[] pin, int connectTimeout, int readTimeout) throws Exception {
         KeyStore keys = KeyStore.getInstance("AndroidKeyStore"); keys.load(null);
         if (!keys.containsAlias(ALIAS)) {
             KeyPairGenerator generator = KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, "AndroidKeyStore");
@@ -65,8 +69,9 @@ final class SillConnection implements Closeable {
         context.init(km.getKeyManagers(), new TrustManager[] {trust}, new SecureRandom());
         Socket tcp = new Socket();
         try {
-            tcp.connect(new InetSocketAddress(host, port), 10000); tcp.setTcpNoDelay(true); tcp.setSoTimeout(15000);
+            tcp.connect(new InetSocketAddress(host, port), connectTimeout); tcp.setTcpNoDelay(true); tcp.setSoTimeout(readTimeout);
             SSLSocket tls = (SSLSocket) context.getSocketFactory().createSocket(tcp, host, port, true);
+            tls.setSoTimeout(readTimeout);
             SSLParameters params = tls.getSSLParameters();
             params.setProtocols(new String[] {"TLSv1.3"}); params.setApplicationProtocols(new String[] {alpn});
             tls.setSSLParameters(params);
@@ -86,6 +91,7 @@ final class SillConnection implements Closeable {
 
     byte[] pairQr(byte[] secret, String deviceName, String model) throws Exception {
         if (secret == null || secret.length != 16) throw new IllegalArgumentException("Invalid QR secret");
+        socket.setSoTimeout(15000);
         return pairWithKey(secret, "qr", deviceName, model);
     }
 

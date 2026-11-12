@@ -32,13 +32,17 @@ public final class MainActivity extends Activity {
     private final Object outputLock = new Object();
     private final Object reconnectLock = new Object();
     private volatile SillConnection connection;
+    // Accessed only under outputLock: serializes an automatic first pick with user picks.
+    private InitialSourcePolicy initialSource;
     private volatile HostLockState hostLock;
     private volatile PointerSync pointerSync;
     private volatile boolean running;
     private volatile Surface surface;
     private LinearLayout root, connectionPanel, sessionPanel, choices, savedMacs, nearbyMacs, keyRow;
     private ScrollView connectionContainer;
-    private TextView status, sessionStatus;
+    private TextView status, sessionStatus, pictureStatus;
+    private boolean pictureStatusActive;
+    private int pictureStatusGeneration;
     private EditText host, port, code;
     private RemoteKeyboard keyboard;
     private TrackpadView trackpad;
@@ -222,13 +226,9 @@ public final class MainActivity extends Activity {
         final PairLink link;
         try { link = PairLink.parse(raw); }
         catch (IllegalArgumentException e) { show("无效的 Sill 配对链接。"); return; }
-        if (link.addresses.isEmpty()) {
-            link.clearSecret();
-            show("此链接未包含 Mac 地址；请使用配对码连接。");
-            return;
-        }
         StringBuilder message = new StringBuilder("请确认这是你自己的 Mac：\n\n").append(link.name).append("\n");
         for (PairLink.Address a : link.addresses) message.append("\n").append(a.display(link.port));
+        if (link.addresses.isEmpty()) message.append("\n将在本地网络查找此 Mac。");
         message.append("\n\n仅信任来自你自己 Mac 的配对链接。");
         android.app.AlertDialog dialog = new android.app.AlertDialog.Builder(this)
                 .setTitle("确认配对 Mac").setMessage(message.toString())
@@ -241,17 +241,27 @@ public final class MainActivity extends Activity {
     private void pairLink(PairLink link) {
         if (running) { link.clearSecret(); show("已有连接，请先断开后重新打开配对链接。"); return; }
         running = true; closing = false; show("正在配对…");
+        if (link.addresses.isEmpty() && discovery.pairingDoors().isEmpty()) {
+            discovery.start();
+            ui.postDelayed(() -> beginPairLink(link), 4000);
+        } else beginPairLink(link);
+    }
+
+    private void beginPairLink(PairLink link) {
+        if (!running || closing || isFinishing() || isDestroyed()) { link.clearSecret(); return; }
+        java.util.List<PairLink.Address> local = link.localCandidates(discovery.pairingDoors());
+        java.util.List<PairLink.Address> candidates = link.candidates(local);
         network.execute(() -> {
             PairLink.Address winner = null; byte[] pin = null;
             byte[] secret = link.secret(); byte[] expected = link.fingerprint();
             try {
-                // Loopback is useful over adb reverse, but should not delay real network addresses.
-                java.util.List<PairLink.Address> candidates = new java.util.ArrayList<>(link.addresses);
-                candidates.sort(java.util.Comparator.comparingInt(a -> a.host().equals("127.0.0.1") || a.host().equals("::1") ? 1 : 0));
-                for (PairLink.Address a : candidates) {
+                for (int i = 0; i < candidates.size(); i++) {
+                    PairLink.Address a = candidates.get(i);
                     if (!running || closing || Thread.currentThread().isInterrupted()) break;
                     int number = a.port() == 0 ? link.port : a.port();
-                    try (SillConnection pair = SillConnection.connect(a.host(), number, "sill-pair/1", expected)) {
+                    try (SillConnection pair = i < local.size()
+                            ? SillConnection.connect(a.host(), number, "sill-pair/1", expected, 1200, 1800)
+                            : SillConnection.connect(a.host(), number, "sill-pair/1", expected)) {
                         pin = pair.pairQr(secret, android.os.Build.MODEL, android.os.Build.DEVICE);
                         winner = a; break;
                     } catch (Exception ignored) { }
@@ -360,6 +370,17 @@ public final class MainActivity extends Activity {
         lockOverlay.setTextColor(0xffd6d9de); lockOverlay.setTextSize(16); lockOverlay.setPadding(dp(20), dp(20), dp(20), dp(20));
         lockOverlay.setBackgroundColor(0xff111216); lockOverlay.setText("正在等待 Mac 画面…");
         picture.addView(lockOverlay, new android.widget.FrameLayout.LayoutParams(-1, -1));
+        pictureStatus = new TextView(this);
+        pictureStatus.setTextColor(0xfff2f2f4); pictureStatus.setTextSize(12);
+        pictureStatus.setGravity(android.view.Gravity.CENTER); pictureStatus.setMaxLines(2);
+        pictureStatus.setPadding(dp(14), dp(7), dp(14), dp(7));
+        pictureStatus.setBackground(shape(0xeb303238, 30));
+        pictureStatus.setAccessibilityLiveRegion(android.view.View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        pictureStatus.setVisibility(android.view.View.GONE);
+        android.widget.FrameLayout.LayoutParams statusParams = new android.widget.FrameLayout.LayoutParams(-2, -2,
+                android.view.Gravity.TOP | android.view.Gravity.CENTER_HORIZONTAL);
+        statusParams.setMargins(dp(16), dp(8), dp(16), 0);
+        picture.addView(pictureStatus, statusParams);
         pictureInput = new PictureInput(cursor, zoom, new PictureInput.Listener() {
             public boolean beginPicture() {
                 if (trackpad == null) return false;
@@ -433,6 +454,8 @@ public final class MainActivity extends Activity {
             trackpad.setVerticalRatio(large && videoWidth > 0 && videoHeight > 0 ? (float) videoHeight / videoWidth : 1 / 1.6f);
             int visible = landscape ? android.view.View.GONE : android.view.View.VISIBLE;
             sessionStatus.setVisibility(visible); keys.setVisibility(visible); trackpad.setVisibility(visible);
+            pictureStatus.setMaxWidth(Math.max(0, width - dp(32)));
+            pictureStatus.setVisibility(landscape && pictureStatusActive ? android.view.View.VISIBLE : android.view.View.GONE);
             stripRow.setVisibility(landscape || large ? android.view.View.GONE : android.view.View.VISIBLE);
             if (landscape && strip.getParent() != bar) {
                 stripRow.removeView(strip); if (menuButton.getParent() == stripRow) stripRow.removeView(menuButton); sessionPanel.removeView(bar);
@@ -887,9 +910,23 @@ public final class MainActivity extends Activity {
         if (c != null) try { c.close(); } catch (Exception ignored) { }
     }
 
-    private void show(String text) { ui.post(() -> { status.setText(text); sessionStatus.setText(text); }); }
+    private void show(String text) {
+        SillConnection expected = connection;
+        ui.post(() -> { if (connection == expected) displayStatus(text); });
+    }
     private void showFor(SillConnection expected, String text) {
-        ui.post(() -> { if (connection == expected) { status.setText(text); sessionStatus.setText(text); } });
+        ui.post(() -> { if (connection == expected) displayStatus(text); });
+    }
+    private void displayStatus(String text) {
+        status.setText(text); sessionStatus.setText(text); pictureStatus.setText(text);
+        int generation = ++pictureStatusGeneration;
+        pictureStatusActive = !text.isEmpty();
+        pictureStatus.setVisibility(pictureStatusActive && root.getWidth() > root.getHeight()
+                ? android.view.View.VISIBLE : android.view.View.GONE);
+        if (!text.startsWith("连接中断")) ui.postDelayed(() -> {
+            if (pictureStatusGeneration != generation) return;
+            pictureStatusActive = false; pictureStatus.setVisibility(android.view.View.GONE);
+        }, 5000);
     }
     private void connect() { start(true); }
     private void start(boolean pairing) {
@@ -926,7 +963,9 @@ public final class MainActivity extends Activity {
                             if (!running || closing) break;
                             HostLockState sessionLock = new HostLockState(false); sessionLock.requireFreshFrame();
                             hostLock = sessionLock; keyframeRecovery = new KeyframeRecovery(); keyframeStreaming = false; keyframeWorstRtt = 0; keyframeRttWindow = 0; recoveryFrame.set(null); lastParameters = null; revealFrame.set(null); recoveryGeneration = -1;
-                            pointerSync = new PointerSync(); connection = session; session.sessionTimeout();
+                            pointerSync = new PointerSync();
+                            synchronized (outputLock) { initialSource = new InitialSourcePolicy(); connection = session; }
+                            session.sessionTimeout();
                             ui.post(() -> { if (connection == session) { renderLockOverlay(sessionLock, session); connectionContainer.setVisibility(android.view.View.GONE); sessionPanel.setVisibility(android.view.View.VISIBLE); picture.post(this::sendViewport); } });
                             JSONObject hello = new JSONObject().put("protocol", 1).put("appVersion", "0.1.0").put("device", android.os.Build.MODEL);
                             if (audioEnabled && AudioPlayer.supported()) { audio = new AudioPlayer(text -> showFor(session, text)); hello.put("audio", new JSONArray().put("aac-eld")); }
@@ -943,6 +982,7 @@ public final class MainActivity extends Activity {
                         }
                     } catch (Exception error) {
                         if (!running || closing) break;
+                        android.util.Log.i("SillAndroid", "Session ended: " + error.getClass().getSimpleName());
                         if (connectedAt != 0 && android.os.SystemClock.uptimeMillis() - connectedAt >= 10000) retries = 0;
                         long delay = ReconnectPolicy.delayMillis(retries);
                         if (!established || !ReconnectPolicy.retryable(error) || delay < 0) throw error;
@@ -961,7 +1001,7 @@ public final class MainActivity extends Activity {
                         synchronized (reconnectLock) { if (running && !closing) reconnectLock.wait(delay); }
                     }
                 }
-            } catch (Exception e) { if (!closing) { android.util.Log.e("SillAndroid", "Connection failed", e); show("连接结束: " + e.getMessage()); } }
+            } catch (Exception e) { if (!closing) { android.util.Log.e("SillAndroid", "Connection failed", e); ui.post(() -> displayStatus("连接结束: " + e.getMessage())); } }
             finally {
                 connection = null; hostLock = null; keyframeRecovery = null; keyframeStreaming = false; recoveryFrame.set(null); lastParameters = null; revealFrame.set(null); recoveryGeneration = -1; pointerSync = null; clipboardSubscribed = false; hostClipboardAvailable = false; clipboardSource = ""; clipboardReceipt.cancel(); releaseDecoder();
                 if (audio != null) { audio.close(); audio = null; }
@@ -980,14 +1020,23 @@ public final class MainActivity extends Activity {
         sendAsync(kind, value, false);
     }
     private void sendAsync(int kind, JSONObject value, boolean empty) {
-        if (!allowedForLock(kind, value)) return;
+        if (!allowedForLock(kind, value)) {
+            if (kind == 6 || kind == 7 || kind == 47) synchronized (outputLock) {
+                if (connection != null && initialSource != null) initialSource.chosen();
+            }
+            return;
+        }
         if (kind == 6 || kind == 7 || kind == 47) clipboardReceipt.cancel();
         if (kind == 8) {
             JSONObject pointer = value.optJSONObject("pointer");
             if (value.has("key") || value.has("text") || (pointer != null && pointer.optString("_0").endsWith("Down"))) clipboardReceipt.cancel();
         }
-        SillConnection expected = connection;
-        if (expected == null) return;
+        SillConnection expected;
+        synchronized (outputLock) {
+            expected = connection;
+            if (expected == null) return;
+            if ((kind == 6 || kind == 7 || kind == 47) && initialSource != null) initialSource.chosen();
+        }
         PointerSync feed = pointerSync;
         if (kind == 8 && feed != null && connection == expected) feed.inputQueued();
         input.execute(() -> {
@@ -1019,7 +1068,9 @@ public final class MainActivity extends Activity {
                 JSONObject list = new JSONObject(new String(message.payload(), StandardCharsets.UTF_8));
                 JSONArray windows = list.getJSONArray("windows");
                 JSONObject streamingSource = list.optJSONObject("active");
-                keyframeStreaming = streamingSource != null && (streamingSource.has("window") || streamingSource.has("desktop"));
+                boolean streaming = streamingSource != null && (streamingSource.has("window") || streamingSource.has("desktop"));
+                if (keyframeStreaming != streaming) android.util.Log.i("SillAndroid", "Recovery: streaming=" + streaming);
+                keyframeStreaming = streaming;
                 HostLockState lock = hostLock; SillConnection listedSession = connection;
                 if (lock != null && listedSession != null) {
                     boolean wasCovered = lock.isCovered();
@@ -1036,6 +1087,21 @@ public final class MainActivity extends Activity {
                         if (connection != listedSession || hostLock != lock) return;
                         lock.onTime(android.os.SystemClock.uptimeMillis()); renderLockOverlay(lock, listedSession);
                     }, HostLockState.UNLOCK_TIMEOUT_MS);
+                }
+                synchronized (outputLock) {
+                    if (connection == listedSession && listedSession != null && initialSource != null) {
+                        InitialSourcePolicy.Source firstSource = streamingSource == null ? InitialSourcePolicy.Source.UNKNOWN
+                                : streamingSource.has("desktop") ? InitialSourcePolicy.Source.DESKTOP
+                                : streamingSource.has("window") ? InitialSourcePolicy.Source.WINDOW
+                                : streamingSource.has("none") ? InitialSourcePolicy.Source.NONE : InitialSourcePolicy.Source.UNKNOWN;
+                        boolean firstList = !initialSource.listed();
+                        boolean autoDesktop = initialSource.onList(firstSource, allowedForLock(6, new JSONObject()));
+                        if (firstList) android.util.Log.i("SillAndroid", "Session: first source=" + firstSource.name().toLowerCase(java.util.Locale.ROOT));
+                        if (autoDesktop) {
+                            listedSession.send(6, new JSONObject().put("desktop", new JSONObject()).toString().getBytes(StandardCharsets.UTF_8));
+                            android.util.Log.i("SillAndroid", "Session: initial desktop requested");
+                        }
+                    }
                 }
                 hostClipboardAvailable = list.optInt("clipboard", 0) >= 1;
                 if (!hostClipboardAvailable) { clipboardSubscribed = false; clipboardReceipt.cancel(); }
@@ -1239,6 +1305,7 @@ public final class MainActivity extends Activity {
                 // SurfaceHolder can reuse the same Surface Java object after destroying its native
                 // surface. Always rebuild the codec after an epoch change, even if == still holds.
                 if (decoder != null && (decoderEpoch != epoch || target != decoderSurface)) {
+                    android.util.Log.i("SillAndroid", "Recovery: replacing decoder for new surface");
                     releaseDecoder(); waitingForKeyframe = true; interruptPicture();
                 }
                 if (decoder != null) drainVideo();
@@ -1261,6 +1328,7 @@ public final class MainActivity extends Activity {
                     }
                     KeyframeRecovery recovery = keyframeRecovery;
                     if (message.keyframe() && recovery != null && recovery.isOpen()) {
+                        android.util.Log.i("SillAndroid", "Recovery: keyframe queued");
                         long generation = recovery.generation();
                         RecoveryFrame candidate = recoveryFrame.get();
                         if (candidate == null || candidate.generation() != generation)
@@ -1307,8 +1375,10 @@ public final class MainActivity extends Activity {
                         || !keyframeForeground || renderedSurface == null || !renderedSurface.isValid() || renderedSurface != decoderSurface
                         || surfaceEpoch != targetEpoch || decoderEpoch != targetEpoch) return;
                 RecoveryFrame recovered = recoveryFrame.get();
-                if (recovery != null && recovered != null && timeUs >= recovered.presentationUs() && recoveryFrame.compareAndSet(recovered, null))
+                if (recovery != null && recovered != null && timeUs >= recovered.presentationUs() && recoveryFrame.compareAndSet(recovered, null)) {
                     recovery.pictureBack(android.os.SystemClock.uptimeMillis(), keyframeForeground, recovered.generation());
+                    android.util.Log.i("SillAndroid", "Recovery: keyframe presented");
+                }
                 FreshFrame candidate = revealFrame.get();
                 if (candidate == null ||
                         candidate.generation() != lock.generation() || timeUs < candidate.presentationUs()) return;
@@ -1341,8 +1411,10 @@ public final class MainActivity extends Activity {
         synchronized (outputLock) {
             HostLockState lock = hostLock; Surface target = surface;
             if (connection != expected || keyframeRecovery != recovery || lock == null || lock.isCovered()) return;
-            if (recovery.consider(android.os.SystemClock.uptimeMillis(), keyframeForeground && target != null && target.isValid(), keyframeStreaming, keyframeWorstRtt))
+            if (recovery.consider(android.os.SystemClock.uptimeMillis(), keyframeForeground && target != null && target.isValid(), keyframeStreaming, keyframeWorstRtt)) {
                 expected.send(44, new byte[0]);
+                android.util.Log.i("SillAndroid", "Recovery: keyframe requested");
+            }
         }
     }
     private void drainVideo() {
@@ -1560,8 +1632,8 @@ public final class MainActivity extends Activity {
     private void releaseDecoder() { decoderEpoch = -1; recoveryFrame.set(null); revealFrame.set(null); recoveryGeneration = -1; if (decoder != null) { try { decoder.stop(); } catch (Exception ignored) { } decoder.release(); decoder = null; decoderSurface = null; } }
     private void resetCursorShape() { cursorBitmap = null; cursorShape = null; cursor.invalidate(); }
     @Override protected void onStart() { super.onStart(); if (discovery != null) discovery.start(); startFpsObservers(); }
-    @Override protected void onResume() { super.onResume(); keyframeForeground = true; if (screenAwake != null) screenAwake.setForeground(true); }
-    @Override protected void onPause() { keyframeForeground = false; synchronized (surfaceLock) { surfaceEpoch++; } recoveryFrame.set(null); interruptPicture(); if (keyframeRecovery != null) keyframeRecovery.leftForeground(); if (screenAwake != null) screenAwake.setForeground(false); super.onPause(); }
+    @Override protected void onResume() { super.onResume(); keyframeForeground = true; android.util.Log.i("SillAndroid", "Recovery: foreground"); if (screenAwake != null) screenAwake.setForeground(true); }
+    @Override protected void onPause() { android.util.Log.i("SillAndroid", "Recovery: background"); keyframeForeground = false; synchronized (surfaceLock) { surfaceEpoch++; } recoveryFrame.set(null); interruptPicture(); if (keyframeRecovery != null) keyframeRecovery.leftForeground(); if (screenAwake != null) screenAwake.setForeground(false); super.onPause(); }
     @Override public void onUserInteraction() { super.onUserInteraction(); if (screenAwake != null) screenAwake.personActed(); }
     @Override protected void onStop() { dismissWindowControls(); cancelWindowDrag(); stopFpsObservers(); clipboardReceipt.cancel(); if (pictureInput != null) pictureInput.cancel(); if (trackpad != null) trackpad.cancelGestures(); if (discovery != null) discovery.stop(); nearby.clear(); nearbyMacs.removeAllViews(); super.onStop(); }
     @Override protected void onDestroy() {
