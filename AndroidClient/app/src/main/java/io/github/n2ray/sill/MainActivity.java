@@ -48,6 +48,10 @@ public final class MainActivity extends Activity {
     private CursorShapeBlob.Shape cursorShape;
     private final java.util.Map<Long, android.widget.ImageView> thumbnails = new java.util.HashMap<>();
     private final java.util.Map<Long, android.graphics.Bitmap> thumbnailImages = new java.util.HashMap<>();
+    private final java.util.Map<String, android.graphics.Bitmap> appIcons = new java.util.LinkedHashMap<>();
+    private final java.util.Map<String, java.util.List<android.widget.ImageView>> iconBadges = new java.util.HashMap<>();
+    private final java.util.Set<Long> streamedPreviews = new java.util.HashSet<>();
+    private long activeWindowId = -1, activeChangedAt, lastSnapshotRequest;
     private final PictureZoom zoom = new PictureZoom();
     private final Object surfaceLock = new Object();
     private volatile boolean clipboardEnabled;
@@ -596,7 +600,7 @@ public final class MainActivity extends Activity {
                         if (audio != null) { audio.close(); audio = null; }
                         ui.post(() -> {
                             hostSettings = null; pendingSettingsToken = 0; desktopDisplays = -1; desktopDisplay = 0; desktopActive = false;
-                            desktopButton.setText("桌面"); choices.removeAllViews(); thumbnails.clear(); thumbnailImages.clear();
+                            desktopButton.setText("桌面"); choices.removeAllViews(); thumbnails.clear(); thumbnailImages.clear(); appIcons.clear(); iconBadges.clear(); streamedPreviews.clear(); activeWindowId = -1;
                             keyboard.discard(); resetCursorShape();
                             modifiers = heldModifiers = 0; for (android.view.View button : modifierViews.values()) button.setBackground(shape(0xff272a30, 12));
                         });
@@ -608,7 +612,7 @@ public final class MainActivity extends Activity {
             finally {
                 connection = null; pointerSync = null; clipboardSubscribed = false; releaseDecoder();
                 if (audio != null) { audio.close(); audio = null; }
-                ui.post(() -> { hostSettings = null; pendingSettingsToken = 0; desktopDisplays = -1; desktopDisplay = 0; desktopActive = false; desktopButton.setText("桌面"); thumbnailImages.clear(); zoom.reset(); keyboard.discard(); resetCursorShape(); modifiers = heldModifiers = 0; for (android.view.View button : modifierViews.values()) button.setBackground(shape(0xff272a30, 12)); sessionPanel.setVisibility(android.view.View.GONE); connectionContainer.setVisibility(android.view.View.VISIBLE); running = false; });
+                ui.post(() -> { hostSettings = null; pendingSettingsToken = 0; desktopDisplays = -1; desktopDisplay = 0; desktopActive = false; desktopButton.setText("桌面"); thumbnailImages.clear(); appIcons.clear(); iconBadges.clear(); streamedPreviews.clear(); activeWindowId = -1; zoom.reset(); keyboard.discard(); resetCursorShape(); modifiers = heldModifiers = 0; for (android.view.View button : modifierViews.values()) button.setBackground(shape(0xff272a30, 12)); sessionPanel.setVisibility(android.view.View.GONE); connectionContainer.setVisibility(android.view.View.VISIBLE); running = false; });
             }
         });
     }
@@ -651,31 +655,58 @@ public final class MainActivity extends Activity {
                     desktopButton.setText(desktopDisplays >= 2 && desktopDisplay > 0 ? "桌面 " + desktopDisplay + "/" + desktopDisplays : "桌面");
                     desktopButton.setContentDescription(desktopDisplays >= 2 ? "桌面 " + desktopDisplay + " / " + desktopDisplays + "，再次点击切换显示器" : "桌面");
                     if (!sameWindowChoices(windows)) {
-                        choices.removeAllViews(); thumbnails.clear();
-                        addChoice("整个桌面", new JSONObject());
+                        choices.removeAllViews(); thumbnails.clear(); iconBadges.clear();
+                        addChoice("整个桌面", new JSONObject(), "");
                         for (int i = 0; i < windows.length(); i++) {
                             JSONObject item = windows.optJSONObject(i); if (item == null) continue;
-                            try { addChoice(item.optString("appName") + " — " + item.optString("title"), new JSONObject().put("_0", item.getLong("id"))); }
+                            try { addChoice(item.optString("appName") + " — " + item.optString("title"), new JSONObject().put("_0", item.getLong("id")), item.optString("bundleID")); }
                             catch (Exception ignored) { }
                         }
                         thumbnailImages.keySet().retainAll(thumbnails.keySet());
+                        streamedPreviews.retainAll(thumbnails.keySet());
                     }
                     JSONObject selected = active == null ? null : active.optJSONObject("window");
                     long selectedId = selected == null ? -1 : selected.optLong("_0", -1);
+                    if (activeWindowId != selectedId) { activeWindowId = selectedId; activeChangedAt = android.os.SystemClock.uptimeMillis(); }
                     for (int i = 0; i < choices.getChildCount(); i++) {
                         android.view.View tile = choices.getChildAt(i);
                         boolean chosen = i == 0 ? isDesktop : tile.getTag() instanceof Long && ((Long) tile.getTag()) == selectedId;
-                        tile.setBackground(shape(chosen ? 0xff486993 : 0xff272a30, 10));
+                        android.graphics.drawable.GradientDrawable border = shape(0x00000000, 10);
+                        border.setStroke(dp(chosen ? 2 : 1), chosen ? 0xff8eb9fb : 0x33ffffff);
+                        tile.setForeground(border);
                     }
                 });
             }
             case 3 -> {
                 byte[] bytes = message.payload();
-                if (bytes.length > 4) {
+                if (bytes.length > 4 && bytes.length <= 2 * 1024 * 1024) {
                     long id = Integer.toUnsignedLong(ByteBuffer.wrap(bytes, 0, 4).getInt());
-                    android.graphics.Bitmap bitmap = android.graphics.BitmapFactory.decodeByteArray(bytes, 4, bytes.length - 4);
-                    if (bitmap != null) ui.post(() -> { android.widget.ImageView image = thumbnails.get(id); if (image != null) { thumbnailImages.put(id, bitmap); image.setImageBitmap(bitmap); } });
+                    android.graphics.BitmapFactory.Options bounds = new android.graphics.BitmapFactory.Options(); bounds.inJustDecodeBounds = true;
+                    android.graphics.BitmapFactory.decodeByteArray(bytes, 4, bytes.length - 4, bounds);
+                    if (bounds.outWidth < 1 || bounds.outHeight < 1 || bounds.outWidth > 4096 || bounds.outHeight > 4096) return;
+                    android.graphics.BitmapFactory.Options options = new android.graphics.BitmapFactory.Options();
+                    options.inSampleSize = Math.max(1, Math.max(bounds.outWidth, bounds.outHeight) / 256);
+                    android.graphics.Bitmap bitmap = android.graphics.BitmapFactory.decodeByteArray(bytes, 4, bytes.length - 4, options);
+                    if (bitmap != null) ui.post(() -> { android.widget.ImageView image = thumbnails.get(id); if (image != null && !streamedPreviews.contains(id)) { thumbnailImages.put(id, bitmap); image.setImageBitmap(bitmap); } });
                 }
+            }
+            case 4 -> {
+                byte[] bytes = message.payload(); AppIconBlob.Icon icon = AppIconBlob.parse(bytes);
+                if (icon == null) return;
+                android.graphics.BitmapFactory.Options bounds = new android.graphics.BitmapFactory.Options(); bounds.inJustDecodeBounds = true;
+                android.graphics.BitmapFactory.decodeByteArray(bytes, icon.imageOffset(), bytes.length - icon.imageOffset(), bounds);
+                if (bounds.outWidth < 1 || bounds.outHeight < 1 || bounds.outWidth > 2048 || bounds.outHeight > 2048) return;
+                android.graphics.BitmapFactory.Options options = new android.graphics.BitmapFactory.Options();
+                options.inSampleSize = Math.max(1, Math.max(bounds.outWidth, bounds.outHeight) / 96);
+                android.graphics.Bitmap bitmap = android.graphics.BitmapFactory.decodeByteArray(bytes, icon.imageOffset(), bytes.length - icon.imageOffset(), options);
+                SillConnection expected = connection;
+                if (bitmap != null && expected != null) ui.post(() -> {
+                    if (connection != expected) return;
+                    if (appIcons.size() >= 256 && !appIcons.containsKey(icon.bundleId())) appIcons.remove(appIcons.keySet().iterator().next());
+                    appIcons.put(icon.bundleId(), bitmap);
+                    java.util.List<android.widget.ImageView> views = iconBadges.get(icon.bundleId());
+                    if (views != null) for (android.widget.ImageView badge : views) badge.setImageBitmap(bitmap);
+                });
             }
             case 5 -> {
                 JSONArray apps = new JSONArray(new String(message.payload(), StandardCharsets.UTF_8));
@@ -795,7 +826,11 @@ public final class MainActivity extends Activity {
         MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
         while (decoder != null) {
             int out = decoder.dequeueOutputBuffer(info, 0);
-            if (out >= 0) decoder.releaseOutputBuffer(out, true);
+            if (out >= 0) {
+                decoder.releaseOutputBuffer(out, true);
+                long now = android.os.SystemClock.uptimeMillis();
+                if (now - lastSnapshotRequest >= 2000) { lastSnapshotRequest = now; ui.post(this::captureActivePreview); }
+            }
             else if (out == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                 MediaFormat format = decoder.getOutputFormat();
                 int w = format.getInteger("width"), h = format.getInteger("height");
@@ -804,6 +839,22 @@ public final class MainActivity extends Activity {
                 if (w > 0 && h > 0) { videoWidth = w; videoHeight = h; ui.post(() -> { layoutVideo(); cursor.invalidate(); }); }
             } else break;
         }
+    }
+    private void captureActivePreview() {
+        long id = activeWindowId; SillConnection expected = connection;
+        if (id < 0 || expected == null || !thumbnails.containsKey(id) ||
+                android.os.SystemClock.uptimeMillis() - activeChangedAt < 1000 ||
+                video.getWidth() < 2 || video.getHeight() < 2 || !video.getHolder().getSurface().isValid()) return;
+        float factor = Math.min(208f / videoWidth, 132f / videoHeight);
+        android.graphics.Bitmap bitmap = android.graphics.Bitmap.createBitmap(Math.max(2, Math.round(videoWidth * factor)),
+                Math.max(2, Math.round(videoHeight * factor)), android.graphics.Bitmap.Config.ARGB_8888);
+        try {
+            android.view.PixelCopy.request(video, bitmap, result -> {
+                if (result != android.view.PixelCopy.SUCCESS || connection != expected || activeWindowId != id) return;
+                android.widget.ImageView image = thumbnails.get(id);
+                if (image != null) { streamedPreviews.add(id); thumbnailImages.put(id, bitmap); image.setImageBitmap(bitmap); }
+            }, ui);
+        } catch (IllegalArgumentException ignored) { }
     }
     private boolean sameWindowChoices(JSONArray windows) {
         if (choices.getChildCount() != windows.length() + 1) return false;
@@ -817,16 +868,21 @@ public final class MainActivity extends Activity {
         }
         return true;
     }
-    private void addChoice(String title, JSONObject source) {
-        LinearLayout tile = new LinearLayout(this); tile.setOrientation(LinearLayout.VERTICAL); tile.setContentDescription(title);
+    private void addChoice(String title, JSONObject source, String bundleId) {
+        android.widget.FrameLayout tile = new android.widget.FrameLayout(this); tile.setContentDescription(title);
         tile.setBackground(shape(0xff272a30, 10));
         LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(dp(100), dp(66)); p.setMargins(0, dp(3), dp(6), dp(3)); choices.addView(tile, p);
-        android.widget.ImageView image = new android.widget.ImageView(this); image.setScaleType(android.widget.ImageView.ScaleType.FIT_CENTER);
-        tile.addView(image, new LinearLayout.LayoutParams(-1, 0, 1));
-        TextView label = new TextView(this); label.setText(title); label.setSingleLine(true); label.setTextSize(10); label.setTextColor(-1);
-        tile.addView(label);
-        if (source.length() != 0) { long id = source.optLong("_0"); tile.setTag(id); thumbnails.put(id, image); image.setImageBitmap(thumbnailImages.get(id)); }
-        else { image.setImageResource(android.R.drawable.ic_menu_view); image.setColorFilter(0xffaeb5c0); tile.setContentDescription(title + "（无实时预览）"); }
+        android.widget.ImageView image = new android.widget.ImageView(this); image.setScaleType(android.widget.ImageView.ScaleType.CENTER_CROP);
+        tile.addView(image, new android.widget.FrameLayout.LayoutParams(-1, -1));
+        if (source.length() != 0) {
+            long id = source.optLong("_0"); tile.setTag(id); thumbnails.put(id, image); image.setImageBitmap(thumbnailImages.get(id));
+            android.widget.ImageView badge = new android.widget.ImageView(this); badge.setBackground(shape(0xff353942, 6));
+            badge.setScaleType(android.widget.ImageView.ScaleType.FIT_CENTER); badge.setPadding(dp(2), dp(2), dp(2), dp(2));
+            android.widget.FrameLayout.LayoutParams badgeLayout = new android.widget.FrameLayout.LayoutParams(dp(24), dp(24), android.view.Gravity.BOTTOM | android.view.Gravity.START);
+            tile.addView(badge, badgeLayout); badge.setImageBitmap(appIcons.get(bundleId));
+            iconBadges.computeIfAbsent(bundleId, ignored -> new java.util.ArrayList<>()).add(badge);
+        } else { image.setImageResource(android.R.drawable.ic_menu_view); image.setScaleType(android.widget.ImageView.ScaleType.CENTER_INSIDE); image.setColorFilter(0xffaeb5c0); tile.setContentDescription(title + "（无实时预览）"); }
+        tile.setClipToOutline(true);
         tile.setOnClickListener(v -> select(source, source.length() == 0));
         if (source.length() != 0) tile.setOnLongClickListener(v -> {
             String[] labels = {"最小化", "全屏", "关闭窗口"};
