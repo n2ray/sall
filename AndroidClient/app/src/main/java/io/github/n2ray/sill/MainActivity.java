@@ -32,6 +32,7 @@ public final class MainActivity extends Activity {
     private final Object outputLock = new Object();
     private final Object reconnectLock = new Object();
     private volatile SillConnection connection;
+    private volatile HostLockState hostLock;
     private volatile PointerSync pointerSync;
     private volatile boolean running;
     private volatile Surface surface;
@@ -43,6 +44,7 @@ public final class MainActivity extends Activity {
     private TrackpadView trackpad;
     private android.widget.FrameLayout picture;
     private SurfaceView video;
+    private TextView lockOverlay;
     private android.view.View cursor;
     private android.graphics.Bitmap cursorBitmap;
     private CursorShapeBlob.Shape cursorShape;
@@ -67,7 +69,7 @@ public final class MainActivity extends Activity {
     private long fitAttemptAt, videoFormatAt;
     private double activeWindowWidth, activeWindowHeight;
     private final Runnable viewportUpdate = this::sendViewport;
-    private int desktopDisplays = -1, desktopDisplay;
+    private int desktopDisplays = -1, desktopDisplay, hostGestures;
     private boolean desktopActive;
     private Button desktopButton, orientationButton;
     private volatile boolean closing;
@@ -76,6 +78,11 @@ public final class MainActivity extends Activity {
     private final java.util.Map<Long, android.view.View> modifierViews = new java.util.LinkedHashMap<>();
     private final java.util.Map<Integer, Integer> hardwareKeysDown = new java.util.LinkedHashMap<>();
     private JSONArray appList = new JSONArray(), macMenus = new JSONArray();
+    private JSONArray drawerWindows = new JSONArray();
+    private AppDrawerDialog appDrawer;
+    private final Runnable drawerUpdate = () -> {
+        if (appDrawer != null && appDrawer.isShowing()) appDrawer.update(drawerWindows, appList, appIcons, activeWindowId);
+    };
     private int menuVersion, menuToken, pendingMenuToken;
     private JSONObject hostSettings;
     private int settingsToken, pendingSettingsToken;
@@ -83,8 +90,12 @@ public final class MainActivity extends Activity {
     private Object pendingSettingsValue;
     private MacDiscovery discovery;
     private final java.util.Map<String, android.view.View> nearby = new java.util.HashMap<>();
-    private MediaCodec decoder;
+    private volatile MediaCodec decoder;
     private Surface decoderSurface;
+    private Hevc.Parameters lastParameters;
+    private record FreshFrame(long generation, long presentationUs) { }
+    private final java.util.concurrent.atomic.AtomicReference<FreshFrame> revealFrame = new java.util.concurrent.atomic.AtomicReference<>();
+    private long recoveryGeneration = -1;
     private int nalSize;
     private volatile int videoWidth = 16, videoHeight = 10;
     private boolean waitingForKeyframe;
@@ -225,6 +236,10 @@ public final class MainActivity extends Activity {
             }
         };
         picture.addView(cursor, new android.widget.FrameLayout.LayoutParams(-1, -1));
+        lockOverlay = new TextView(this); lockOverlay.setGravity(android.view.Gravity.CENTER);
+        lockOverlay.setTextColor(0xffd6d9de); lockOverlay.setTextSize(16); lockOverlay.setPadding(dp(20), dp(20), dp(20), dp(20));
+        lockOverlay.setBackgroundColor(0xff111216); lockOverlay.setText("正在等待 Mac 画面…");
+        picture.addView(lockOverlay, new android.widget.FrameLayout.LayoutParams(-1, -1));
         android.view.ScaleGestureDetector scaleGesture = new android.view.ScaleGestureDetector(this, new android.view.ScaleGestureDetector.SimpleOnScaleGestureListener() {
             private float lastX, lastY;
             @Override public boolean onScaleBegin(android.view.ScaleGestureDetector detector) { lastX = detector.getFocusX(); lastY = detector.getFocusY(); return true; }
@@ -274,6 +289,10 @@ public final class MainActivity extends Activity {
         trackpad = new TrackpadView(this, new TrackpadView.Listener() {
             public void pointer(String action, float x, float y) { MainActivity.this.pointer(action, x, y); cursor.invalidate(); }
             public void scroll(String phase, float x, float y, float dx, float dy) { sendScroll(phase, x, y, dx, dy); }
+            public void gesture(String name, int fingers) {
+                SillConnection expected = connection;
+                ui.post(() -> { if (expected != null && connection == expected) sendMacGesture(name, fingers); });
+            }
         });
         trackpad.setReverseScrolling(getPreferences(0).getBoolean("reverseScrolling", false));
         sessionPanel.addView(trackpad, new LinearLayout.LayoutParams(-1, 0, 1));
@@ -422,6 +441,13 @@ public final class MainActivity extends Activity {
             sendAsync(8, new JSONObject().put(phase == null ? "scroll" : "scrollGesture", body));
         } catch (Exception e) { show("滚动发送失败"); }
     }
+    private void sendMacGesture(String name, int fingers) {
+        if (connection == null || hostGestures < 1 || !getPreferences(0).getBoolean("macGestures", true)) return;
+        try {
+            if (activeWindowId >= 0) select(new JSONObject(), true);
+            sendAsync(28, new JSONObject().put("gesture", name).put("fingers", fingers));
+        } catch (Exception e) { show("手势发送失败"); }
+    }
     private void select(JSONObject source, boolean desktop) {
         trackpad.cancelGestures();
         try { clipboardReceipt.cancel(); keyboard.finishAndForget(); zoom.reset(); layoutVideo(); cursor.invalidate(); resetWindowFit(); sendViewport(); sendAsync(6, new JSONObject().put(desktop ? "desktop" : "window", source)); }
@@ -433,21 +459,17 @@ public final class MainActivity extends Activity {
         else select(new JSONObject(), true);
     }
     private void showWindows() {
-        if (choices.getChildCount() == 0) return;
-        int windows = choices.getChildCount();
-        android.view.View[] windowChoices = new android.view.View[windows];
-        JSONArray apps = appList;
-        String[] names = new String[windows + apps.length()];
-        for (int i = 0; i < windows; i++) { windowChoices[i] = choices.getChildAt(i); names[i] = windowChoices[i].getContentDescription().toString(); }
-        for (int i = 0; i < apps.length(); i++) {
-            JSONObject app = apps.optJSONObject(i); names[windows + i] = "打开 " + (app == null ? "" : app.optString("name"));
-        }
-        new android.app.AlertDialog.Builder(this).setTitle("应用和窗口").setItems(names, (dialog, which) -> {
-            if (which < windows) windowChoices[which].performClick();
-            else try { sendAsync(7, new JSONObject().put("bundleID", apps.getJSONObject(which - windows).getString("bundleID"))); }
-            catch (Exception e) { show("无法打开应用"); }
-        }).show();
+        if (connection == null) return;
+        if (appDrawer == null) appDrawer = new AppDrawerDialog(this, new AppDrawerDialog.Listener() {
+            public void selectWindow(long id) { try { select(new JSONObject().put("_0", id), false); } catch (Exception e) { show("无法选择窗口"); } }
+            public void launchApp(String bundleId) {
+                try { clipboardReceipt.cancel(); keyboard.finishAndForget(); sendAsync(7, new JSONObject().put("bundleID", bundleId)); }
+                catch (Exception e) { show("无法打开应用"); }
+            }
+        });
+        appDrawer.show(drawerWindows, appList, appIcons, activeWindowId);
     }
+    private void refreshDrawer() { ui.removeCallbacks(drawerUpdate); ui.postDelayed(drawerUpdate, 250); }
     private void showMenu(JSONArray items, String title, int version) {
         if (items.length() == 0) { show("当前应用没有可用菜单"); return; }
         String[] names = new String[items.length()];
@@ -504,7 +526,8 @@ public final class MainActivity extends Activity {
     }
     private void settings() {
         boolean reverse = getPreferences(0).getBoolean("reverseScrolling", false);
-        String[] items = {"Mac 画质和帧率", clipboardEnabled ? "关闭剪贴板共享" : "开启剪贴板共享", "将手机剪贴板粘贴到 Mac", audioEnabled ? "关闭声音（重新连接后生效）" : "开启声音测试（重新连接后生效）", reverse ? "滚动方向：反向" : "滚动方向：自然", "断开连接"};
+        boolean gestures = getPreferences(0).getBoolean("macGestures", true);
+        String[] items = {"Mac 画质和帧率", clipboardEnabled ? "关闭剪贴板共享" : "开启剪贴板共享", "将手机剪贴板粘贴到 Mac", audioEnabled ? "关闭声音（重新连接后生效）" : "开启声音测试（重新连接后生效）", reverse ? "滚动方向：反向" : "滚动方向：自然", gestures ? "关闭多指 Mac 手势" : "开启多指 Mac 手势", "断开连接"};
         new android.app.AlertDialog.Builder(this).setTitle("设置").setItems(items, (dialog, i) -> {
             if (i == 0) hostSettingsMenu();
             if (i == 1) { clipboardEnabled = !clipboardEnabled; getPreferences(0).edit().putBoolean("shareClipboard", clipboardEnabled).apply(); updateClipboard(); }
@@ -515,7 +538,8 @@ public final class MainActivity extends Activity {
                 show("声音设置将在下次连接时生效");
             }
             if (i == 4) { boolean next = !reverse; getPreferences(0).edit().putBoolean("reverseScrolling", next).apply(); trackpad.setReverseScrolling(next); show(next ? "已启用反向滚动" : "已启用自然滚动"); }
-            if (i == 5) disconnect();
+            if (i == 5) { boolean next = !gestures; getPreferences(0).edit().putBoolean("macGestures", next).apply(); trackpad.setMacGesturesEnabled(next && hostGestures >= 1); show(next ? "已开启多指手势" : "已关闭多指手势"); }
+            if (i == 6) disconnect();
         }).show();
     }
     private void hostSettingsMenu() {
@@ -630,8 +654,10 @@ public final class MainActivity extends Activity {
                         if (!established) show("正在连接…");
                         try (SillConnection session = SillConnection.connect(address, number, "sill/1", pin)) {
                             if (!running || closing) break;
+                            HostLockState sessionLock = new HostLockState(false); sessionLock.requireFreshFrame();
+                            hostLock = sessionLock; lastParameters = null; revealFrame.set(null); recoveryGeneration = -1;
                             pointerSync = new PointerSync(); connection = session; session.sessionTimeout();
-                            ui.post(() -> { if (connection == session) { connectionContainer.setVisibility(android.view.View.GONE); sessionPanel.setVisibility(android.view.View.VISIBLE); picture.post(this::sendViewport); } });
+                            ui.post(() -> { if (connection == session) { renderLockOverlay(sessionLock, session); connectionContainer.setVisibility(android.view.View.GONE); sessionPanel.setVisibility(android.view.View.VISIBLE); picture.post(this::sendViewport); } });
                             JSONObject hello = new JSONObject().put("protocol", 1).put("appVersion", "0.1.0").put("device", android.os.Build.MODEL);
                             if (audioEnabled && AudioPlayer.supported()) { audio = new AudioPlayer(text -> showFor(session, text)); hello.put("audio", new JSONArray().put("aac-eld")); }
                             sendJson(23, hello);
@@ -650,11 +676,12 @@ public final class MainActivity extends Activity {
                         long delay = ReconnectPolicy.delayMillis(retries);
                         if (!established || !ReconnectPolicy.retryable(error) || delay < 0) throw error;
                         retries++;
-                        connection = null; pointerSync = null; clipboardSubscribed = false; hostClipboardAvailable = false; clipboardSource = ""; clipboardReceipt.cancel(); releaseDecoder();
+                        connection = null; hostLock = null; lastParameters = null; revealFrame.set(null); recoveryGeneration = -1; pointerSync = null; clipboardSubscribed = false; hostClipboardAvailable = false; clipboardSource = ""; clipboardReceipt.cancel(); releaseDecoder();
                         if (audio != null) { audio.close(); audio = null; }
                         ui.post(() -> {
-                            hostSettings = null; pendingSettingsToken = 0; desktopDisplays = -1; desktopDisplay = 0; desktopActive = false;
+                            hostSettings = null; pendingSettingsToken = 0; desktopDisplays = -1; desktopDisplay = 0; desktopActive = false; hostGestures = 0; trackpad.setMacGesturesEnabled(false);
                             desktopButton.setText("桌面"); choices.removeAllViews(); thumbnails.clear(); thumbnailImages.clear(); appIcons.clear(); iconBadges.clear(); streamedPreviews.clear(); activeWindowId = -1;
+                            if (appDrawer != null) appDrawer.dismiss(); drawerWindows = new JSONArray(); appList = new JSONArray();
                             trackpad.cancelGestures(); keyboard.discard(); resetCursorShape();
                             modifiers = heldModifiers = 0; for (android.view.View button : modifierViews.values()) button.setBackground(shape(0xff272a30, 12));
                         });
@@ -664,9 +691,9 @@ public final class MainActivity extends Activity {
                 }
             } catch (Exception e) { if (!closing) { android.util.Log.e("SillAndroid", "Connection failed", e); show("连接结束: " + e.getMessage()); } }
             finally {
-                connection = null; pointerSync = null; clipboardSubscribed = false; hostClipboardAvailable = false; clipboardSource = ""; clipboardReceipt.cancel(); releaseDecoder();
+                connection = null; hostLock = null; lastParameters = null; revealFrame.set(null); recoveryGeneration = -1; pointerSync = null; clipboardSubscribed = false; hostClipboardAvailable = false; clipboardSource = ""; clipboardReceipt.cancel(); releaseDecoder();
                 if (audio != null) { audio.close(); audio = null; }
-                ui.post(() -> { hostSettings = null; pendingSettingsToken = 0; desktopDisplays = -1; desktopDisplay = 0; desktopActive = false; desktopButton.setText("桌面"); thumbnailImages.clear(); appIcons.clear(); iconBadges.clear(); streamedPreviews.clear(); activeWindowId = -1; zoom.reset(); trackpad.cancelGestures(); keyboard.discard(); resetCursorShape(); modifiers = heldModifiers = 0; for (android.view.View button : modifierViews.values()) button.setBackground(shape(0xff272a30, 12)); sessionPanel.setVisibility(android.view.View.GONE); connectionContainer.setVisibility(android.view.View.VISIBLE); running = false; });
+                ui.post(() -> { hostSettings = null; pendingSettingsToken = 0; desktopDisplays = -1; desktopDisplay = 0; desktopActive = false; hostGestures = 0; trackpad.setMacGesturesEnabled(false); desktopButton.setText("桌面"); thumbnailImages.clear(); appIcons.clear(); iconBadges.clear(); streamedPreviews.clear(); activeWindowId = -1; if (appDrawer != null) appDrawer.dismiss(); drawerWindows = new JSONArray(); appList = new JSONArray(); zoom.reset(); trackpad.cancelGestures(); keyboard.discard(); resetCursorShape(); modifiers = heldModifiers = 0; for (android.view.View button : modifierViews.values()) button.setBackground(shape(0xff272a30, 12)); sessionPanel.setVisibility(android.view.View.GONE); connectionContainer.setVisibility(android.view.View.VISIBLE); running = false; });
             }
         });
     }
@@ -681,6 +708,7 @@ public final class MainActivity extends Activity {
         sendAsync(kind, value, false);
     }
     private void sendAsync(int kind, JSONObject value, boolean empty) {
+        if (!allowedForLock(kind, value)) return;
         if (kind == 6 || kind == 7 || kind == 47) clipboardReceipt.cancel();
         if (kind == 8) {
             JSONObject pointer = value.optJSONObject("pointer");
@@ -693,17 +721,48 @@ public final class MainActivity extends Activity {
         input.execute(() -> {
             try {
                 synchronized (outputLock) {
-                    if (connection == expected) expected.send(kind, empty ? new byte[0] : value.toString().getBytes(StandardCharsets.UTF_8));
+                    if (connection == expected && allowedForLock(kind, value)) expected.send(kind, empty ? new byte[0] : value.toString().getBytes(StandardCharsets.UTF_8));
                 }
             }
             catch (Exception e) { showFor(expected, "发送失败: " + e.getClass().getSimpleName()); }
         });
+    }
+    private boolean allowedForLock(int kind, JSONObject value) {
+        HostLockState lock = hostLock;
+        if (lock == null || lock.maySendControl()) return true;
+        boolean control = kind == 6 || kind == 7 || kind == 8 || kind == 15 || kind == 25 || kind == 28 || kind == 32 || kind == 47;
+        return !control || isRelease(kind, value);
+    }
+    private static boolean isRelease(int kind, JSONObject value) {
+        if (kind == 32) return value.optBoolean("stop", false);
+        if (kind != 8) return false;
+        JSONObject key = value.optJSONObject("key"), pointer = value.optJSONObject("pointer"), scroll = value.optJSONObject("scrollGesture");
+        return key != null && key.has("down") && !key.optBoolean("down", true)
+                || pointer != null && pointer.optString("_0").endsWith("Up")
+                || scroll != null && ("ended".equals(scroll.optString("_0")) || "momentumEnded".equals(scroll.optString("_0")));
     }
     private void handle(StreamWire.Message message) throws Exception {
         switch (message.kind()) {
             case 2 -> {
                 JSONObject list = new JSONObject(new String(message.payload(), StandardCharsets.UTF_8));
                 JSONArray windows = list.getJSONArray("windows");
+                HostLockState lock = hostLock; SillConnection listedSession = connection;
+                if (lock != null && listedSession != null) {
+                    boolean wasCovered = lock.isCovered();
+                    boolean blank = lock.onWindowList(list.optBoolean("locked", false), list.optBoolean("offConsole", false),
+                            list.optBoolean("offConsoleView", false), android.os.SystemClock.uptimeMillis());
+                    if (blank) { clipboardReceipt.cancel(); releaseDecoder(); waitingForKeyframe = true; }
+                    if (wasCovered && !lock.isCovered()) { waitingForKeyframe = true; requestKeyframe(); }
+                    ui.post(() -> {
+                        if (connection != listedSession || hostLock != lock) return;
+                        if (blank) { trackpad.cancelGestures(); keyboard.discard(); }
+                        renderLockOverlay(lock, listedSession);
+                    });
+                    if (wasCovered && !lock.isCovered()) ui.postDelayed(() -> {
+                        if (connection != listedSession || hostLock != lock) return;
+                        lock.onTime(android.os.SystemClock.uptimeMillis()); renderLockOverlay(lock, listedSession);
+                    }, HostLockState.UNLOCK_TIMEOUT_MS);
+                }
                 hostClipboardAvailable = list.optInt("clipboard", 0) >= 1;
                 if (!hostClipboardAvailable) { clipboardSubscribed = false; clipboardReceipt.cancel(); }
                 if (clipboardEnabled && !clipboardSubscribed && hostClipboardAvailable) updateClipboard();
@@ -711,6 +770,8 @@ public final class MainActivity extends Activity {
                 ui.post(() -> {
                     if (connection != listConnection || listConnection == null) return;
                     int count = list.optInt("desktopDisplays", 0), current = list.optInt("desktopDisplay", 0);
+                    hostGestures = list.optInt("gestures", 0);
+                    trackpad.setMacGesturesEnabled(hostGestures >= 1 && getPreferences(0).getBoolean("macGestures", true));
                     JSONObject active = list.optJSONObject("active"); boolean isDesktop = active != null && active.has("desktop");
                     String source = active == null ? "" : active.toString();
                     if (!source.equals(clipboardSource)) { clipboardReceipt.cancel(); clipboardSource = source; }
@@ -750,6 +811,7 @@ public final class MainActivity extends Activity {
                         border.setStroke(dp(chosen ? 2 : 1), chosen ? 0xff8eb9fb : 0x33ffffff);
                         tile.setForeground(border);
                     }
+                    drawerWindows = windows; refreshDrawer();
                 });
             }
             case 11 -> {
@@ -766,7 +828,7 @@ public final class MainActivity extends Activity {
                         input.execute(() -> {
                             try {
                                 synchronized (outputLock) {
-                                    if (connection != expected || !clipboardEnabled || !hostClipboardAvailable ||
+                                    if (connection != expected || hostLock == null || !hostLock.maySendControl() || !clipboardEnabled || !hostClipboardAvailable ||
                                             !source.equals(clipboardSource) || !clipboardReceipt.take(token)) return;
                                     JSONObject key = new JSONObject().put("hidUsage", 25).put("modifiers", 1L << 20);
                                     byte[] down = new JSONObject().put("key", new JSONObject(key.toString()).put("down", true)).toString().getBytes(StandardCharsets.UTF_8);
@@ -809,11 +871,12 @@ public final class MainActivity extends Activity {
                     appIcons.put(icon.bundleId(), bitmap);
                     java.util.List<android.widget.ImageView> views = iconBadges.get(icon.bundleId());
                     if (views != null) for (android.widget.ImageView badge : views) badge.setImageBitmap(bitmap);
+                    refreshDrawer();
                 });
             }
             case 5 -> {
                 JSONArray apps = new JSONArray(new String(message.payload(), StandardCharsets.UTF_8));
-                ui.post(() -> appList = apps);
+                ui.post(() -> { appList = apps; refreshDrawer(); });
             }
             case 16 -> {
                 JSONObject state = new JSONObject(new String(message.payload(), StandardCharsets.UTF_8));
@@ -866,9 +929,11 @@ public final class MainActivity extends Activity {
             }
             case 32 -> {
                 if (clipboardEnabled) {
+                    SillConnection expected = connection;
                     JSONObject clip = new JSONObject(new String(message.payload(), StandardCharsets.UTF_8));
                     String text = clip.optString("text", "");
                     if (!text.isEmpty() && text.getBytes(StandardCharsets.UTF_8).length <= 256 * 1024) ui.post(() -> {
+                        if (connection != expected || expected == null || !clipboardEnabled || !hasWindowFocus() || sessionPanel.getVisibility() != android.view.View.VISIBLE) return;
                         android.content.ClipboardManager manager = (android.content.ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
                         manager.setPrimaryClip(android.content.ClipData.newPlainText("Mac", text));
                     });
@@ -877,23 +942,19 @@ public final class MainActivity extends Activity {
             case 43 -> { if (audio != null) audio.receive(message.payload()); }
             case 0 -> {
                 Hevc.Parameters params = Hevc.parameters(message.payload()); nalSize = params.lengthSize();
-                releaseDecoder(); Surface target;
-                synchronized (surfaceLock) {
-                    long until = android.os.SystemClock.uptimeMillis() + 3000;
-                    while (surface == null && android.os.SystemClock.uptimeMillis() < until) surfaceLock.wait(100);
-                    target = surface;
-                }
-                if (target == null || !target.isValid()) throw new IllegalStateException("视频画面不可用");
-                MediaFormat format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_HEVC, 1920, 1080);
-                format.setByteBuffer("csd-0", ByteBuffer.wrap(params.codecConfig()));
-                decoder = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_HEVC);
-                decoder.configure(format, target, null, 0); decoder.start();
-                decoderSurface = target;
-                decoder.setVideoScalingMode(MediaCodec.VIDEO_SCALING_MODE_SCALE_TO_FIT);
-                waitingForKeyframe = true;
+                lastParameters = params; releaseDecoder(); waitingForKeyframe = true;
+                HostLockState lock = hostLock;
+                if (lock == null || !lock.isCovered()) createDecoder(params);
             }
             case 1 -> {
-                if (decoder == null) return;
+                HostLockState lock = hostLock;
+                if (lock == null || lock.isCovered()) return;
+                if (decoder != null) drainVideo();
+                if (!lock.shouldDecode(message.keyframe(), recoveryGeneration)) { requestKeyframe(); return; }
+                if (decoder == null) {
+                    if (lastParameters == null) { requestKeyframe(); return; }
+                    createDecoder(lastParameters);
+                }
                 Surface target = surface;
                 if (target == null || !target.isValid()) { waitingForKeyframe = true; return; }
                 if (target != decoderSurface) {
@@ -907,7 +968,11 @@ public final class MainActivity extends Activity {
                 if (index >= 0) {
                     ByteBuffer input = decoder.getInputBuffer(index); input.clear();
                     if (frame.length > input.remaining()) throw new IllegalStateException("视频帧超过解码缓冲区");
-                    input.put(frame); decoder.queueInputBuffer(index, 0, frame.length, (long) (message.timestamp() * 1_000_000), 0);
+                    long presentationUs = (long) (message.timestamp() * 1_000_000);
+                    if (message.keyframe() && lock.needsFreshFrame() && recoveryGeneration != lock.generation()) {
+                        recoveryGeneration = lock.generation(); revealFrame.set(new FreshFrame(recoveryGeneration, presentationUs));
+                    }
+                    input.put(frame); decoder.queueInputBuffer(index, 0, frame.length, presentationUs, 0);
                     waitingForKeyframe = false;
                 } else {
                     waitingForKeyframe = true;
@@ -915,9 +980,45 @@ public final class MainActivity extends Activity {
                 }
                 drainVideo();
             }
-            case 13 -> { if (waitingForKeyframe && decoder != null && surface != null) requestKeyframe(); }
+            case 13 -> {
+                if (decoder != null && hostLock != null && hostLock.needsFreshFrame()) drainVideo();
+                if (waitingForKeyframe && surface != null) requestKeyframe();
+            }
             case 22 -> throw new IllegalStateException(new String(message.payload(), StandardCharsets.UTF_8));
         }
+    }
+    private void createDecoder(Hevc.Parameters params) throws Exception {
+        Surface target;
+        synchronized (surfaceLock) {
+            long until = android.os.SystemClock.uptimeMillis() + 3000;
+            while (surface == null && android.os.SystemClock.uptimeMillis() < until) surfaceLock.wait(100);
+            target = surface;
+        }
+        if (target == null || !target.isValid()) throw new IllegalStateException("视频画面不可用");
+        MediaFormat format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_HEVC, 1920, 1080);
+        format.setByteBuffer("csd-0", ByteBuffer.wrap(params.codecConfig()));
+        SillConnection expected = connection; HostLockState lock = hostLock;
+        MediaCodec made = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_HEVC);
+        try {
+            made.configure(format, target, null, 0);
+            made.setOnFrameRenderedListener((codec, timeUs, nanoTime) -> {
+                FreshFrame candidate = revealFrame.get();
+                if (connection != expected || hostLock != lock || decoder != made || lock == null || candidate == null ||
+                        candidate.generation() != lock.generation() || timeUs < candidate.presentationUs()) return;
+                if (!revealFrame.compareAndSet(candidate, null)) return;
+                lock.onKeyframePresented(candidate.generation());
+                renderLockOverlay(lock, expected);
+            }, ui);
+            made.start(); made.setVideoScalingMode(MediaCodec.VIDEO_SCALING_MODE_SCALE_TO_FIT);
+            decoder = made; decoderSurface = target;
+            waitingForKeyframe = true;
+        } catch (Exception e) { made.release(); throw e; }
+    }
+    private void renderLockOverlay(HostLockState lock, SillConnection expected) {
+        if (connection != expected || hostLock != lock) return;
+        if (!lock.isCovered() && !lock.needsFreshFrame()) { lockOverlay.setVisibility(android.view.View.GONE); return; }
+        lockOverlay.setText(lock.isCovered() ? "另一位用户正在使用这台 Mac。请切回你的账号以继续。" : "正在等待 Mac 画面…");
+        lockOverlay.setVisibility(android.view.View.VISIBLE);
     }
     private void requestKeyframe() throws java.io.IOException {
         long now = android.os.SystemClock.uptimeMillis();
@@ -944,17 +1045,17 @@ public final class MainActivity extends Activity {
         }
     }
     private void captureActivePreview() {
-        long id = activeWindowId; SillConnection expected = connection;
-        adjustWindowFit();
-        if (id < 0 || expected == null || !thumbnails.containsKey(id) ||
+        long id = activeWindowId; SillConnection expected = connection; HostLockState lock = hostLock;
+        if (id < 0 || expected == null || lock == null || lock.isCovered() || lock.needsFreshFrame() || !thumbnails.containsKey(id) ||
                 android.os.SystemClock.uptimeMillis() - activeChangedAt < 1000 ||
                 video.getWidth() < 2 || video.getHeight() < 2 || !video.getHolder().getSurface().isValid()) return;
+        adjustWindowFit();
         float factor = Math.min(208f / videoWidth, 132f / videoHeight);
         android.graphics.Bitmap bitmap = android.graphics.Bitmap.createBitmap(Math.max(2, Math.round(videoWidth * factor)),
                 Math.max(2, Math.round(videoHeight * factor)), android.graphics.Bitmap.Config.ARGB_8888);
         try {
             android.view.PixelCopy.request(video, bitmap, result -> {
-                if (result != android.view.PixelCopy.SUCCESS || connection != expected || activeWindowId != id) return;
+                if (result != android.view.PixelCopy.SUCCESS || connection != expected || hostLock != lock || lock.isCovered() || lock.needsFreshFrame() || activeWindowId != id) return;
                 android.widget.ImageView image = thumbnails.get(id);
                 if (image != null) { streamedPreviews.add(id); thumbnailImages.put(id, bitmap); image.setImageBitmap(bitmap); }
             }, ui);
@@ -1010,7 +1111,7 @@ public final class MainActivity extends Activity {
             }).show(); return true;
         });
     }
-    private void releaseDecoder() { if (decoder != null) { try { decoder.stop(); } catch (Exception ignored) { } decoder.release(); decoder = null; decoderSurface = null; } }
+    private void releaseDecoder() { revealFrame.set(null); recoveryGeneration = -1; if (decoder != null) { try { decoder.stop(); } catch (Exception ignored) { } decoder.release(); decoder = null; decoderSurface = null; } }
     private void resetCursorShape() { cursorBitmap = null; cursorShape = null; cursor.invalidate(); }
     @Override protected void onStart() { super.onStart(); if (discovery != null) discovery.start(); }
     @Override protected void onStop() { clipboardReceipt.cancel(); if (trackpad != null) trackpad.cancelGestures(); if (discovery != null) discovery.stop(); nearby.clear(); nearbyMacs.removeAllViews(); super.onStop(); }

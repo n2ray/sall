@@ -13,6 +13,7 @@ final class TrackpadView extends View {
     interface Listener {
         void pointer(String action, float x, float y);
         void scroll(String phase, float x, float y, float dx, float dy);
+        default void gesture(String name, int fingers) { }
     }
     private final Listener listener;
     private final Paint paint = new Paint(3);
@@ -23,6 +24,8 @@ final class TrackpadView extends View {
     private float momentumX, momentumY, momentumWidth;
     private VelocityTracker velocity;
     private final ScrollMomentum momentum = new ScrollMomentum();
+    private final MultiFingerGesture multiFinger = new MultiFingerGesture();
+    private boolean macGesturesEnabled;
     private final Runnable longPress;
     private final Runnable coast = new Runnable() {
         @Override public void run() {
@@ -54,12 +57,13 @@ final class TrackpadView extends View {
     float pointerY() { return y; }
     void position(float x, float y) { this.x = clamp(x); this.y = clamp(y); }
     void setReverseScrolling(boolean reverse) { reversed = reverse; }
+    void setMacGesturesEnabled(boolean enabled) { macGesturesEnabled = enabled; }
     void cancelGestures() {
         removeCallbacks(longPress);
         if (scrolling) listener.scroll("ended", x, y, 0, 0);
         if (dragging) listener.pointer("leftUp", x, y);
         scrolling = dragging = touchActive = silenced = false;
-        stopMomentum(); recycleVelocity();
+        stopMomentum(); recycleVelocity(); multiFinger.cancel();
     }
     private void recycleVelocity() { if (velocity != null) { velocity.recycle(); velocity = null; } }
     private void stopMomentum() {
@@ -100,6 +104,29 @@ final class TrackpadView extends View {
         }
         if (!touchActive || touchOwner != allowLongPress) return true;
         if (velocity != null) velocity.addMovement(event);
+        float density = getResources().getDisplayMetrics().density;
+        if (allowLongPress) {
+            int action = event.getActionMasked(), index = event.getActionIndex();
+            if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) {
+                boolean justSilenced = multiFinger.down(event.getPointerId(index), event.getX(index) / density,
+                        event.getY(index) / density, event.getEventTime(), dragging);
+                if (justSilenced) {
+                    if (scrolling) listener.scroll("ended", x, y, 0, 0);
+                    scrolling = false; silenced = moved = true; stopMomentum();
+                }
+            } else if (action == MotionEvent.ACTION_MOVE || action == MotionEvent.ACTION_POINTER_UP || action == MotionEvent.ACTION_UP) {
+                for (int i = 0; i < event.getPointerCount(); i++) multiFinger.move(event.getPointerId(i),
+                        event.getX(i) / density, event.getY(i) / density, event.getEventTime());
+                if (action == MotionEvent.ACTION_POINTER_UP || action == MotionEvent.ACTION_UP) {
+                    MultiFingerGesture.Decision result = multiFinger.up(event.getPointerId(index), event.getX(index) / density,
+                            event.getY(index) / density, event.getEventTime());
+                    if (result != null && macGesturesEnabled) {
+                        listener.gesture(result.gesture(), result.fingers());
+                        performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP);
+                    }
+                }
+            }
+        }
         switch (event.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
                 lastX = startX = event.getX(); lastY = startY = event.getY();
@@ -109,10 +136,7 @@ final class TrackpadView extends View {
                 removeCallbacks(longPress);
                 if (event.getPointerCount() >= 2) stopMomentum();
                 if (dragging) { listener.pointer("leftUp", x, y); dragging = false; }
-                if (event.getPointerCount() >= 3) {
-                    if (scrolling) listener.scroll("ended", x, y, 0, 0);
-                    scrolling = false; silenced = moved = true; return true;
-                }
+                if (event.getPointerCount() >= 3) return true;
                 if (event.getPointerCount() == 2) {
                     twoFinger = true; lastX = startX = midX(event); lastY = startY = midY(event);
                 }
@@ -143,6 +167,16 @@ final class TrackpadView extends View {
                 }
                 return true;
             case MotionEvent.ACTION_POINTER_UP:
+                if (silenced) return true;
+                if (event.getPointerCount() > 2) {
+                    if (event.getActionIndex() >= 2) return true;
+                    if (scrolling) listener.scroll("ended", x, y, 0, 0);
+                    scrolling = false; moved = true; twoFinger = true;
+                    int first = event.getActionIndex() == 0 ? 1 : 0, second = 2;
+                    lastX = startX = (event.getX(first) + event.getX(second)) / 2;
+                    lastY = startY = (event.getY(first) + event.getY(second)) / 2;
+                    return true;
+                }
                 if (scrolling) {
                     listener.scroll("ended", x, y, 0, 0); scrolling = false; moved = true;
                     startMomentum(event, areaWidth);

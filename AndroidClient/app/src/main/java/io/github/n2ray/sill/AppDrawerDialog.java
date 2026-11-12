@@ -1,0 +1,169 @@
+package io.github.n2ray.sill;
+
+import android.app.Activity;
+import android.app.AlertDialog;
+import android.graphics.Bitmap;
+import android.graphics.Color;
+import android.graphics.drawable.GradientDrawable;
+import android.text.Editable;
+import android.text.InputType;
+import android.text.TextWatcher;
+import android.view.Gravity;
+import android.view.View;
+import android.view.Window;
+import android.view.WindowManager;
+import android.widget.EditText;
+import android.widget.ImageView;
+import android.widget.LinearLayout;
+import android.widget.ScrollView;
+import android.widget.TextView;
+import org.json.JSONArray;
+import org.json.JSONObject;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+/** Local search and selection UI. Call all methods on the activity's main thread. */
+final class AppDrawerDialog {
+    interface Listener { void selectWindow(long id); void launchApp(String bundleId); }
+
+    private final Activity activity;
+    private final Listener listener;
+    private AlertDialog dialog;
+    private EditText search;
+    private ScrollView scroll;
+    private LinearLayout rows;
+    private List<AppDrawerModel.Window> windows = java.util.Collections.emptyList();
+    private List<AppDrawerModel.App> apps = java.util.Collections.emptyList();
+    private Map<String, Bitmap> icons = java.util.Collections.emptyMap();
+    private final Map<String, List<ImageView>> badgeViews = new HashMap<>();
+    private long activeWindow = -1;
+
+    AppDrawerDialog(Activity activity, Listener listener) { this.activity = activity; this.listener = listener; }
+
+    void show(JSONArray windowList, JSONArray appList, Map<String, Bitmap> appIcons, long active) {
+        if (isShowing()) { update(windowList, appList, appIcons, active); return; }
+        LinearLayout root = new LinearLayout(activity); root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(dp(14), dp(14), dp(14), dp(14)); root.setBackgroundColor(0xff181a1f);
+        root.setFocusableInTouchMode(true);
+        TextView title = text("应用和窗口", 19, Color.WHITE); root.addView(title);
+        search = new EditText(activity); search.setSingleLine(true); search.setHint("搜索应用或窗口");
+        search.setTextColor(Color.WHITE); search.setHintTextColor(0xffadb3bd);
+        search.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        search.setContentDescription("搜索 Mac 上的应用和窗口");
+        root.addView(search, new LinearLayout.LayoutParams(-1, dp(52)));
+        scroll = new ScrollView(activity); scroll.setFillViewport(false);
+        rows = new LinearLayout(activity); rows.setOrientation(LinearLayout.VERTICAL); scroll.addView(rows);
+        int height = Math.min(dp(500), Math.max(dp(180), activity.getResources().getDisplayMetrics().heightPixels * 3 / 5));
+        root.addView(scroll, new LinearLayout.LayoutParams(-1, height));
+        dialog = new AlertDialog.Builder(activity).setView(root).setNegativeButton("关闭", (d, which) -> { }).create();
+        search.addTextChangedListener(new TextWatcher() {
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
+            public void onTextChanged(CharSequence s, int start, int before, int count) { render(false); }
+            public void afterTextChanged(Editable value) { }
+        });
+        update(windowList, appList, appIcons, active);
+        dialog.show();
+        Window window = dialog.getWindow();
+        if (window != null) {
+            int width = Math.min(dp(420), Math.max(dp(200), activity.getResources().getDisplayMetrics().widthPixels - dp(32)));
+            window.setLayout(width, WindowManager.LayoutParams.WRAP_CONTENT);
+            window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE | WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
+        }
+        root.requestFocus();
+    }
+
+    void update(JSONArray windowList, JSONArray appList, Map<String, Bitmap> appIcons, long active) {
+        List<AppDrawerModel.Window> nextWindows = new ArrayList<>();
+        if (windowList != null) for (int i = 0; i < windowList.length(); i++) {
+            JSONObject item = windowList.optJSONObject(i); if (item == null) continue;
+            long id = item.optLong("id", -1);
+            if (id < 0 || id > 0xffffffffL) continue;
+            nextWindows.add(new AppDrawerModel.Window(id, item.optString("title", ""), item.optString("appName", ""), item.optString("bundleID", "")));
+        }
+        List<AppDrawerModel.App> nextApps = new ArrayList<>();
+        if (appList != null) for (int i = 0; i < appList.length(); i++) {
+            JSONObject item = appList.optJSONObject(i); if (item != null)
+                nextApps.add(new AppDrawerModel.App(item.optString("name", ""), item.optString("bundleID", "")));
+        }
+        Map<String, Bitmap> nextIcons = appIcons == null ? java.util.Collections.emptyMap() : new HashMap<>(appIcons);
+        boolean changed = !windows.equals(nextWindows) || !apps.equals(nextApps) || activeWindow != active;
+        if (!changed && rows != null) for (var entry : badgeViews.entrySet()) {
+            Bitmap before = icons.get(entry.getKey()), after = nextIcons.get(entry.getKey());
+            if (before != after) for (ImageView badge : entry.getValue()) badge.setImageBitmap(after);
+        }
+        windows = java.util.Collections.unmodifiableList(nextWindows); apps = java.util.Collections.unmodifiableList(nextApps);
+        icons = nextIcons; activeWindow = active;
+        if (rows != null && (changed || rows.getChildCount() == 0)) render(true);
+    }
+
+    boolean isShowing() { return dialog != null && dialog.isShowing(); }
+    void dismiss() { if (dialog != null) dialog.dismiss(); }
+
+    private void render(boolean keepScroll) {
+        if (rows == null) return;
+        int y = keepScroll ? scroll.getScrollY() : 0;
+        AppDrawerModel.Results result = AppDrawerModel.filter(windows, apps, search.getText().toString());
+        rows.removeAllViews(); badgeViews.clear();
+        if (!result.open().isEmpty()) {
+            header("正在运行");
+            for (AppDrawerModel.Group group : result.open()) {
+                LinearLayout label = row(group.name(), group.bundleId(), false);
+                TextView count = text(group.windows().size() + " 个窗口", 12, 0xffadb3bd); label.addView(count);
+                rows.addView(label);
+                for (AppDrawerModel.Window window : group.windows()) {
+                    TextView entry = text(window.title().trim().isEmpty() ? "未命名窗口" : window.title(), 14, Color.WHITE);
+                    entry.setPadding(dp(54), 0, dp(10), 0); entry.setGravity(Gravity.CENTER_VERTICAL);
+                    entry.setSingleLine(true); entry.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                    entry.setBackground(background(window.id() == activeWindow ? 0xff39485e : 0xff24262c));
+                    entry.setContentDescription(group.name() + "窗口：" + window.title() + (window.id() == activeWindow ? "，当前显示" : ""));
+                    LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-1, dp(44)); p.setMargins(0, dp(2), 0, dp(2)); rows.addView(entry, p);
+                    entry.setOnClickListener(v -> {
+                        if (windows.stream().noneMatch(w -> w.id() == window.id())) { render(true); return; }
+                        dismiss(); listener.selectWindow(window.id());
+                    });
+                }
+            }
+        }
+        if (!result.closed().isEmpty()) {
+            header("所有应用");
+            for (AppDrawerModel.App app : result.closed()) {
+                LinearLayout entry = row(app.name(), app.bundleId(), true); rows.addView(entry);
+                entry.setContentDescription("打开 " + app.name());
+                entry.setOnClickListener(v -> {
+                    if (apps.stream().noneMatch(a -> a.bundleId().equals(app.bundleId()))) { render(true); return; }
+                    dismiss(); listener.launchApp(app.bundleId());
+                });
+            }
+        }
+        if (result.open().isEmpty() && result.closed().isEmpty()) {
+            TextView empty = text(search.getText().toString().trim().isEmpty() ? "Mac 暂无可用应用或窗口" : "没有匹配的应用或窗口", 14, 0xffadb3bd);
+            empty.setPadding(dp(10), dp(24), dp(10), dp(24)); rows.addView(empty);
+        }
+        scroll.post(() -> scroll.scrollTo(0, y));
+    }
+
+    private void header(String value) {
+        TextView label = text(value, 13, 0xffadb3bd); label.setPadding(dp(10), dp(12), dp(10), dp(4)); rows.addView(label);
+    }
+    private LinearLayout row(String name, String bundle, boolean clickable) {
+        LinearLayout row = new LinearLayout(activity); row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(10), dp(3), dp(10), dp(3)); row.setMinimumHeight(dp(48));
+        if (clickable) row.setBackground(background(0xff24262c));
+        ImageView icon = new ImageView(activity); icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        icon.setBackground(background(0xff353942)); icon.setImageBitmap(icons.get(bundle));
+        badgeViews.computeIfAbsent(bundle, ignored -> new ArrayList<>()).add(icon);
+        row.addView(icon, new LinearLayout.LayoutParams(dp(32), dp(32)));
+        TextView label = text(name, 15, Color.WHITE); label.setSingleLine(true); label.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, -2, 1); p.setMargins(dp(12), 0, dp(6), 0); row.addView(label, p);
+        return row;
+    }
+    private TextView text(String value, int size, int color) {
+        TextView v = new TextView(activity); v.setText(value); v.setTextSize(size); v.setTextColor(color); return v;
+    }
+    private GradientDrawable background(int color) {
+        GradientDrawable d = new GradientDrawable(); d.setColor(color); d.setCornerRadius(dp(9)); return d;
+    }
+    private int dp(float value) { return Math.round(value * activity.getResources().getDisplayMetrics().density); }
+}

@@ -10,11 +10,11 @@ User choices that intentionally differ from iOS: the picture behaves as a relati
 - [ ] Discovery and saved Macs: basic local discovery and address/port records exist; add stable Mac identity, names, multiple addresses, route recovery, IPv6, and service-loss handling.
 - [ ] QR/deep-link pairing with an explicit identity confirmation; iOS has it, Android does not.
 - [ ] Reconnect and recovery: bounded retry exists; verify real Wi-Fi/mobile transitions, Mac sleep/restart, revocation, stalled connections, source continuity and explicit cancellation. Handle host goodbye reasons and keyframe recovery as iOS does.
-- [ ] Host locked/off-console state: mirror iOS's distinct ordinary lock and another-user behavior, clear unsafe stale frames and wait for a new keyframe where appropriate.
+- [ ] Host locked/off-console state: ordinary lock and other-user states have separate handling, with a cover until a newly decoded frame is presented. Normal streaming was verified on the Xiaomi; lock/unlock and other-user transitions still require real-device verification.
 
 ## Windows and picture
 
-- [ ] Window catalog, app icons, app launching, menu and thumbnail commands exist; add the iOS searchable application drawer, grouping, drag-to-reorder, configurable hold time, full menu state and accessible actions.
+- [ ] Window catalog, app icons, app launching, menu and thumbnail commands exist. The searchable grouped application drawer was verified on the Xiaomi (search and open); drag-to-reorder, configurable hold time, full menu state and accessible actions remain.
 - [ ] Selected-window fitting: preserve aspect ratio and full content; automatic fitting is implemented and one constrained Mail window was verified by host logs. Test repeated source changes, rotation, app minimum sizes and host refusal.
 - [ ] Stage Manager may cause the Mac host to supply a tilted thumbnail. A selected window gets a locally captured stream preview; background previews may remain skewed or stale. Test window closure, source changes and cache cleanup.
 - [ ] Desktop display cycling is implemented only when the host advertises it. The tested Mac 0.6.1 does not; the Android client cannot add the missing host capability.
@@ -23,7 +23,7 @@ User choices that intentionally differ from iOS: the picture behaves as a relati
 
 ## Input and local interaction
 
-- [ ] Trackpad single/double click, drag, two-finger scroll and right click, scroll momentum, reverse scrolling, three/four-finger gestures and cancel/rotation behavior; never send a click during a pinch. Momentum and a persistent reverse-scroll setting are implemented with logic checks; three-finger strokes currently suppress accidental clicks but do not yet send Mac gestures. Verify on the Xiaomi and gate host gestures on advertised capability.
+- [ ] Trackpad single/double click, drag, two-finger scroll and right click, scroll momentum, reverse scrolling, three/four-finger gestures and cancel/rotation behavior; never send a click during a pinch. On 2026-11-12 the user confirmed two-finger scrolling and momentum felt smooth without accidental clicks on the Xiaomi. A persistent reverse-scroll setting is implemented; its direction and lifecycle cancellation still need device checks. Three/four-finger Mac gestures on the separate trackpad are implemented and gated on host capability, but need real multi-touch testing; the picture area does not yet recognize three-finger gestures.
 - [ ] IME composition, correction, selection, emoji and dictation: basic Android suffix correction exists; port/check iOS composition fences and stale callback handling with real Chinese input.
 - [ ] Physical keyboard: local-dialog focus gating and stale IME callback protection are implemented with logic checks; verify with a real keyboard, then complete modifiers, repeat, function keys, shortcuts and older host compatibility.
 - [ ] Mouse and pointer: shape and basic host position exist; complete source/ownership, out-of-frame visibility, physical mouse buttons and wheel, and no cursor jumps after reconnect.
