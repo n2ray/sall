@@ -9,6 +9,7 @@ final class WindowHold {
         return moved;
     }
     boolean hold() { if (!active || moved) return false; held = true; return true; }
+    boolean isHeld() { return active && held; }
     boolean end() { boolean tap = active && !moved && !held; active = false; return tap; }
     void cancel() { active = false; }
 }

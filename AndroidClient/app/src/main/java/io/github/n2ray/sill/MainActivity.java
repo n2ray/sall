@@ -100,6 +100,12 @@ public final class MainActivity extends Activity {
     private JSONArray drawerWindows = new JSONArray();
     private AppDrawerDialog appDrawer;
     private android.widget.PopupWindow windowControls;
+    private String windowOrderMac = "";
+    private java.util.List<Long> windowOrder = new java.util.ArrayList<>();
+    private android.view.View draggedWindow;
+    private int dragFrom, dragTo;
+    private static final int MOVE_LEFT_ACTION = 0x00ff0001, MOVE_RIGHT_ACTION = 0x00ff0002;
+    private static final int CLOSE_WINDOW_ACTION = 0x00ff0003, MINIMIZE_WINDOW_ACTION = 0x00ff0004, FULL_SCREEN_ACTION = 0x00ff0005;
     private final Runnable drawerUpdate = () -> {
         if (appDrawer != null && appDrawer.isShowing()) appDrawer.update(drawerWindows, appList, appIcons, activeWindowId);
     };
@@ -421,7 +427,7 @@ public final class MainActivity extends Activity {
                     portraitImeHeight > 0 ? (double) portraitImeHeight : null, false,
                     settingsOpen ? largerPictureApplied : largerPicture, streaming);
             boolean large = geometry.largerPicture;
-            if (large != largerPictureApplied) dismissWindowControls();
+            if (large != largerPictureApplied) { dismissWindowControls(); cancelWindowDrag(); }
             largerPictureApplied = large;
             zoom.setTopAligned(large);
             trackpad.setVerticalRatio(large && videoWidth > 0 && videoHeight > 0 ? (float) videoHeight / videoWidth : 1 / 1.6f);
@@ -466,7 +472,7 @@ public final class MainActivity extends Activity {
             layoutVideo(); cursor.invalidate();
         };
         root.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, oright, ob) -> {
-            if (r - l != oright - ol || b - t != ob - ot) dismissWindowControls();
+            if (r - l != oright - ol || b - t != ob - ot) { dismissWindowControls(); cancelWindowDrag(); }
             if (oright > ol && ob > ot && (r - l > b - t) != (oright - ol > ob - ot) && pictureInput != null) pictureInput.cancel();
             updateSessionLayout.run();
         });
@@ -873,7 +879,7 @@ public final class MainActivity extends Activity {
         catch (Exception e) { show("剪贴板发送失败"); }
     }
     private void disconnect() {
-        dismissWindowControls();
+        dismissWindowControls(); cancelWindowDrag();
         pictureInput.cancel();
         trackpad.cancelGestures();
         clipboardReceipt.cancel(); keyboard.finishAndForget(); closing = true; SillConnection c = connection;
@@ -944,7 +950,7 @@ public final class MainActivity extends Activity {
                         connection = null; hostLock = null; keyframeRecovery = null; keyframeStreaming = false; recoveryFrame.set(null); lastParameters = null; revealFrame.set(null); recoveryGeneration = -1; pointerSync = null; clipboardSubscribed = false; hostClipboardAvailable = false; clipboardSource = ""; clipboardReceipt.cancel(); releaseDecoder();
                         if (audio != null) { audio.close(); audio = null; }
                         ui.post(() -> {
-                            dismissWindowControls();
+                            dismissWindowControls(); cancelWindowDrag();
                             hostSettings = null; pendingSettingsToken = 0; desktopDisplays = -1; desktopDisplay = 0; desktopActive = false; hostGestures = 0; hostKeyRepeat = false; hostKeyRepeatKnown = false; trackpad.setMacGesturesEnabled(false);
                             desktopButton.setText("桌面"); choices.removeAllViews(); thumbnails.clear(); thumbnailImages.clear(); appIcons.clear(); iconBadges.clear(); activeWindowId = -1;
                             if (appDrawer != null) appDrawer.dismiss(); drawerWindows = new JSONArray(); appList = new JSONArray();
@@ -959,7 +965,7 @@ public final class MainActivity extends Activity {
             finally {
                 connection = null; hostLock = null; keyframeRecovery = null; keyframeStreaming = false; recoveryFrame.set(null); lastParameters = null; revealFrame.set(null); recoveryGeneration = -1; pointerSync = null; clipboardSubscribed = false; hostClipboardAvailable = false; clipboardSource = ""; clipboardReceipt.cancel(); releaseDecoder();
                 if (audio != null) { audio.close(); audio = null; }
-                ui.post(() -> { dismissWindowControls(); hostSettings = null; pendingSettingsToken = 0; desktopDisplays = -1; desktopDisplay = 0; desktopActive = false; hostGestures = 0; hostKeyRepeat = false; hostKeyRepeatKnown = false; trackpad.setMacGesturesEnabled(false); desktopButton.setText("桌面"); thumbnailImages.clear(); appIcons.clear(); iconBadges.clear(); activeWindowId = -1; if (appDrawer != null) appDrawer.dismiss(); drawerWindows = new JSONArray(); appList = new JSONArray(); zoom.reset(); screenAwake.setStreaming(false); pictureInput.cancel(); trackpad.cancelGestures(); keyboard.discard(); resetCursorShape(); modifiers = heldModifiers = 0; for (android.view.View button : modifierViews.values()) button.setBackground(shape(0xff272a30, 12)); sessionPanel.setVisibility(android.view.View.GONE); connectionContainer.setVisibility(android.view.View.VISIBLE); running = false; });
+                ui.post(() -> { dismissWindowControls(); cancelWindowDrag(); hostSettings = null; pendingSettingsToken = 0; desktopDisplays = -1; desktopDisplay = 0; desktopActive = false; hostGestures = 0; hostKeyRepeat = false; hostKeyRepeatKnown = false; trackpad.setMacGesturesEnabled(false); desktopButton.setText("桌面"); thumbnailImages.clear(); appIcons.clear(); iconBadges.clear(); activeWindowId = -1; if (appDrawer != null) appDrawer.dismiss(); drawerWindows = new JSONArray(); appList = new JSONArray(); zoom.reset(); screenAwake.setStreaming(false); pictureInput.cancel(); trackpad.cancelGestures(); keyboard.discard(); resetCursorShape(); modifiers = heldModifiers = 0; for (android.view.View button : modifierViews.values()) button.setBackground(shape(0xff272a30, 12)); sessionPanel.setVisibility(android.view.View.GONE); connectionContainer.setVisibility(android.view.View.VISIBLE); running = false; });
             }
         });
     }
@@ -1051,11 +1057,15 @@ public final class MainActivity extends Activity {
                     desktopDisplays = count; desktopDisplay = current; desktopActive = isDesktop;
                     desktopButton.setText(desktopDisplays >= 2 && desktopDisplay > 0 ? "桌面 " + desktopDisplay + "/" + desktopDisplays : "桌面");
                     desktopButton.setContentDescription(desktopDisplays >= 2 ? "桌面 " + desktopDisplay + " / " + desktopDisplays + "，再次点击切换显示器" : "桌面");
-                    if (!sameWindowChoices(windows)) {
+                    String mac = list.optString("macName", "");
+                    if (!mac.equals(windowOrderMac)) { cancelWindowDrag(); windowOrderMac = mac; loadWindowOrder(); }
+                    JSONArray sortedWindows = orderedWindows(windows);
+                    if (!sameWindowChoices(sortedWindows)) {
+                        cancelWindowDrag();
                         dismissWindowControls();
                         choices.removeAllViews(); thumbnails.clear(); iconBadges.clear();
-                        for (int i = 0; i < windows.length(); i++) {
-                            JSONObject item = windows.optJSONObject(i); if (item == null) continue;
+                        for (int i = 0; i < sortedWindows.length(); i++) {
+                            JSONObject item = sortedWindows.optJSONObject(i); if (item == null) continue;
                             try { addChoice(item.optString("appName") + " — " + item.optString("title"), new JSONObject().put("_0", item.getLong("id")), item.optString("bundleID")); }
                             catch (Exception ignored) { }
                         }
@@ -1349,6 +1359,54 @@ public final class MainActivity extends Activity {
             } else break;
         }
     }
+    private void loadWindowOrder() {
+        windowOrder = new java.util.ArrayList<>();
+        if (windowOrderMac.isEmpty()) return;
+        try {
+            JSONArray saved = new JSONArray(getPreferences(0).getString("Sill.windowOrder." + windowOrderMac, "[]"));
+            for (int i = 0; i < Math.min(64, saved.length()); i++) windowOrder.add(saved.getLong(i));
+        } catch (org.json.JSONException ignored) { windowOrder.clear(); }
+    }
+    private JSONArray orderedWindows(JSONArray windows) {
+        java.util.Map<Long, JSONObject> byId = new java.util.LinkedHashMap<>();
+        for (int i = 0; i < windows.length(); i++) {
+            JSONObject w = windows.optJSONObject(i);
+            if (w != null && w.has("id")) byId.put(w.optLong("id", -1), w);
+        }
+        JSONArray sorted = new JSONArray();
+        for (Long id : WindowOrder.ordered(new java.util.ArrayList<>(byId.keySet()), windowOrder)) sorted.put(byId.get(id));
+        return sorted;
+    }
+    private java.util.List<Long> visibleWindowIds() {
+        java.util.List<Long> ids = new java.util.ArrayList<>();
+        for (int i = 0; i < choices.getChildCount(); i++) {
+            Object tag = choices.getChildAt(i).getTag(); if (tag instanceof Long) ids.add((Long) tag);
+        }
+        return ids;
+    }
+    private void persistWindowOrder() {
+        if (windowOrderMac.isEmpty()) return;
+        windowOrder = WindowOrder.capped(windowOrder, visibleWindowIds());
+        getPreferences(0).edit().putString("Sill.windowOrder." + windowOrderMac, new JSONArray(windowOrder).toString()).apply();
+    }
+    private void moveWindow(android.view.View tile, int target) {
+        int from = choices.indexOfChild(tile);
+        if (from < 0 || target < 0 || target >= choices.getChildCount() || from == target) return;
+        java.util.List<Long> ids = visibleWindowIds();
+        if (!WindowOrder.move(ids, (Long) tile.getTag(), target)) return;
+        choices.removeViewAt(from); choices.addView(tile, target); windowOrder = ids;
+        tile.sendAccessibilityEvent(android.view.accessibility.AccessibilityEvent.TYPE_VIEW_SELECTED);
+    }
+    private void cancelWindowDrag() {
+        if (draggedWindow == null) return;
+        for (int i = 0; i < choices.getChildCount(); i++) { choices.getChildAt(i).setTranslationX(0); choices.getChildAt(i).setScaleX(1); choices.getChildAt(i).setScaleY(1); }
+        draggedWindow = null; choices.requestDisallowInterceptTouchEvent(false);
+    }
+    private void dropWindowDrag() {
+        android.view.View tile = draggedWindow; int target = dragTo;
+        cancelWindowDrag();
+        if (tile != null) { moveWindow(tile, target); persistWindowOrder(); }
+    }
     private boolean sameWindowChoices(JSONArray windows) {
         if (choices.getChildCount() != windows.length()) return false;
         for (int i = 0; i < windows.length(); i++) {
@@ -1380,11 +1438,37 @@ public final class MainActivity extends Activity {
             if (windowControls != null && windowControls.isShowing()) dismissWindowControls();
             else select(source, false);
         });
+        tile.setAccessibilityDelegate(new android.view.View.AccessibilityDelegate() {
+            @Override public void onInitializeAccessibilityNodeInfo(android.view.View view, android.view.accessibility.AccessibilityNodeInfo info) {
+                super.onInitializeAccessibilityNodeInfo(view, info);
+                info.addAction(new android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction(MOVE_LEFT_ACTION, "向左移动窗口"));
+                info.addAction(new android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction(MOVE_RIGHT_ACTION, "向右移动窗口"));
+                info.addAction(new android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_LONG_CLICK, "窗口控制"));
+                info.addAction(new android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction(CLOSE_WINDOW_ACTION, "关闭窗口"));
+                info.addAction(new android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction(MINIMIZE_WINDOW_ACTION, "最小化窗口"));
+                info.addAction(new android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction(FULL_SCREEN_ACTION, "全屏窗口"));
+            }
+            @Override public boolean performAccessibilityAction(android.view.View view, int action, android.os.Bundle args) {
+                if (action == MOVE_LEFT_ACTION || action == MOVE_RIGHT_ACTION) {
+                    int target = choices.indexOfChild(view) + (action == MOVE_LEFT_ACTION ? -1 : 1);
+                    moveWindow(view, target); persistWindowOrder(); return true;
+                }
+                if (action == android.view.accessibility.AccessibilityNodeInfo.ACTION_LONG_CLICK) { showWindowControls(view, source); return true; }
+                if (action == CLOSE_WINDOW_ACTION || action == MINIMIZE_WINDOW_ACTION || action == FULL_SCREEN_ACTION) {
+                    sendWindowCommand(connection, source, action == CLOSE_WINDOW_ACTION ? "close" : action == MINIMIZE_WINDOW_ACTION ? "minimize" : "fullScreen"); return true;
+                }
+                return super.performAccessibilityAction(view, action, args);
+            }
+        });
         tile.setOnTouchListener(new android.view.View.OnTouchListener() {
             final WindowHold gesture = new WindowHold();
+            float lastRawX, lastRawY, heldX, heldY;
+            SillConnection gestureSession;
             final Runnable hold = () -> {
-                if (!keyframeForeground || !tile.isAttachedToWindow() || connection == null || !thumbnails.containsKey(source.optLong("_0", -1))) return;
+                if (!keyframeForeground || !tile.isAttachedToWindow() || gestureSession == null || connection != gestureSession || !thumbnails.containsKey(source.optLong("_0", -1))) return;
                 if (!gesture.hold()) return;
+                heldX = lastRawX; heldY = lastRawY;
+                tile.getParent().requestDisallowInterceptTouchEvent(true);
                 tile.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS);
                 showWindowControls(tile, source);
             };
@@ -1392,17 +1476,41 @@ public final class MainActivity extends Activity {
                 switch (event.getActionMasked()) {
                     case android.view.MotionEvent.ACTION_DOWN -> {
                         gesture.begin(event.getX(), event.getY());
+                        gestureSession = connection;
+                        lastRawX = event.getRawX(); lastRawY = event.getRawY();
                         int tenths = Math.max(2, Math.min(20, getPreferences(0).getInt("thumbnailHoldTenths", 5)));
                         view.postDelayed(hold, tenths * 100L); return true;
                     }
                     case android.view.MotionEvent.ACTION_MOVE -> {
-                        if (gesture.move(event.getX(), event.getY(), dp(12))) view.removeCallbacks(hold);
+                        if (!keyframeForeground || gestureSession == null || connection != gestureSession) { view.removeCallbacks(hold); gesture.cancel(); if (draggedWindow == tile) cancelWindowDrag(); return true; }
+                        lastRawX = event.getRawX(); lastRawY = event.getRawY();
+                        if (gesture.isHeld()) {
+                            float dx = lastRawX - heldX, dy = lastRawY - heldY;
+                            if (draggedWindow == null && (Math.abs(dx) > dp(8) || Math.abs(dy) > dp(8))) {
+                                dismissWindowControls(); draggedWindow = tile; dragFrom = choices.indexOfChild(tile); dragTo = dragFrom;
+                                tile.setScaleX(1.08f); tile.setScaleY(1.08f);
+                                tile.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS);
+                            }
+                            if (draggedWindow == tile) {
+                                int slot = tile.getWidth() + dp(6);
+                                dragTo = Math.max(0, Math.min(choices.getChildCount() - 1, dragFrom + Math.round(dx / slot)));
+                                tile.setTranslationX(dx);
+                                for (int i = 0; i < choices.getChildCount(); i++) {
+                                    android.view.View other = choices.getChildAt(i); if (other == tile) continue;
+                                    other.setTranslationX(i > dragFrom && i <= dragTo ? -slot : i < dragFrom && i >= dragTo ? slot : 0);
+                                }
+                            }
+                        } else if (gesture.move(event.getX(), event.getY(), dp(12))) view.removeCallbacks(hold);
                         return true;
                     }
                     case android.view.MotionEvent.ACTION_UP -> {
-                        view.removeCallbacks(hold); if (gesture.end()) view.performClick(); return true;
+                        view.removeCallbacks(hold);
+                        if (!keyframeForeground || gestureSession == null || connection != gestureSession) { gesture.cancel(); if (draggedWindow == tile) cancelWindowDrag(); return true; }
+                        if (draggedWindow == tile) dropWindowDrag();
+                        else if (gesture.end()) view.performClick();
+                        if (view.getParent() != null) view.getParent().requestDisallowInterceptTouchEvent(false); return true;
                     }
-                    case android.view.MotionEvent.ACTION_CANCEL -> { view.removeCallbacks(hold); gesture.cancel(); return true; }
+                    case android.view.MotionEvent.ACTION_CANCEL -> { view.removeCallbacks(hold); gesture.cancel(); if (draggedWindow == tile) { if (keyframeForeground && gestureSession != null && connection == gestureSession) dropWindowDrag(); else cancelWindowDrag(); } if (view.getParent() != null) view.getParent().requestDisallowInterceptTouchEvent(false); return true; }
                     default -> { return true; }
                 }
             }
@@ -1410,6 +1518,11 @@ public final class MainActivity extends Activity {
     }
     private void dismissWindowControls() {
         if (windowControls != null) { windowControls.dismiss(); windowControls = null; }
+    }
+    private void sendWindowCommand(SillConnection expected, JSONObject source, String action) {
+        if (expected == null || connection != expected || !thumbnails.containsKey(source.optLong("_0", -1))) return;
+        try { sendAsync(15, new JSONObject().put("id", source.getLong("_0")).put("action", action)); }
+        catch (Exception e) { show("窗口操作失败"); }
     }
     private void showWindowControls(android.view.View anchor, JSONObject source) {
         dismissWindowControls();
@@ -1430,13 +1543,11 @@ public final class MainActivity extends Activity {
             item.addView(label); item.setContentDescription(labels[i] + "窗口");
             item.setOnClickListener(v -> {
                 dismissWindowControls();
-                if (expected == null || connection != expected || !thumbnails.containsKey(source.optLong("_0", -1))) return;
-                try { sendAsync(15, new JSONObject().put("id", source.getLong("_0")).put("action", action)); }
-                catch (Exception e) { show("窗口操作失败"); }
+                sendWindowCommand(expected, source, action);
             });
             row.addView(item, new LinearLayout.LayoutParams(dp(60), -1));
         }
-        windowControls = new android.widget.PopupWindow(row, dp(214), dp(62), true);
+        windowControls = new android.widget.PopupWindow(row, dp(214), dp(62), false);
         windowControls.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT));
         windowControls.setOutsideTouchable(true); windowControls.setElevation(dp(8));
         int[] location = new int[2]; anchor.getLocationInWindow(location);
@@ -1452,7 +1563,7 @@ public final class MainActivity extends Activity {
     @Override protected void onResume() { super.onResume(); keyframeForeground = true; if (screenAwake != null) screenAwake.setForeground(true); }
     @Override protected void onPause() { keyframeForeground = false; synchronized (surfaceLock) { surfaceEpoch++; } recoveryFrame.set(null); interruptPicture(); if (keyframeRecovery != null) keyframeRecovery.leftForeground(); if (screenAwake != null) screenAwake.setForeground(false); super.onPause(); }
     @Override public void onUserInteraction() { super.onUserInteraction(); if (screenAwake != null) screenAwake.personActed(); }
-    @Override protected void onStop() { dismissWindowControls(); stopFpsObservers(); clipboardReceipt.cancel(); if (pictureInput != null) pictureInput.cancel(); if (trackpad != null) trackpad.cancelGestures(); if (discovery != null) discovery.stop(); nearby.clear(); nearbyMacs.removeAllViews(); super.onStop(); }
+    @Override protected void onStop() { dismissWindowControls(); cancelWindowDrag(); stopFpsObservers(); clipboardReceipt.cancel(); if (pictureInput != null) pictureInput.cancel(); if (trackpad != null) trackpad.cancelGestures(); if (discovery != null) discovery.stop(); nearby.clear(); nearbyMacs.removeAllViews(); super.onStop(); }
     @Override protected void onDestroy() {
         stopFpsObservers();
         if (screenAwake != null) screenAwake.close();

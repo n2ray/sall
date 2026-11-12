@@ -57,17 +57,23 @@ final class RemoteKeyboard extends View {
                 return result;
             }
             @Override public boolean deleteSurroundingText(int beforeLength, int afterLength) {
-                if (!valid()) return false;
+                if (!valid() || beforeLength < 0 || afterLength < 0) return false;
                 if (BaseInputConnection.getComposingSpanStart(getEditable()) >= 0)
                     return super.deleteSurroundingText(beforeLength, afterLength);
                 Editable editable = getEditable();
-                int cursor = Math.max(0, android.text.Selection.getSelectionStart(editable));
-                int beyond = Math.max(0, Math.min(beforeLength, 64) - cursor);
-                boolean result = super.deleteSurroundingText(Math.min(beforeLength, 64), 0);
+                int start = android.text.Selection.getSelectionStart(editable), end = android.text.Selection.getSelectionEnd(editable);
+                if (start < 0 || end < 0) return false;
+                int left = Math.min(start, end), right = Math.max(start, end);
+                if (RemoteTextState.splitsSurrogate(editable, left) || RemoteTextState.splitsSurrogate(editable, right)) return false;
+                int before = Math.min(beforeLength, 64), after = Math.min(afterLength, 64);
+                int beyond = Math.max(0, before - left);
+                if (after > editable.length() - right || (beyond > 0 && (before != 1 || left != right || right != editable.length() || after != 0))) return false;
+                boolean finalBackspace = left == right && right == editable.length() && before == 1 && after == 0;
+                if (before <= left) before = left - RemoteTextState.deletionStart(editable, left - before);
+                after = RemoteTextState.deletionEnd(editable, right + after) - right;
+                boolean result = super.deleteSurroundingText(before, after);
                 if (result) {
-                    reconcile(editable);
-                    if (beyond > 0) listener.text("\b".repeat(beyond));
-                    for (int i = 0; i < Math.min(afterLength, 64); i++) { listener.key(76, true); listener.key(76, false); }
+                    if (reconcile(editable, finalBackspace) && beyond > 0) listener.text("\b".repeat(beyond));
                 }
                 return result;
             }
@@ -76,15 +82,20 @@ final class RemoteKeyboard extends View {
                 Editable editable = getEditable();
                 if (BaseInputConnection.getComposingSpanStart(editable) >= 0)
                     return super.deleteSurroundingTextInCodePoints(beforeLength, afterLength);
-                int cursor = Math.max(0, Math.min(editable.length(), android.text.Selection.getSelectionStart(editable)));
+                int selStart = android.text.Selection.getSelectionStart(editable), selEnd = android.text.Selection.getSelectionEnd(editable);
+                if (selStart < 0 || selEnd < 0) return false;
+                int left = Math.min(selStart, selEnd), right = Math.max(selStart, selEnd);
+                if (RemoteTextState.splitsSurrogate(editable, left) || RemoteTextState.splitsSurrogate(editable, right)) return false;
                 int before = Math.min(beforeLength, 64), after = Math.min(afterLength, 64);
-                int known = Character.codePointCount(editable, 0, cursor);
-                int start = Character.offsetByCodePoints(editable, cursor, -Math.min(before, known));
-                boolean result = super.deleteSurroundingText(cursor - start, 0);
+                int known = Character.codePointCount(editable, 0, left);
+                int knownAfter = Character.codePointCount(editable, right, editable.length());
+                if (after > knownAfter || (before > known && (before != 1 || left != right || right != editable.length() || after != 0))) return false;
+                int start = Character.offsetByCodePoints(editable, left, -Math.min(before, known));
+                int end = Character.offsetByCodePoints(editable, right, after);
+                boolean finalBackspace = left == right && right == editable.length() && before == 1 && after == 0;
+                boolean result = super.deleteSurroundingText(left - start, end - right);
                 if (result) {
-                    reconcile(editable);
-                    if (before > known) listener.text("\b".repeat(before - known));
-                    for (int i = 0; i < after; i++) { listener.key(76, true); listener.key(76, false); }
+                    if (reconcile(editable, finalBackspace) && before > known) listener.text("\b".repeat(before - known));
                 }
                 return result;
             }
@@ -105,20 +116,32 @@ final class RemoteKeyboard extends View {
                 if (event.getAction() == KeyEvent.ACTION_DOWN) {
                     finishCurrent();
                     if (keysDown.add(usage)) listener.key(usage, true);
-                } else if (event.getAction() == KeyEvent.ACTION_UP && keysDown.remove(usage)) listener.key(usage, false);
+                } else if (event.getAction() == KeyEvent.ACTION_UP && keysDown.remove(usage)) {
+                    listener.key(usage, false);
+                    finishAndForget();
+                }
                 return true;
             }
         };
         return active;
     }
 
-    private void reconcile(Editable editable) {
-        RemoteTextState.Edit edit = state.reconcile(editable.toString());
+    private void reconcile(Editable editable) { reconcile(editable, false); }
+    private boolean reconcile(Editable editable, boolean finalBackspace) {
+        int previousFence = state.fence();
+        RemoteTextState.Edit edit = state.reconcile(editable.toString(), finalBackspace);
+        if (edit == null) {
+            editable.replace(0, editable.length(), state.text());
+            android.text.Selection.setSelection(editable, editable.length());
+            return false;
+        }
         if (edit.backspaces() > 0) listener.text("\b".repeat(edit.backspaces()));
         if (!edit.text().isEmpty()) listener.text(edit.text());
-        if (editable.length() > 2048 || edit.text().indexOf('\n') >= 0 || edit.text().indexOf('\t') >= 0) {
-            editable.clear(); state.clear();
+        if (editable.length() > 2048 || (finalBackspace && state.fence() < previousFence)) {
+            mutating = true;
+            try { finishAndForget(); } finally { mutating = false; }
         }
+        return true;
     }
 
     /** Call before any action that can move the Mac's caret or select another window. */

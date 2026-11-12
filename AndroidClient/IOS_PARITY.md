@@ -14,7 +14,7 @@ Product direction: follow the iOS client's layout and interaction by default. Ea
 
 ## Windows and picture
 
-- [ ] Window catalog, app icons, app launching, menu and thumbnail commands exist. The application drawer follows iOS app-name search and cycles windows per application; the window strip has a configurable hold time and anchored action menu. These changes need Xiaomi verification. iOS-style presentation, drag-to-reorder, full menu state and accessible actions remain.
+- [ ] Window catalog, app icons, app launching, menu and thumbnail commands exist. The application drawer follows iOS app-name search and cycles windows per application; the window strip has a configurable hold time, anchored action menu, per-Mac drag ordering and accessibility actions. These changes need Xiaomi verification. iOS-style presentation, real-time drag animation and full menu state remain.
 - [ ] Selected-window fitting: iOS starts with Aa off and fits the complete picture without stretching. Test repeated source changes, rotation, app minimum sizes and host refusal; some applications cannot fill the picture without cropping.
 - [ ] Stage Manager may cause the Mac host to supply a tilted thumbnail. The iOS client displays the host thumbnail; Android follows that behavior. Test window closure, source changes and cache cleanup.
 - [ ] Desktop display cycling is implemented only when the host advertises it. The tested Mac 0.6.1 does not; the Android client cannot add the missing host capability.
@@ -24,7 +24,7 @@ Product direction: follow the iOS client's layout and interaction by default. Ea
 ## Input and local interaction
 
 - [ ] Trackpad single/double click, drag, two-finger scroll and right click, scroll momentum, reverse scrolling, three/four-finger gestures and cancel/rotation behavior; never send a click during a pinch. On 2026-11-12 the user confirmed two-finger scrolling and momentum felt smooth without accidental clicks on the Xiaomi. A persistent reverse-scroll setting and capability-gated Mac gestures are implemented; the new direct picture-input path and multi-touch gestures need real-device checks.
-- [ ] IME composition, correction, selection, emoji and dictation: basic Android suffix correction exists; port/check iOS composition fences and stale callback handling with real Chinese input.
+- [ ] IME composition, correction, selection, emoji and dictation: Return/Tab fences, stale callback handling and safe deletion have logic checks; test Chinese input, emoji and dictation on the device. Cross-fence selection editing is conservatively rejected and does not yet match iOS in all cases.
 - [ ] Physical keyboard: local-dialog focus gating, function keys and capability-gated repeat are implemented with logic checks; verify real keyboards, shortcuts, older hosts and third-party input methods.
 - [ ] Mouse and pointer: shape and basic host position exist; complete source/ownership, out-of-frame visibility, physical mouse buttons and wheel, and no cursor jumps after reconnect.
 - [ ] Clipboard: opt-in text sharing and acknowledgement-before-paste are implemented with logic checks; verify slow-network cancellation on a real Mac and complete echo handling, background behavior and precise status.
