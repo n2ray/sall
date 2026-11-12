@@ -68,14 +68,19 @@ final class SillConnection implements Closeable {
             SSLSocket tls = (SSLSocket) context.getSocketFactory().createSocket(tcp, host, port, true);
             SSLParameters params = tls.getSSLParameters();
             params.setProtocols(new String[] {"TLSv1.3"}); params.setApplicationProtocols(new String[] {alpn});
-            tls.setSSLParameters(params); tls.startHandshake();
+            tls.setSSLParameters(params);
+            android.util.Log.i("SillAndroid", "Starting TLS handshake for " + alpn);
+            tls.startHandshake();
+            android.util.Log.i("SillAndroid", "TLS handshake completed for " + alpn);
             if (!alpn.equals(tls.getApplicationProtocol()) || observed[0] == null) throw new IOException("Sill TLS negotiation failed");
             return new SillConnection(tls, own, observed[0]);
         } catch (Exception e) { tcp.close(); throw e; }
     }
 
     byte[] pair(String code, String deviceName, String model) throws Exception {
+        android.util.Log.i("SillAndroid", "Deriving pairing proof");
         byte[] key = PairingProof.codeKey(code, peerFingerprint);
+        android.util.Log.i("SillAndroid", "Sending pairing proof");
         byte[] proof = PairingProof.proof(key, peerFingerprint, deviceFingerprint, true);
         String encoded = Base64.encodeToString(proof, Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
         JSONObject request = new JSONObject().put("v", 1).put("method", "code").put("proof", encoded)

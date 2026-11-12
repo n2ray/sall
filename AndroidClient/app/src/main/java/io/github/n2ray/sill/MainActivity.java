@@ -115,11 +115,11 @@ public final class MainActivity extends Activity {
                 show("正在连接…");
                 try (SillConnection session = SillConnection.connect(address, number, "sill/1", pin)) {
                     connection = session; session.sessionTimeout();
-                    sendJson(23, new JSONObject().put("protocol", 1).put("appVersion", "0.6.0").put("device", android.os.Build.MODEL));
+                    sendJson(23, new JSONObject().put("protocol", 1).put("appVersion", "0.1.0").put("device", android.os.Build.MODEL));
                     show("已连接，选择一个窗口或桌面。");
                     while (running) handle(session.read());
                 }
-            } catch (Exception e) { show("连接结束: " + e.getMessage()); }
+            } catch (Exception e) { android.util.Log.e("SillAndroid", "Connection failed", e); show("连接结束: " + e.getMessage()); }
             finally { connection = null; running = false; releaseDecoder(); }
         });
     }
