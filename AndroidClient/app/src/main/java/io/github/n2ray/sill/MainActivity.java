@@ -55,9 +55,13 @@ public final class MainActivity extends Activity {
     private final PictureZoom zoom = new PictureZoom();
     private final Object surfaceLock = new Object();
     private volatile boolean clipboardEnabled;
+    private volatile boolean hostClipboardAvailable;
+    private final ClipboardReceipt clipboardReceipt = new ClipboardReceipt();
+    private long clipboardToken;
+    private volatile String clipboardSource = "";
     private boolean audioEnabled;
     private AudioPlayer audio;
-    private boolean clipboardSubscribed;
+    private volatile boolean clipboardSubscribed;
     private Double textScale = .6, effectiveScale = .6;
     private int fitAttempts;
     private long fitAttemptAt, videoFormatAt;
@@ -70,6 +74,7 @@ public final class MainActivity extends Activity {
     private long modifiers;
     private long heldModifiers;
     private final java.util.Map<Long, android.view.View> modifierViews = new java.util.LinkedHashMap<>();
+    private final java.util.Map<Integer, Integer> hardwareKeysDown = new java.util.LinkedHashMap<>();
     private JSONArray appList = new JSONArray(), macMenus = new JSONArray();
     private int menuVersion, menuToken, pendingMenuToken;
     private JSONObject hostSettings;
@@ -270,6 +275,7 @@ public final class MainActivity extends Activity {
             public void pointer(String action, float x, float y) { MainActivity.this.pointer(action, x, y); cursor.invalidate(); }
             public void scroll(String phase, float x, float y, float dx, float dy) { sendScroll(phase, x, y, dx, dy); }
         });
+        trackpad.setReverseScrolling(getPreferences(0).getBoolean("reverseScrolling", false));
         sessionPanel.addView(trackpad, new LinearLayout.LayoutParams(-1, 0, 1));
         LinearLayout rightPane = new LinearLayout(this); rightPane.setOrientation(LinearLayout.VERTICAL);
         LinearLayout keysSecond = new LinearLayout(this);
@@ -351,7 +357,10 @@ public final class MainActivity extends Activity {
         catch (Exception e) { show("按键发送失败"); }
     }
     @Override public boolean dispatchKeyEvent(android.view.KeyEvent event) {
-        if (connection == null || event.getDeviceId() < 0 || (event.getSource() & android.view.InputDevice.SOURCE_KEYBOARD) == 0)
+        android.view.View focused = getCurrentFocus();
+        if (!HardwareKeyGate.sendRemote(connection != null, hasWindowFocus(), sessionPanel.getVisibility() == android.view.View.VISIBLE,
+                focused != null && focused != keyboard && focused.onCheckIsTextEditor()) ||
+                event.getDeviceId() < 0 || (event.getSource() & android.view.InputDevice.SOURCE_KEYBOARD) == 0)
             return super.dispatchKeyEvent(event);
         int code = event.getKeyCode(), usage;
         if (code >= android.view.KeyEvent.KEYCODE_A && code <= android.view.KeyEvent.KEYCODE_Z) usage = 4 + code - android.view.KeyEvent.KEYCODE_A;
@@ -379,8 +388,18 @@ public final class MainActivity extends Activity {
         long flags = modifiers | (event.isShiftPressed() ? 1L << 17 : 0) | (event.isCtrlPressed() ? 1L << 18 : 0)
                 | (event.isAltPressed() ? 1L << 19 : 0) | (event.isMetaPressed() ? 1L << 20 : 0);
         boolean down = event.getAction() == android.view.KeyEvent.ACTION_DOWN;
+        if (down) hardwareKeysDown.put(code, usage);
+        else if (hardwareKeysDown.remove(code) == null) return true;
         if (down && usage < 0xe0) { keyboard.finishAndForget(); pressModifiers(); }
         sendKey(usage, down, flags); if (!down && usage < 0xe0) releaseModifiers(); return true;
+    }
+    @Override public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (!hasFocus) clipboardReceipt.cancel();
+        if (!hasFocus && !hardwareKeysDown.isEmpty()) {
+            for (int usage : hardwareKeysDown.values()) sendKey(usage, false, 0);
+            hardwareKeysDown.clear(); releaseModifiers();
+        }
     }
     private void tapKey(int usage) { pressModifiers(); sendKey(usage, true); sendKey(usage, false); releaseModifiers(); }
     private void sendText(String text) {
@@ -404,11 +423,13 @@ public final class MainActivity extends Activity {
         } catch (Exception e) { show("滚动发送失败"); }
     }
     private void select(JSONObject source, boolean desktop) {
-        try { keyboard.finishAndForget(); zoom.reset(); layoutVideo(); cursor.invalidate(); resetWindowFit(); sendViewport(); sendAsync(6, new JSONObject().put(desktop ? "desktop" : "window", source)); }
+        trackpad.cancelGestures();
+        try { clipboardReceipt.cancel(); keyboard.finishAndForget(); zoom.reset(); layoutVideo(); cursor.invalidate(); resetWindowFit(); sendViewport(); sendAsync(6, new JSONObject().put(desktop ? "desktop" : "window", source)); }
         catch (Exception e) { show("选择窗口失败"); }
     }
     private void tapDesktop() {
-        if (DesktopNavigation.next(desktopActive, desktopDisplays, desktopDisplay)) { keyboard.finishAndForget(); sendAsync(47, new JSONObject(), true); }
+        trackpad.cancelGestures();
+        if (DesktopNavigation.next(desktopActive, desktopDisplays, desktopDisplay)) { clipboardReceipt.cancel(); keyboard.finishAndForget(); sendAsync(47, new JSONObject(), true); }
         else select(new JSONObject(), true);
     }
     private void showWindows() {
@@ -447,6 +468,7 @@ public final class MainActivity extends Activity {
         }).show();
     }
     private void chooseScale() {
+        if (desktopActive) { show("文字大小只用于调整单个窗口；桌面保持原来的尺寸。"); return; }
         String[] labels = {"不调整", "0.5×", "0.6×", "0.75×", "1×", "1.25×", "1.5×"};
         new android.app.AlertDialog.Builder(this).setTitle("文字大小").setItems(labels, (dialog, index) -> {
             textScale = index == 0 ? null : new double[]{0, .5, .6, .75, 1, 1.25, 1.5}[index]; resetWindowFit(); scheduleViewport();
@@ -481,7 +503,8 @@ public final class MainActivity extends Activity {
         video.setTranslationY(enlarged.top() + enlarged.height() / 2 - picture.getHeight() / 2f);
     }
     private void settings() {
-        String[] items = {"Mac 画质和帧率", clipboardEnabled ? "关闭剪贴板共享" : "开启剪贴板共享", "将手机剪贴板粘贴到 Mac", audioEnabled ? "关闭声音（重新连接后生效）" : "开启声音测试（重新连接后生效）", "断开连接"};
+        boolean reverse = getPreferences(0).getBoolean("reverseScrolling", false);
+        String[] items = {"Mac 画质和帧率", clipboardEnabled ? "关闭剪贴板共享" : "开启剪贴板共享", "将手机剪贴板粘贴到 Mac", audioEnabled ? "关闭声音（重新连接后生效）" : "开启声音测试（重新连接后生效）", reverse ? "滚动方向：反向" : "滚动方向：自然", "断开连接"};
         new android.app.AlertDialog.Builder(this).setTitle("设置").setItems(items, (dialog, i) -> {
             if (i == 0) hostSettingsMenu();
             if (i == 1) { clipboardEnabled = !clipboardEnabled; getPreferences(0).edit().putBoolean("shareClipboard", clipboardEnabled).apply(); updateClipboard(); }
@@ -491,7 +514,8 @@ public final class MainActivity extends Activity {
                 audioEnabled = !audioEnabled; getPreferences(0).edit().putBoolean("experimentalAudio", audioEnabled).apply();
                 show("声音设置将在下次连接时生效");
             }
-            if (i == 4) disconnect();
+            if (i == 4) { boolean next = !reverse; getPreferences(0).edit().putBoolean("reverseScrolling", next).apply(); trackpad.setReverseScrolling(next); show(next ? "已启用反向滚动" : "已启用自然滚动"); }
+            if (i == 5) disconnect();
         }).show();
     }
     private void hostSettingsMenu() {
@@ -528,25 +552,43 @@ public final class MainActivity extends Activity {
         } catch (Exception e) { pendingSettingsToken = 0; show("设置发送失败"); }
     }
     private void updateClipboard() {
-        if (connection == null) return;
+        if (!clipboardEnabled) clipboardReceipt.cancel();
+        if (connection == null) { clipboardSubscribed = false; return; }
+        if (clipboardEnabled && !hostClipboardAvailable) { clipboardSubscribed = false; return; }
         try { sendAsync(32, clipboardEnabled ? new JSONObject() : new JSONObject().put("stop", true)); clipboardSubscribed = clipboardEnabled; }
         catch (Exception e) { show("剪贴板设置失败"); }
     }
     private void pasteClipboard() {
         if (!clipboardEnabled) { show("请先开启剪贴板共享"); return; }
+        SillConnection expected = connection;
+        if (expected == null || !hostClipboardAvailable || clipboardSource.isEmpty() || clipboardSource.contains("\"none\"")) { show("Mac 未开启剪贴板共享或没有正在显示的窗口"); return; }
         android.content.ClipboardManager clipboard = (android.content.ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
         if (!clipboard.hasPrimaryClip() || clipboard.getPrimaryClip().getItemCount() == 0) return;
         CharSequence text = clipboard.getPrimaryClip().getItemAt(0).coerceToText(this);
         if (text == null || text.length() == 0 || text.toString().getBytes(StandardCharsets.UTF_8).length > 256 * 1024) return;
         try {
-            sendAsync(32, new JSONObject().put("text", text.toString()));
-            sendAsync(8, new JSONObject().put("key", new JSONObject().put("hidUsage", 25).put("down", true).put("modifiers", 1L << 20)));
-            sendAsync(8, new JSONObject().put("key", new JSONObject().put("hidUsage", 25).put("down", false).put("modifiers", 1L << 20)));
+            keyboard.finishAndForget();
+            byte[] payload = new JSONObject().put("text", text.toString()).toString().getBytes(StandardCharsets.UTF_8);
+            if (payload.length > StreamWire.MAX_OUTGOING) { show("剪贴板文字过长"); return; }
+            byte[] nonce = new byte[16]; new java.security.SecureRandom().nextBytes(nonce);
+            long token = clipboardReceipt.begin(nonce, android.os.SystemClock.uptimeMillis()); clipboardToken = token;
+            input.execute(() -> {
+                try {
+                    synchronized (outputLock) {
+                        if (connection != expected || !clipboardEnabled || !hostClipboardAvailable || !clipboardReceipt.pending(token)) return;
+                        expected.send(32, payload); expected.send(10, nonce);
+                    }
+                } catch (Exception e) {
+                    if (clipboardReceipt.pending(token)) { clipboardReceipt.cancel(token); showFor(expected, "剪贴板发送失败"); }
+                }
+            });
+            ui.postDelayed(() -> { if (clipboardReceipt.expire(token, android.os.SystemClock.uptimeMillis())) showFor(expected, "Mac 未确认剪贴板，请重试"); }, 4000);
         }
         catch (Exception e) { show("剪贴板发送失败"); }
     }
     private void disconnect() {
-        keyboard.finishAndForget(); closing = true; SillConnection c = connection;
+        trackpad.cancelGestures();
+        clipboardReceipt.cancel(); keyboard.finishAndForget(); closing = true; SillConnection c = connection;
         synchronized (reconnectLock) { reconnectLock.notifyAll(); }
         if (c != null) try { c.close(); } catch (Exception ignored) { }
     }
@@ -608,12 +650,12 @@ public final class MainActivity extends Activity {
                         long delay = ReconnectPolicy.delayMillis(retries);
                         if (!established || !ReconnectPolicy.retryable(error) || delay < 0) throw error;
                         retries++;
-                        connection = null; pointerSync = null; clipboardSubscribed = false; releaseDecoder();
+                        connection = null; pointerSync = null; clipboardSubscribed = false; hostClipboardAvailable = false; clipboardSource = ""; clipboardReceipt.cancel(); releaseDecoder();
                         if (audio != null) { audio.close(); audio = null; }
                         ui.post(() -> {
                             hostSettings = null; pendingSettingsToken = 0; desktopDisplays = -1; desktopDisplay = 0; desktopActive = false;
                             desktopButton.setText("桌面"); choices.removeAllViews(); thumbnails.clear(); thumbnailImages.clear(); appIcons.clear(); iconBadges.clear(); streamedPreviews.clear(); activeWindowId = -1;
-                            keyboard.discard(); resetCursorShape();
+                            trackpad.cancelGestures(); keyboard.discard(); resetCursorShape();
                             modifiers = heldModifiers = 0; for (android.view.View button : modifierViews.values()) button.setBackground(shape(0xff272a30, 12));
                         });
                         show("连接中断，正在重新连接（" + retries + "/4）…");
@@ -622,9 +664,9 @@ public final class MainActivity extends Activity {
                 }
             } catch (Exception e) { if (!closing) { android.util.Log.e("SillAndroid", "Connection failed", e); show("连接结束: " + e.getMessage()); } }
             finally {
-                connection = null; pointerSync = null; clipboardSubscribed = false; releaseDecoder();
+                connection = null; pointerSync = null; clipboardSubscribed = false; hostClipboardAvailable = false; clipboardSource = ""; clipboardReceipt.cancel(); releaseDecoder();
                 if (audio != null) { audio.close(); audio = null; }
-                ui.post(() -> { hostSettings = null; pendingSettingsToken = 0; desktopDisplays = -1; desktopDisplay = 0; desktopActive = false; desktopButton.setText("桌面"); thumbnailImages.clear(); appIcons.clear(); iconBadges.clear(); streamedPreviews.clear(); activeWindowId = -1; zoom.reset(); keyboard.discard(); resetCursorShape(); modifiers = heldModifiers = 0; for (android.view.View button : modifierViews.values()) button.setBackground(shape(0xff272a30, 12)); sessionPanel.setVisibility(android.view.View.GONE); connectionContainer.setVisibility(android.view.View.VISIBLE); running = false; });
+                ui.post(() -> { hostSettings = null; pendingSettingsToken = 0; desktopDisplays = -1; desktopDisplay = 0; desktopActive = false; desktopButton.setText("桌面"); thumbnailImages.clear(); appIcons.clear(); iconBadges.clear(); streamedPreviews.clear(); activeWindowId = -1; zoom.reset(); trackpad.cancelGestures(); keyboard.discard(); resetCursorShape(); modifiers = heldModifiers = 0; for (android.view.View button : modifierViews.values()) button.setBackground(shape(0xff272a30, 12)); sessionPanel.setVisibility(android.view.View.GONE); connectionContainer.setVisibility(android.view.View.VISIBLE); running = false; });
             }
         });
     }
@@ -639,6 +681,11 @@ public final class MainActivity extends Activity {
         sendAsync(kind, value, false);
     }
     private void sendAsync(int kind, JSONObject value, boolean empty) {
+        if (kind == 6 || kind == 7 || kind == 47) clipboardReceipt.cancel();
+        if (kind == 8) {
+            JSONObject pointer = value.optJSONObject("pointer");
+            if (value.has("key") || value.has("text") || (pointer != null && pointer.optString("_0").endsWith("Down"))) clipboardReceipt.cancel();
+        }
         SillConnection expected = connection;
         if (expected == null) return;
         PointerSync feed = pointerSync;
@@ -657,10 +704,16 @@ public final class MainActivity extends Activity {
             case 2 -> {
                 JSONObject list = new JSONObject(new String(message.payload(), StandardCharsets.UTF_8));
                 JSONArray windows = list.getJSONArray("windows");
-                if (clipboardEnabled && !clipboardSubscribed && list.optInt("clipboard", 0) >= 1) updateClipboard();
+                hostClipboardAvailable = list.optInt("clipboard", 0) >= 1;
+                if (!hostClipboardAvailable) { clipboardSubscribed = false; clipboardReceipt.cancel(); }
+                if (clipboardEnabled && !clipboardSubscribed && hostClipboardAvailable) updateClipboard();
+                SillConnection listConnection = connection;
                 ui.post(() -> {
+                    if (connection != listConnection || listConnection == null) return;
                     int count = list.optInt("desktopDisplays", 0), current = list.optInt("desktopDisplay", 0);
                     JSONObject active = list.optJSONObject("active"); boolean isDesktop = active != null && active.has("desktop");
+                    String source = active == null ? "" : active.toString();
+                    if (!source.equals(clipboardSource)) { clipboardReceipt.cancel(); clipboardSource = source; }
                     if (count != desktopDisplays || current != desktopDisplay || isDesktop != desktopActive)
                         android.util.Log.i("SillAndroid", "Host " + list.optString("hostVersion", "unknown") + ": desktop " + current + "/" + count + ", active=" + isDesktop);
                     desktopDisplays = count; desktopDisplay = current; desktopActive = isDesktop;
@@ -697,6 +750,34 @@ public final class MainActivity extends Activity {
                         border.setStroke(dp(chosen ? 2 : 1), chosen ? 0xff8eb9fb : 0x33ffffff);
                         tile.setForeground(border);
                     }
+                });
+            }
+            case 11 -> {
+                byte[] pong = message.payload(); SillConnection expected = connection;
+                if (expected == null || pong.length != 16) return;
+                ui.post(() -> {
+                    long token = clipboardToken;
+                    if (connection != expected || !clipboardEnabled || !hostClipboardAvailable ||
+                            !clipboardReceipt.receive(pong, android.os.SystemClock.uptimeMillis(), token)) return;
+                    String source = clipboardSource;
+                    ui.postDelayed(() -> {
+                        if (connection != expected || !clipboardEnabled || !hostClipboardAvailable ||
+                                !source.equals(clipboardSource)) { clipboardReceipt.cancel(token); return; }
+                        input.execute(() -> {
+                            try {
+                                synchronized (outputLock) {
+                                    if (connection != expected || !clipboardEnabled || !hostClipboardAvailable ||
+                                            !source.equals(clipboardSource) || !clipboardReceipt.take(token)) return;
+                                    JSONObject key = new JSONObject().put("hidUsage", 25).put("modifiers", 1L << 20);
+                                    byte[] down = new JSONObject().put("key", new JSONObject(key.toString()).put("down", true)).toString().getBytes(StandardCharsets.UTF_8);
+                                    byte[] up = new JSONObject().put("key", key.put("down", false)).toString().getBytes(StandardCharsets.UTF_8);
+                                    PointerSync feed = pointerSync; if (feed != null) { feed.inputQueued(); feed.inputQueued(); }
+                                    expected.send(8, down); expected.send(8, up);
+                                }
+                                showFor(expected, "已向 Mac 发送粘贴");
+                            } catch (Exception e) { showFor(expected, "粘贴失败"); }
+                        });
+                    }, 50);
                 });
             }
             case 3 -> {
@@ -932,7 +1013,7 @@ public final class MainActivity extends Activity {
     private void releaseDecoder() { if (decoder != null) { try { decoder.stop(); } catch (Exception ignored) { } decoder.release(); decoder = null; decoderSurface = null; } }
     private void resetCursorShape() { cursorBitmap = null; cursorShape = null; cursor.invalidate(); }
     @Override protected void onStart() { super.onStart(); if (discovery != null) discovery.start(); }
-    @Override protected void onStop() { if (discovery != null) discovery.stop(); nearby.clear(); nearbyMacs.removeAllViews(); super.onStop(); }
+    @Override protected void onStop() { clipboardReceipt.cancel(); if (trackpad != null) trackpad.cancelGestures(); if (discovery != null) discovery.stop(); nearby.clear(); nearbyMacs.removeAllViews(); super.onStop(); }
     @Override protected void onDestroy() {
         running = false; SillConnection c = connection; if (c != null) try { c.close(); } catch (Exception ignored) { }
         synchronized (reconnectLock) { reconnectLock.notifyAll(); }

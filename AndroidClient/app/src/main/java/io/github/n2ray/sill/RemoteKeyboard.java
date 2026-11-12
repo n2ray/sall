@@ -14,6 +14,8 @@ final class RemoteKeyboard extends View {
     interface Listener { void text(String value); void key(int usage, boolean down); }
     private final Listener listener;
     private final RemoteTextState state = new RemoteTextState();
+    private final InputGeneration generation = new InputGeneration();
+    private final java.util.Set<Integer> keysDown = new java.util.HashSet<>();
     private BaseInputConnection active;
     private boolean mutating;
     RemoteKeyboard(Context context, Listener listener) {
@@ -22,11 +24,23 @@ final class RemoteKeyboard extends View {
     }
     @Override public boolean onCheckIsTextEditor() { return true; }
     @Override public InputConnection onCreateInputConnection(EditorInfo out) {
-        finishAndForget();
+        releaseKeys(); finishCurrent();
+        final long thisGeneration = generation.next();
         out.inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE;
         out.imeOptions = EditorInfo.IME_FLAG_NO_EXTRACT_UI | EditorInfo.IME_ACTION_NONE;
         active = new BaseInputConnection(this, true) {
+            private boolean valid() { return generation.current(thisGeneration); }
+            @Override public boolean setComposingText(CharSequence text, int newCursorPosition) {
+                return valid() && super.setComposingText(text, newCursorPosition);
+            }
+            @Override public boolean setComposingRegion(int start, int end) {
+                return valid() && super.setComposingRegion(start, end);
+            }
+            @Override public boolean setSelection(int start, int end) {
+                return valid() && super.setSelection(start, end);
+            }
             @Override public boolean commitText(CharSequence text, int newCursorPosition) {
+                if (!valid()) return false;
                 mutating = true;
                 boolean result;
                 try { result = super.commitText(text, newCursorPosition); } finally { mutating = false; }
@@ -34,11 +48,13 @@ final class RemoteKeyboard extends View {
                 return result;
             }
             @Override public boolean finishComposingText() {
+                if (!valid()) return false;
                 boolean result = super.finishComposingText();
                 if (result && !mutating) reconcile(getEditable());
                 return result;
             }
             @Override public boolean deleteSurroundingText(int beforeLength, int afterLength) {
+                if (!valid()) return false;
                 if (BaseInputConnection.getComposingSpanStart(getEditable()) >= 0)
                     return super.deleteSurroundingText(beforeLength, afterLength);
                 Editable editable = getEditable();
@@ -52,7 +68,25 @@ final class RemoteKeyboard extends View {
                 }
                 return result;
             }
+            @Override public boolean deleteSurroundingTextInCodePoints(int beforeLength, int afterLength) {
+                if (!valid() || beforeLength < 0 || afterLength < 0) return false;
+                Editable editable = getEditable();
+                if (BaseInputConnection.getComposingSpanStart(editable) >= 0)
+                    return super.deleteSurroundingTextInCodePoints(beforeLength, afterLength);
+                int cursor = Math.max(0, Math.min(editable.length(), android.text.Selection.getSelectionStart(editable)));
+                int before = Math.min(beforeLength, 64), after = Math.min(afterLength, 64);
+                int known = Character.codePointCount(editable, 0, cursor);
+                int start = Character.offsetByCodePoints(editable, cursor, -Math.min(before, known));
+                boolean result = super.deleteSurroundingText(cursor - start, 0);
+                if (result) {
+                    reconcile(editable);
+                    if (before > known) listener.text("\b".repeat(before - known));
+                    for (int i = 0; i < after; i++) { listener.key(76, true); listener.key(76, false); }
+                }
+                return result;
+            }
             @Override public boolean sendKeyEvent(KeyEvent event) {
+                if (!valid()) return false;
                 int usage = switch (event.getKeyCode()) {
                     case KeyEvent.KEYCODE_ENTER -> 40;
                     case KeyEvent.KEYCODE_DEL -> 42;
@@ -65,8 +99,11 @@ final class RemoteKeyboard extends View {
                     if (event.getAction() == KeyEvent.ACTION_DOWN) super.deleteSurroundingText(1, 0);
                     return true;
                 }
-                if (event.getAction() == KeyEvent.ACTION_DOWN) finishAndForget();
-                listener.key(usage, event.getAction() == KeyEvent.ACTION_DOWN); return true;
+                if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                    finishCurrent();
+                    if (keysDown.add(usage)) listener.key(usage, true);
+                } else if (event.getAction() == KeyEvent.ACTION_UP && keysDown.remove(usage)) listener.key(usage, false);
+                return true;
             }
         };
         return active;
@@ -83,14 +120,33 @@ final class RemoteKeyboard extends View {
 
     /** Call before any action that can move the Mac's caret or select another window. */
     void finishAndForget() {
+        releaseKeys(); finishCurrent();
+        generation.next();
+        if (hasFocus()) {
+            android.view.inputmethod.InputMethodManager manager = (android.view.inputmethod.InputMethodManager)
+                    getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (manager != null) manager.restartInput(this);
+        }
+    }
+    private void finishCurrent() {
         if (active != null) {
             active.finishComposingText();
             active.getEditable().clear();
         }
         state.clear();
     }
+    private void releaseKeys() {
+        for (int usage : keysDown) listener.key(usage, false);
+        keysDown.clear();
+    }
     void discard() {
+        releaseKeys();
         if (active != null) active.getEditable().clear();
-        state.clear();
+        state.clear(); generation.next();
+        if (hasFocus()) {
+            android.view.inputmethod.InputMethodManager manager = (android.view.inputmethod.InputMethodManager)
+                    getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (manager != null) manager.restartInput(this);
+        }
     }
 }

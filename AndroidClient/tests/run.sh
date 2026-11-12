@@ -24,3 +24,11 @@ javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/AppIconBlob.
 java -ea -cp "$test_dir" io.github.n2ray.sill.AppIconBlobTest
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/WindowFit.java "$root"/tests/WindowFitTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sill.WindowFitTest
+javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/ClipboardReceipt.java "$root"/tests/ClipboardReceiptTest.java
+java -ea -cp "$test_dir" io.github.n2ray.sill.ClipboardReceiptTest
+javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/InputGeneration.java "$root"/tests/InputGenerationTest.java
+java -ea -cp "$test_dir" io.github.n2ray.sill.InputGenerationTest
+javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/HardwareKeyGate.java "$root"/tests/HardwareKeyGateTest.java
+java -ea -cp "$test_dir" io.github.n2ray.sill.HardwareKeyGateTest
+javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/ScrollMomentum.java "$root"/tests/ScrollMomentumTest.java
+java -ea -cp "$test_dir" io.github.n2ray.sill.ScrollMomentumTest
