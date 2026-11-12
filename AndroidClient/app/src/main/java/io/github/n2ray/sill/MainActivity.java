@@ -74,6 +74,12 @@ public final class MainActivity extends Activity {
     private Runnable updateSessionLayout;
     private float portraitImeHeight;
     private boolean largerPicture, largerPictureApplied, settingsOpen;
+    private android.widget.FrameLayout settingsOverlay;
+    private android.window.OnBackInvokedCallback settingsBack;
+    private android.app.AlertDialog settingsChild;
+    private android.app.AlertDialog settingsDialog;
+    private boolean settingsRestoreKeyboard;
+    private SillConnection settingsSession;
     private int lastViewportFps = -1;
     private boolean fpsObserversStarted, fpsDisplayRegistered, fpsNetworkRegistered, fpsPowerRegistered;
     private final android.hardware.display.DisplayManager.DisplayListener fpsDisplayListener = new android.hardware.display.DisplayManager.DisplayListener() {
@@ -114,6 +120,10 @@ public final class MainActivity extends Activity {
         if (appDrawer != null && appDrawer.isShowing()) appDrawer.update(drawerWindows, appList, appIcons, activeWindowId, desktopActive);
     };
     private int menuVersion, menuToken, pendingMenuToken;
+    private boolean menuStale;
+    private Runnable pendingMenuBack;
+    private SillConnection menuOwner, pendingMenuOwner;
+    private android.app.AlertDialog menuDialog;
     private JSONObject hostSettings;
     private int settingsToken, pendingSettingsToken;
     private String pendingSettingsField;
@@ -499,6 +509,7 @@ public final class MainActivity extends Activity {
             if (oright > ol && ob > ot && (r - l > b - t) != (oright - ol > ob - ot)) {
                 if (pictureInput != null) pictureInput.cancel();
                 if (appDrawer != null) appDrawer.dismiss();
+                dismissSettings(false);
             }
             updateSessionLayout.run();
         });
@@ -514,6 +525,7 @@ public final class MainActivity extends Activity {
         return b;
     }
     private void toggleKeyboard() {
+        dismissSettings(false);
         if (appDrawer != null) appDrawer.dismiss();
         android.view.inputmethod.InputMethodManager manager = (android.view.inputmethod.InputMethodManager)getSystemService(INPUT_METHOD_SERVICE);
         android.view.WindowInsets insets = root.getRootWindowInsets();
@@ -563,6 +575,14 @@ public final class MainActivity extends Activity {
         catch (Exception e) { show("按键发送失败"); }
     }
     @Override public boolean dispatchKeyEvent(android.view.KeyEvent event) {
+        if (settingsOverlay != null) {
+            releaseHardwareKeys();
+            if (event.getKeyCode() == android.view.KeyEvent.KEYCODE_BACK) {
+                if (event.getAction() == android.view.KeyEvent.ACTION_UP) dismissSettings();
+                return true;
+            }
+            return super.dispatchKeyEvent(event);
+        }
         if (appDrawer != null && appDrawer.isShowing()) {
             releaseHardwareKeys();
             if (event.getKeyCode() == android.view.KeyEvent.KEYCODE_BACK) {
@@ -662,18 +682,22 @@ public final class MainActivity extends Activity {
         } catch (Exception e) { show("手势发送失败"); }
     }
     private void select(JSONObject source, boolean desktop) {
+        dismissMenu();
         pictureInput.cancel();
         trackpad.cancelGestures();
         try { clipboardReceipt.cancel(); keyboard.finishAndForget(); zoom.reset(); layoutVideo(); cursor.invalidate(); sendViewport(); sendAsync(6, new JSONObject().put(desktop ? "desktop" : "window", source)); }
         catch (Exception e) { show("选择窗口失败"); }
     }
     private void tapDesktop() {
+        dismissSettings(false);
         pictureInput.cancel();
         trackpad.cancelGestures();
         if (DesktopNavigation.next(desktopActive, desktopDisplays, desktopDisplay)) { clipboardReceipt.cancel(); keyboard.finishAndForget(); sendAsync(47, new JSONObject(), true); }
         else select(new JSONObject(), true);
     }
     private void showWindows() {
+        dismissSettings(false);
+        dismissMenu();
         if (connection == null) return;
         if (appDrawer == null) appDrawer = new AppDrawerDialog(this, new AppDrawerDialog.Listener() {
             public void selectWindow(long id) { try { select(new JSONObject().put("_0", id), false); } catch (Exception e) { show("无法选择窗口"); } }
@@ -693,27 +717,76 @@ public final class MainActivity extends Activity {
         appDrawer.show(drawerWindows, appList, appIcons, activeWindowId, desktopActive, picture, root.getWidth() > root.getHeight());
     }
     private void refreshDrawer() { ui.removeCallbacks(drawerUpdate); ui.postDelayed(drawerUpdate, 250); }
-    private void showMenu(JSONArray items, String title, int version) {
+    private void dismissMenu() {
+        pendingMenuToken = 0; pendingMenuBack = null; pendingMenuOwner = null;
+        if (menuDialog != null) { menuDialog.dismiss(); menuDialog = null; }
+    }
+    private void dismissStaleMenu() {
+        if (menuOwner != connection) { dismissMenu(); menuOwner = null; macMenus = new JSONArray(); refreshMenuButton(); }
+    }
+    private void showMenu(JSONArray items, String title, int version) { dismissMenu(); showMenu(items, title, version, null, menuOwner); }
+    private void showMenu(JSONArray items, String title, int version, Runnable back, SillConnection owner) {
+        if (owner == null || connection != owner || menuOwner != owner) return;
+        dismissSettings(false);
         if (appDrawer != null) appDrawer.dismiss();
-        if (items.length() == 0) { show("当前应用没有可用菜单"); return; }
-        String[] names = new String[items.length()];
+        String[] names = new String[Math.max(1, items.length())];
+        boolean[] enabled = new boolean[names.length];
         for (int i = 0; i < names.length; i++) {
+            if (i >= items.length()) { names[i] = "无菜单项"; continue; }
             JSONObject item = items.optJSONObject(i);
-            names[i] = item == null || item.optBoolean("separator") ? "────────" : item.optString("title", "") + (item.optString("key").isEmpty() ? "" : "   " + item.optString("key"));
+            if (item == null || item.optBoolean("separator")) { names[i] = "────────"; continue; }
+            String itemTitle = item.optString("title", "");
+            enabled[i] = MacMenuRow.selectable(false, !menuStale && item.optBoolean("enabled", true), item.isNull("id") ? "" : item.optString("id", ""), itemTitle);
+            names[i] = MacMenuRow.label(itemTitle, item.optString("key", ""), item.optString("mark", ""), item.optBoolean("submenu"));
         }
-        new android.app.AlertDialog.Builder(this).setTitle(title).setItems(names, (dialog, which) -> {
+        android.widget.ArrayAdapter<String> adapter = new android.widget.ArrayAdapter<String>(this, android.R.layout.simple_list_item_1, names) {
+            @Override public boolean areAllItemsEnabled() { return false; }
+            @Override public boolean isEnabled(int position) { return enabled[position]; }
+            @Override public android.view.View getView(int position, android.view.View convertView, android.view.ViewGroup parent) {
+                android.view.View view = super.getView(position, convertView, parent);
+                view.setEnabled(enabled[position]);
+                view.setAlpha(enabled[position] ? 1f : .45f);
+                return view;
+            }
+        };
+        android.app.AlertDialog.Builder builder = new android.app.AlertDialog.Builder(this).setTitle(title).setAdapter(adapter, (dialog, which) -> {
             JSONObject item = items.optJSONObject(which);
-            if (item == null || item.optBoolean("separator") || !item.optBoolean("enabled", true)) return;
-            if (version != menuVersion) { show("菜单已更改，请重新打开"); return; }
+            if (!enabled[which] || item == null) return;
+            if (connection != owner || menuOwner != owner || version != menuVersion || menuStale) { show("菜单已更改，请重新打开"); return; }
             try {
                 JSONObject message = new JSONObject().put("version", version).put("id", item.getString("id"))
                         .put("title", item.getString("title")).put("token", ++menuToken);
-                if (item.optBoolean("submenu")) { pendingMenuToken = menuToken; sendAsync(27, message); }
-                else sendAsync(25, message);
+                synchronized (outputLock) {
+                    if (connection != owner || menuOwner != owner) return;
+                    if (item.optBoolean("submenu")) {
+                        pendingMenuToken = menuToken; pendingMenuOwner = owner;
+                        pendingMenuBack = () -> showMenu(items, title, version, back, owner);
+                        sendMenu(owner, 27, message);
+                    } else sendMenu(owner, 25, message);
+                }
             } catch (Exception e) { show("菜单请求失败"); }
-        }).show();
+        });
+        if (back != null) {
+            builder.setNegativeButton("返回", (dialog, which) -> back.run());
+            builder.setOnCancelListener(dialog -> back.run());
+        }
+        menuDialog = builder.create();
+        android.app.AlertDialog shown = menuDialog;
+        shown.setOnDismissListener(dialog -> { if (menuDialog == shown) menuDialog = null; });
+        shown.show();
+    }
+    private void sendMenu(SillConnection owner, int kind, JSONObject message) {
+        input.execute(() -> {
+            try {
+                synchronized (outputLock) {
+                    if (connection == owner && allowedForLock(kind, message)) owner.send(kind, message.toString().getBytes(StandardCharsets.UTF_8));
+                }
+            } catch (Exception e) { showFor(owner, "菜单请求失败"); }
+        });
     }
     private void chooseScale() {
+        dismissSettings(false);
+        dismissMenu();
         if (appDrawer != null) appDrawer.dismiss();
         if (desktopActive) { show("文字大小只用于调整单个窗口；桌面保持原来的尺寸。"); return; }
         String[] labels = {"不调整", "0.5×", "0.6×", "0.75×", "1×", "1.25×", "1.5×"};
@@ -801,7 +874,10 @@ public final class MainActivity extends Activity {
         video.setTranslationY(enlarged.top() + enlarged.height() / 2 - picture.getHeight() / 2f);
     }
     private void settings() {
+        if (settingsOverlay != null) { dismissSettings(); return; }
+        dismissMenu();
         if (appDrawer != null) appDrawer.dismiss();
+        if (connection == null) return;
         boolean reverse = getPreferences(0).getBoolean("reverseScrolling", false);
         boolean gestures = getPreferences(0).getBoolean("macGestures", true);
         float density = getResources().getDisplayMetrics().density;
@@ -819,8 +895,12 @@ public final class MainActivity extends Activity {
         boolean restoreKeyboard = android.os.Build.VERSION.SDK_INT >= 30 && insets != null
                 ? insets.isVisible(android.view.WindowInsets.Type.ime()) : keyboard.hasFocus();
         settingsOpen = true;
+        settingsRestoreKeyboard = restoreKeyboard;
+        settingsSession = connection;
+        releaseHardwareKeys(); keyboard.finishAndForget();
         if (restoreKeyboard) ((android.view.inputmethod.InputMethodManager)getSystemService(INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(keyboard.getWindowToken(), 0);
-        android.app.AlertDialog dialog = new android.app.AlertDialog.Builder(this).setTitle("设置").setItems(items, (d, i) -> {
+        keyboard.clearFocus();
+        java.util.function.IntConsumer choose = i -> {
             if (i == 0) hostSettingsMenu();
             if (i == 1) { clipboardEnabled = !clipboardEnabled; getPreferences(0).edit().putBoolean("shareClipboard", clipboardEnabled).apply(); updateClipboard(); }
             if (i == 2) pasteClipboard();
@@ -829,8 +909,8 @@ public final class MainActivity extends Activity {
                 audioEnabled = !audioEnabled; getPreferences(0).edit().putBoolean("experimentalAudio", audioEnabled).apply();
                 show("声音设置将在下次连接时生效");
             }
-            if (i == 4) { boolean next = !reverse; getPreferences(0).edit().putBoolean("reverseScrolling", next).apply(); trackpad.setReverseScrolling(next); show(next ? "已启用反向滚动" : "已启用自然滚动"); }
-            if (i == 5) { boolean next = !gestures; getPreferences(0).edit().putBoolean("macGestures", next).apply(); trackpad.setMacGesturesEnabled(next && hostGestures >= 1); show(next ? "已开启多指手势" : "已关闭多指手势"); }
+            if (i == 4) { boolean next = !getPreferences(0).getBoolean("reverseScrolling", false); getPreferences(0).edit().putBoolean("reverseScrolling", next).apply(); trackpad.setReverseScrolling(next); show(next ? "已启用反向滚动" : "已启用自然滚动"); }
+            if (i == 5) { boolean next = !getPreferences(0).getBoolean("macGestures", true); getPreferences(0).edit().putBoolean("macGestures", next).apply(); trackpad.setMacGesturesEnabled(next && hostGestures >= 1); show(next ? "已开启多指手势" : "已关闭多指手势"); }
             if (offerLarge && i == 6) {
                 if (android.os.Build.VERSION.SDK_INT < 30) show("大画面需要 Android 11 或更新版本，以读取键盘高度");
                 else if (portraitImeHeight <= 0) show("请先打开并关闭键盘，让 Sill 测量键盘高度");
@@ -839,22 +919,96 @@ public final class MainActivity extends Activity {
             if (i == holdIndex) {
                 String[] durations = new String[19];
                 for (int n = 0; n < durations.length; n++) durations[n] = ((n + 2) / 10f) + " 秒";
-                new android.app.AlertDialog.Builder(this).setTitle("窗口控制长按时间")
-                        .setSingleChoiceItems(durations, holdTenths - 2, (choice, selected) -> {
-                            getPreferences(0).edit().putInt("thumbnailHoldTenths", selected + 2).apply(); choice.dismiss();
-                        }).setNegativeButton("取消", null).show();
+                int currentHold = Math.max(2, Math.min(20, getPreferences(0).getInt("thumbnailHoldTenths", 5)));
+                showSettingsChild(new android.app.AlertDialog.Builder(this).setTitle("窗口控制长按时间")
+                        .setSingleChoiceItems(durations, currentHold - 2, (choice, selected) -> {
+                            getPreferences(0).edit().putInt("thumbnailHoldTenths", selected + 2).apply();
+                            if (settingsOverlay != null) {
+                                TextView holdRow = settingsOverlay.findViewWithTag("thumbnailHold");
+                                if (holdRow != null) holdRow.setText("窗口控制长按时间：" + ((selected + 2) / 10f) + " 秒");
+                            }
+                            choice.dismiss();
+                        }).setNegativeButton("取消", null).create());
             }
             if (i == items.length - 1) disconnect();
-        }).create();
+        };
+        if (root.getWidth() > root.getHeight()) {
+            pictureInput.cancel();
+            android.widget.FrameLayout overlay = new android.widget.FrameLayout(this);
+            settingsOverlay = overlay;
+            overlay.setOnClickListener(v -> dismissSettings());
+            LinearLayout panel = new LinearLayout(this); panel.setOrientation(LinearLayout.VERTICAL);
+            panel.setPadding(dp(14), dp(14), dp(14), dp(14)); panel.setBackground(shape(0xff181a1f, 20));
+            panel.setOnClickListener(v -> {});
+            TextView title = new TextView(this); title.setText("设置"); title.setTextSize(19); title.setTextColor(-1); panel.addView(title);
+            ScrollView scroller = new ScrollView(this); LinearLayout rows = new LinearLayout(this); rows.setOrientation(LinearLayout.VERTICAL); scroller.addView(rows);
+            panel.addView(scroller, new LinearLayout.LayoutParams(-1, 0, 1));
+            for (int n = 0; n < items.length; n++) {
+                final int index = n;
+                TextView row = new TextView(this); row.setText(items[n]); row.setTextColor(-1); row.setTextSize(15);
+                if (n == holdIndex) row.setTag("thumbnailHold");
+                row.setGravity(android.view.Gravity.CENTER_VERTICAL); row.setPadding(dp(12), 0, dp(12), 0); row.setMinHeight(dp(48));
+                row.setOnClickListener(v -> {
+                    choose.accept(index);
+                    if (settingsOverlay == null) return;
+                    if (index == 1) row.setText(clipboardEnabled ? "关闭剪贴板共享" : "开启剪贴板共享");
+                    if (index == 3) row.setText(audioEnabled ? "关闭声音（重新连接后生效）" : "开启声音测试（重新连接后生效）");
+                    if (index == 4) row.setText(getPreferences(0).getBoolean("reverseScrolling", false) ? "滚动方向：反向" : "滚动方向：自然");
+                    if (index == 5) row.setText(getPreferences(0).getBoolean("macGestures", true) ? "关闭多指 Mac 手势" : "开启多指 Mac 手势");
+                    if (offerLarge && index == 6 && portraitImeHeight > 0 && android.os.Build.VERSION.SDK_INT >= 30) row.setText(largerPicture ? "关闭大画面" : "开启大画面");
+                });
+                rows.addView(row, new LinearLayout.LayoutParams(-1, dp(48)));
+            }
+            android.widget.FrameLayout.LayoutParams panelParams = new android.widget.FrameLayout.LayoutParams(
+                    Math.min(dp(380), Math.max(dp(160), picture.getWidth() - dp(44))), -1,
+                    android.view.Gravity.TOP | android.view.Gravity.END);
+            panelParams.setMargins(dp(22), dp(8), dp(22), dp(14));
+            overlay.addView(panel, panelParams); picture.addView(overlay, new android.widget.FrameLayout.LayoutParams(-1, -1));
+            if (android.os.Build.VERSION.SDK_INT >= 33) {
+                settingsBack = this::dismissSettings;
+                getOnBackInvokedDispatcher().registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, settingsBack);
+            }
+        } else {
+            android.app.AlertDialog dialog = new android.app.AlertDialog.Builder(this).setTitle("设置").setItems(items, (d, i) -> choose.accept(i)).create();
+            settingsDialog = dialog;
+            dialog.setOnDismissListener(d -> { if (settingsDialog == dialog) settingsDialog = null; if (settingsChild == null) finishSettings(); });
+            dialog.show();
+        }
+    }
+    private void showSettingsChild(android.app.AlertDialog dialog) {
+        settingsChild = dialog;
         dialog.setOnDismissListener(d -> {
-            settingsOpen = false;
-            if (updateSessionLayout != null) updateSessionLayout.run();
-            if (restoreKeyboard && connection != null) keyboard.post(() -> {
-                keyboard.requestFocus();
-                ((android.view.inputmethod.InputMethodManager)getSystemService(INPUT_METHOD_SERVICE)).showSoftInput(keyboard, 0);
-            });
+            if (settingsChild != dialog) return;
+            settingsChild = null;
+            if (settingsOverlay == null && settingsDialog == null) finishSettings();
         });
         dialog.show();
+    }
+    private void dismissSettings() { dismissSettings(true); }
+    private void dismissSettings(boolean restoreKeyboard) {
+        if (!restoreKeyboard) settingsRestoreKeyboard = false;
+        if (android.os.Build.VERSION.SDK_INT >= 33 && settingsBack != null) {
+            getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(settingsBack); settingsBack = null;
+        }
+        android.widget.FrameLayout overlay = settingsOverlay; settingsOverlay = null;
+        if (overlay != null && overlay.getParent() instanceof android.view.ViewGroup parent) parent.removeView(overlay);
+        android.app.AlertDialog child = settingsChild; settingsChild = null;
+        if (child != null) child.dismiss();
+        android.app.AlertDialog dialog = settingsDialog; settingsDialog = null;
+        if (dialog != null) dialog.dismiss();
+        finishSettings();
+    }
+    private void finishSettings() {
+        if (!settingsOpen) return;
+        settingsOpen = false;
+        if (updateSessionLayout != null) updateSessionLayout.run();
+        SillConnection expected = settingsSession; settingsSession = null;
+        boolean restore = settingsRestoreKeyboard; settingsRestoreKeyboard = false;
+        if (restore && expected != null && connection == expected) keyboard.post(() -> {
+            if (settingsOpen || connection != expected || appDrawer != null && appDrawer.isShowing()) return;
+            keyboard.requestFocus();
+            ((android.view.inputmethod.InputMethodManager)getSystemService(INPUT_METHOD_SERVICE)).showSoftInput(keyboard, 0);
+        });
     }
     private void hostSettingsMenu() {
         JSONObject settings = hostSettings == null ? null : hostSettings.optJSONObject("settings");
@@ -863,19 +1017,19 @@ public final class MainActivity extends Activity {
                 "分辨率 · " + (settings.optDouble("captureScale", 1) >= 2 ? "Retina" : "标准"),
                 "虚拟显示器 · " + (settings.optBoolean("virtualDisplay") ? "开" : "关"),
                 "Mac 发送声音 · " + (settings.optBoolean("sendAudio") ? "开" : "关")};
-        new android.app.AlertDialog.Builder(this).setTitle("Mac 设置（影响连接的设备）").setItems(items, (dialog, index) -> {
+        showSettingsChild(new android.app.AlertDialog.Builder(this).setTitle("Mac 设置（影响连接的设备）").setItems(items, (dialog, index) -> {
             if (index == 0) {
                 String[] labels = {"低 4 Mbps", "节省 8 Mbps", "均衡 15 Mbps", "高 25 Mbps", "专业 40 Mbps", "极高 80 Mbps", "极限 150 Mbps"};
                 int[] values = {4000000, 8000000, 15000000, 25000000, 40000000, 80000000, 150000000};
-                new android.app.AlertDialog.Builder(this).setTitle("画质").setItems(labels, (d, i) -> changeHostSetting("bitrate", values[i])).show();
+                showSettingsChild(new android.app.AlertDialog.Builder(this).setTitle("画质").setItems(labels, (d, i) -> changeHostSetting("bitrate", values[i])).create());
             } else if (index == 1) {
-                new android.app.AlertDialog.Builder(this).setTitle("帧率").setItems(new String[]{"60 fps", "120 fps"}, (d, i) -> changeHostSetting("maxFPS", i == 0 ? 60 : 120)).show();
+                showSettingsChild(new android.app.AlertDialog.Builder(this).setTitle("帧率").setItems(new String[]{"60 fps", "120 fps"}, (d, i) -> changeHostSetting("maxFPS", i == 0 ? 60 : 120)).create());
             } else if (index == 2) {
-                new android.app.AlertDialog.Builder(this).setTitle("分辨率").setItems(new String[]{"标准", "Retina"}, (d, i) -> changeHostSetting("captureScale", i == 0 ? 1.0 : 2.0)).show();
+                showSettingsChild(new android.app.AlertDialog.Builder(this).setTitle("分辨率").setItems(new String[]{"标准", "Retina"}, (d, i) -> changeHostSetting("captureScale", i == 0 ? 1.0 : 2.0)).create());
             } else if (index == 3) changeHostSetting("virtualDisplay", !settings.optBoolean("virtualDisplay"));
             else if (settings.has("sendAudio")) changeHostSetting("sendAudio", !settings.optBoolean("sendAudio"));
             else show("此 Mac 未提供声音设置");
-        }).show();
+        }).create());
     }
     private void changeHostSetting(String field, Object value) {
         JSONObject settings = hostSettings == null ? null : hostSettings.optJSONObject("settings");
@@ -925,6 +1079,7 @@ public final class MainActivity extends Activity {
         catch (Exception e) { show("剪贴板发送失败"); }
     }
     private void disconnect() {
+        dismissSettings(false);
         if (appDrawer != null) appDrawer.dismiss();
         dismissWindowControls(); cancelWindowDrag();
         pictureInput.cancel();
@@ -1002,7 +1157,7 @@ public final class MainActivity extends Activity {
                             }, 0, 250, java.util.concurrent.TimeUnit.MILLISECONDS);
                             established = true; connectedAt = android.os.SystemClock.uptimeMillis();
                             show("已连接，选择一个窗口或桌面。");
-                            try { while (running && !closing) handle(session.read()); } finally { ping.cancel(false); }
+                            try { while (running && !closing) handle(session.read(), session); } finally { ping.cancel(false); }
                         }
                     } catch (Exception error) {
                         if (!running || closing) break;
@@ -1014,7 +1169,7 @@ public final class MainActivity extends Activity {
                         connection = null; hostLock = null; keyframeRecovery = null; keyframeStreaming = false; recoveryFrame.set(null); lastParameters = null; revealFrame.set(null); recoveryGeneration = -1; pointerSync = null; clipboardSubscribed = false; hostClipboardAvailable = false; clipboardSource = ""; clipboardReceipt.cancel(); releaseDecoder();
                         if (audio != null) { audio.close(); audio = null; }
                         ui.post(() -> {
-                            dismissWindowControls(); cancelWindowDrag();
+                            dismissSettings(false); dismissStaleMenu(); dismissWindowControls(); cancelWindowDrag();
                             hostSettings = null; pendingSettingsToken = 0; desktopDisplays = -1; desktopDisplay = 0; desktopActive = false; hostGestures = 0; hostKeyRepeat = false; hostKeyRepeatKnown = false; trackpad.setMacGesturesEnabled(false);
                             desktopButton.setText("桌面"); choices.removeAllViews(); thumbnails.clear(); thumbnailImages.clear(); appIcons.clear(); iconBadges.clear(); activeWindowId = -1;
                             if (appDrawer != null) appDrawer.dismiss(); drawerWindows = new JSONArray(); appList = new JSONArray();
@@ -1029,7 +1184,7 @@ public final class MainActivity extends Activity {
             finally {
                 connection = null; hostLock = null; keyframeRecovery = null; keyframeStreaming = false; recoveryFrame.set(null); lastParameters = null; revealFrame.set(null); recoveryGeneration = -1; pointerSync = null; clipboardSubscribed = false; hostClipboardAvailable = false; clipboardSource = ""; clipboardReceipt.cancel(); releaseDecoder();
                 if (audio != null) { audio.close(); audio = null; }
-                ui.post(() -> { dismissWindowControls(); cancelWindowDrag(); hostSettings = null; pendingSettingsToken = 0; desktopDisplays = -1; desktopDisplay = 0; desktopActive = false; hostGestures = 0; hostKeyRepeat = false; hostKeyRepeatKnown = false; trackpad.setMacGesturesEnabled(false); desktopButton.setText("桌面"); thumbnailImages.clear(); appIcons.clear(); iconBadges.clear(); activeWindowId = -1; if (appDrawer != null) appDrawer.dismiss(); drawerWindows = new JSONArray(); appList = new JSONArray(); zoom.reset(); screenAwake.setStreaming(false); pictureInput.cancel(); trackpad.cancelGestures(); keyboard.discard(); resetCursorShape(); modifiers = heldModifiers = 0; for (android.view.View button : modifierViews.values()) button.setBackground(shape(0xff272a30, 12)); sessionPanel.setVisibility(android.view.View.GONE); connectionContainer.setVisibility(android.view.View.VISIBLE); running = false; });
+                ui.post(() -> { dismissSettings(false); dismissStaleMenu(); dismissWindowControls(); cancelWindowDrag(); hostSettings = null; pendingSettingsToken = 0; desktopDisplays = -1; desktopDisplay = 0; desktopActive = false; hostGestures = 0; hostKeyRepeat = false; hostKeyRepeatKnown = false; trackpad.setMacGesturesEnabled(false); desktopButton.setText("桌面"); thumbnailImages.clear(); appIcons.clear(); iconBadges.clear(); activeWindowId = -1; if (appDrawer != null) appDrawer.dismiss(); drawerWindows = new JSONArray(); appList = new JSONArray(); zoom.reset(); screenAwake.setStreaming(false); pictureInput.cancel(); trackpad.cancelGestures(); keyboard.discard(); resetCursorShape(); modifiers = heldModifiers = 0; for (android.view.View button : modifierViews.values()) button.setBackground(shape(0xff272a30, 12)); sessionPanel.setVisibility(android.view.View.GONE); connectionContainer.setVisibility(android.view.View.VISIBLE); running = false; });
             }
         });
     }
@@ -1086,7 +1241,7 @@ public final class MainActivity extends Activity {
                 || pointer != null && pointer.optString("_0").endsWith("Up")
                 || scroll != null && ("ended".equals(scroll.optString("_0")) || "momentumEnded".equals(scroll.optString("_0")));
     }
-    private void handle(StreamWire.Message message) throws Exception {
+    private void handle(StreamWire.Message message, SillConnection messageSession) throws Exception {
         switch (message.kind()) {
             case 2 -> {
                 JSONObject list = new JSONObject(new String(message.payload(), StandardCharsets.UTF_8));
@@ -1267,10 +1422,14 @@ public final class MainActivity extends Activity {
             case 24 -> {
                 JSONObject menu = new JSONObject(new String(message.payload(), StandardCharsets.UTF_8));
                 ui.post(() -> {
-                    if (menu.has("menus")) { menuVersion = menu.optInt("version"); macMenus = menu.optJSONArray("menus"); if (macMenus == null) macMenus = new JSONArray(); refreshMenuButton(); }
-                    else if (menu.optInt("answering", -1) == pendingMenuToken && menu.has("items")) {
+                    if (connection != messageSession) return;
+                    if (menu.has("menus")) { menuOwner = messageSession; menuVersion = menu.optInt("version"); menuStale = menu.optBoolean("stale", false); macMenus = menu.optJSONArray("menus"); if (macMenus == null) macMenus = new JSONArray(); refreshMenuButton(); }
+                    else if (pendingMenuOwner == messageSession && menu.optInt("answering", -1) == pendingMenuToken && menu.has("items")) {
                         pendingMenuToken = 0; JSONArray items = menu.optJSONArray("items");
-                        if (items != null) showMenu(items, "菜单", menu.optInt("version"));
+                        Runnable back = pendingMenuBack; pendingMenuBack = null; pendingMenuOwner = null;
+                        if (menu.optBoolean("stale", false)) {
+                            if (!menu.has("note")) show("菜单已过期，请重新打开");
+                        } else if (items != null && menu.optInt("version", -1) == menuVersion) showMenu(items, "菜单", menuVersion, back, messageSession);
                     }
                     if (menu.has("note")) show(menu.optString("note"));
                 });
@@ -1659,7 +1818,7 @@ public final class MainActivity extends Activity {
     @Override protected void onResume() { super.onResume(); keyframeForeground = true; android.util.Log.i("SillAndroid", "Recovery: foreground"); if (screenAwake != null) screenAwake.setForeground(true); }
     @Override protected void onPause() { android.util.Log.i("SillAndroid", "Recovery: background"); keyframeForeground = false; synchronized (surfaceLock) { surfaceEpoch++; } recoveryFrame.set(null); interruptPicture(); if (keyframeRecovery != null) keyframeRecovery.leftForeground(); if (screenAwake != null) screenAwake.setForeground(false); super.onPause(); }
     @Override public void onUserInteraction() { super.onUserInteraction(); if (screenAwake != null) screenAwake.personActed(); }
-    @Override protected void onStop() { if (appDrawer != null) appDrawer.dismiss(); dismissWindowControls(); cancelWindowDrag(); stopFpsObservers(); clipboardReceipt.cancel(); if (pictureInput != null) pictureInput.cancel(); if (trackpad != null) trackpad.cancelGestures(); if (discovery != null) discovery.stop(); nearby.clear(); nearbyMacs.removeAllViews(); super.onStop(); }
+    @Override protected void onStop() { dismissSettings(false); dismissMenu(); if (appDrawer != null) appDrawer.dismiss(); dismissWindowControls(); cancelWindowDrag(); stopFpsObservers(); clipboardReceipt.cancel(); if (pictureInput != null) pictureInput.cancel(); if (trackpad != null) trackpad.cancelGestures(); if (discovery != null) discovery.stop(); nearby.clear(); nearbyMacs.removeAllViews(); super.onStop(); }
     @Override protected void onDestroy() {
         stopFpsObservers();
         if (screenAwake != null) screenAwake.close();

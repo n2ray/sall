@@ -53,6 +53,8 @@ javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/KeyframeReco
 java -ea -cp "$test_dir" io.github.n2ray.sill.KeyframeRecoveryTest
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/WindowHold.java "$root"/tests/WindowHoldTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sill.WindowHoldTest
+javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/MacMenuRow.java "$root"/tests/MacMenuRowTest.java
+java -ea -cp "$test_dir" io.github.n2ray.sill.MacMenuRowTest
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/WindowOrder.java "$root"/tests/WindowOrderTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sill.WindowOrderTest
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/InitialSourcePolicy.java "$root"/tests/InitialSourcePolicyTest.java
