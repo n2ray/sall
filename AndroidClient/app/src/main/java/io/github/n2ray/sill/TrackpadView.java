@@ -17,7 +17,7 @@ final class TrackpadView extends View {
     private final Paint paint = new Paint(3);
     private float x = .5f, y = .5f, lastX, lastY, startX, startY;
     private long downAt;
-    private boolean moved, twoFinger, scrolling, dragging;
+    private boolean moved, twoFinger, scrolling, dragging, touchActive, touchOwner;
     private final Runnable longPress;
 
     TrackpadView(Context context, Listener listener) {
@@ -46,14 +46,19 @@ final class TrackpadView extends View {
             for (float py = step / 2; py < getHeight(); py += step) canvas.drawCircle(px, py, step / 24, paint);
     }
     @Override public boolean onTouchEvent(MotionEvent event) {
-        return touch(event, getWidth());
+        return touch(event, getWidth(), true);
     }
-    boolean touch(MotionEvent event, float areaWidth) {
+    boolean touch(MotionEvent event, float areaWidth, boolean allowLongPress) {
+        if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+            if (touchActive) return true;
+            touchActive = true; touchOwner = allowLongPress;
+        }
+        if (!touchActive || touchOwner != allowLongPress) return true;
         switch (event.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
                 lastX = startX = event.getX(); lastY = startY = event.getY();
                 downAt = event.getEventTime(); moved = twoFinger = scrolling = dragging = false;
-                postDelayed(longPress, 500); return true;
+                if (allowLongPress) postDelayed(longPress, 500); return true;
             case MotionEvent.ACTION_POINTER_DOWN:
                 removeCallbacks(longPress);
                 if (dragging) { listener.pointer("leftUp", x, y); dragging = false; }
@@ -93,12 +98,12 @@ final class TrackpadView extends View {
                     listener.pointer(side + "Down", x, y); listener.pointer(side + "Up", x, y);
                     performClick();
                 }
-                return true;
+                touchActive = false; return true;
             case MotionEvent.ACTION_CANCEL:
                 removeCallbacks(longPress);
                 if (scrolling) listener.scroll("ended", x, y, 0, 0);
                 if (dragging) listener.pointer("leftUp", x, y);
-                scrolling = dragging = false; return true;
+                scrolling = dragging = touchActive = false; return true;
             default: return true;
         }
     }

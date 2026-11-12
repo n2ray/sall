@@ -14,7 +14,7 @@ public class PictureZoomTest {
         zoom.change(.01f, 100, 50, 0, 0, 200, 100, 200, 100);
         assert zoom.frame(200, 100, 200, 100).left() == 0;
         zoom.change(100, 100, 50, 0, 0, 200, 100, 200, 100);
-        assert zoom.frame(200, 100, 200, 100).width() == 800;
+        assert zoom.frame(200, 100, 200, 100).width() == 1000;
         zoom.reset();
         assert zoom.frame(200, 100, 200, 100).width() == 200;
         System.out.println("Picture zoom checks passed");

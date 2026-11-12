@@ -30,7 +30,9 @@ public final class MainActivity extends Activity {
     private final java.util.concurrent.ScheduledExecutorService heartbeat = Executors.newSingleThreadScheduledExecutor();
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final Object outputLock = new Object();
+    private final Object reconnectLock = new Object();
     private volatile SillConnection connection;
+    private volatile PointerSync pointerSync;
     private volatile boolean running;
     private volatile Surface surface;
     private LinearLayout root, connectionPanel, sessionPanel, choices, savedMacs, nearbyMacs, keyRow;
@@ -42,6 +44,8 @@ public final class MainActivity extends Activity {
     private android.widget.FrameLayout picture;
     private SurfaceView video;
     private android.view.View cursor;
+    private android.graphics.Bitmap cursorBitmap;
+    private CursorShapeBlob.Shape cursorShape;
     private final java.util.Map<Long, android.widget.ImageView> thumbnails = new java.util.HashMap<>();
     private final java.util.Map<Long, android.graphics.Bitmap> thumbnailImages = new java.util.HashMap<>();
     private final PictureZoom zoom = new PictureZoom();
@@ -56,6 +60,8 @@ public final class MainActivity extends Activity {
     private Button desktopButton, orientationButton;
     private volatile boolean closing;
     private long modifiers;
+    private long heldModifiers;
+    private final java.util.Map<Long, android.view.View> modifierViews = new java.util.LinkedHashMap<>();
     private JSONArray appList = new JSONArray(), macMenus = new JSONArray();
     private int menuVersion, menuToken, pendingMenuToken;
     private JSONObject hostSettings;
@@ -190,6 +196,13 @@ public final class MainActivity extends Activity {
                 if (getWidth() == 0 || getHeight() == 0) return;
                 FrameGeometry.Rect frame = zoom.frame(getWidth(), getHeight(), videoWidth, videoHeight);
                 float x = frame.left() + trackpad.pointerX() * frame.width(), y = frame.top() + trackpad.pointerY() * frame.height();
+                if (cursorBitmap != null && cursorShape != null) {
+                    float left = x - dp(cursorShape.hotX()), top = y - dp(cursorShape.hotY());
+                    paint.setStyle(android.graphics.Paint.Style.FILL); paint.setColor(android.graphics.Color.WHITE);
+                    canvas.drawBitmap(cursorBitmap, null, new android.graphics.RectF(left, top,
+                            left + dp(cursorShape.width()), top + dp(cursorShape.height())), paint);
+                    return;
+                }
                 android.graphics.Path arrow = new android.graphics.Path(); arrow.moveTo(x, y); arrow.lineTo(x + dp(5), y + dp(16));
                 arrow.lineTo(x + dp(8), y + dp(10)); arrow.lineTo(x + dp(13), y + dp(9)); arrow.close();
                 paint.setColor(android.graphics.Color.BLACK); paint.setStyle(android.graphics.Paint.Style.STROKE); paint.setStrokeWidth(dp(2)); canvas.drawPath(arrow, paint);
@@ -207,47 +220,22 @@ public final class MainActivity extends Activity {
                 lastX = x; lastY = y; layoutVideo(); cursor.invalidate(); return true;
             }
         });
-        final boolean[] pinching = {false};
-        final boolean[] directPressed = {false};
-        final float[] directStart = new float[4];
+        PictureGesture pictureGesture = new PictureGesture();
         cursor.setOnTouchListener((view, event) -> {
             if (connection == null) return false;
             if (view.getWidth() == 0 || view.getHeight() == 0) return false;
-            boolean landscape = getResources().getConfiguration().orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE;
-            if (event.getActionMasked() == MotionEvent.ACTION_DOWN) pinching[0] = false;
-            if (event.getActionMasked() == MotionEvent.ACTION_POINTER_DOWN && !pinching[0]) {
-                pinching[0] = true;
-                if (landscape) {
-                    MotionEvent cancel = MotionEvent.obtain(event); cancel.setAction(MotionEvent.ACTION_CANCEL);
-                    trackpad.touch(cancel, view.getWidth()); cancel.recycle();
-                } else if (directPressed[0]) { pointer("leftUp", trackpad.pointerX(), trackpad.pointerY()); directPressed[0] = false; }
+            PictureGesture.Action action = switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN -> PictureGesture.Action.DOWN;
+                case MotionEvent.ACTION_POINTER_DOWN -> PictureGesture.Action.POINTER_DOWN;
+                default -> PictureGesture.Action.OTHER;
+            };
+            PictureGesture.Dispatch dispatch = pictureGesture.dispatch(action);
+            if (dispatch == PictureGesture.Dispatch.CANCEL_TRACKPAD) {
+                MotionEvent cancel = MotionEvent.obtain(event); cancel.setAction(MotionEvent.ACTION_CANCEL);
+                trackpad.touch(cancel, view.getWidth(), false); cancel.recycle();
             }
             scaleGesture.onTouchEvent(event);
-            if (pinching[0]) return true;
-            if (landscape) return trackpad.touch(event, view.getWidth());
-            FrameGeometry.Rect frame = zoom.frame(view.getWidth(), view.getHeight(), videoWidth, videoHeight);
-            if (event.getActionMasked() == MotionEvent.ACTION_DOWN &&
-                    (event.getX() < frame.left() || event.getX() > frame.left() + frame.width() ||
-                     event.getY() < frame.top() || event.getY() > frame.top() + frame.height())) return false;
-            float x = frame.x(event.getX()), y = frame.y(event.getY());
-            switch (event.getActionMasked()) {
-                case MotionEvent.ACTION_DOWN -> {
-                    directPressed[0] = false; directStart[0] = event.getX(); directStart[1] = event.getY();
-                    directStart[2] = x; directStart[3] = y; trackpad.position(x, y); cursor.invalidate();
-                }
-                case MotionEvent.ACTION_MOVE -> {
-                    if (!directPressed[0] && Math.hypot(event.getX() - directStart[0], event.getY() - directStart[1]) > dp(5)) {
-                        pointer("leftDown", directStart[2], directStart[3]); directPressed[0] = true;
-                    }
-                    if (directPressed[0]) { trackpad.position(x, y); cursor.invalidate(); pointer("move", x, y); }
-                }
-                case MotionEvent.ACTION_UP -> {
-                    if (!directPressed[0]) pointer("leftDown", x, y);
-                    trackpad.position(x, y); cursor.invalidate(); pointer("leftUp", x, y); directPressed[0] = false;
-                }
-                case MotionEvent.ACTION_CANCEL -> { if (directPressed[0]) pointer("leftUp", x, y); directPressed[0] = false; }
-            }
-            return true;
+            return dispatch == PictureGesture.Dispatch.TRACKPAD ? trackpad.touch(event, view.getWidth(), false) : true;
         });
         LinearLayout bar = new LinearLayout(this); sessionPanel.addView(bar);
         barButton(bar, "应用", v -> showWindows());
@@ -264,7 +252,8 @@ public final class MainActivity extends Activity {
         strip.setHorizontalScrollBarEnabled(false); choices = new LinearLayout(this); choices.setOrientation(LinearLayout.HORIZONTAL);
         strip.addView(choices); sessionPanel.addView(strip, new LinearLayout.LayoutParams(-1, dp(72)));
         LinearLayout keys = new LinearLayout(this); keyRow = keys; sessionPanel.addView(keys);
-        barButton(keys, "esc", v -> tapKey(41)); barButton(keys, "tab", v -> tapKey(43));
+        barButton(keys, "esc", v -> { keyboard.finishAndForget(); tapKey(41); });
+        barButton(keys, "tab", v -> { keyboard.finishAndForget(); tapKey(43); });
         modifier(keys, "ctrl", 1L << 18); modifier(keys, "opt", 1L << 19);
         modifier(keys, "cmd", 1L << 20); modifier(keys, "shift", 1L << 17);
         trackpad = new TrackpadView(this, new TrackpadView.Listener() {
@@ -309,7 +298,7 @@ public final class MainActivity extends Activity {
         });
         keyboard = new RemoteKeyboard(this, new RemoteKeyboard.Listener() {
             public void text(String value) { sendText(value); }
-            public void key(int usage, boolean down) { sendKey(usage, down); }
+            public void key(int usage, boolean down) { if (down) pressModifiers(); sendKey(usage, down); if (!down) releaseModifiers(); }
         });
         sessionPanel.addView(keyboard, new LinearLayout.LayoutParams(1, 1));
     }
@@ -319,11 +308,30 @@ public final class MainActivity extends Activity {
         return b;
     }
     private void modifier(LinearLayout row, String label, long flag) {
-        barButton(row, label, v -> {
+        Button button = barButton(row, label, v -> {
             modifiers ^= flag; boolean down = (modifiers & flag) != 0;
-            int usage = flag == (1L << 18) ? 0xe0 : flag == (1L << 17) ? 0xe1 : flag == (1L << 19) ? 0xe2 : 0xe3;
-            sendKey(usage, down); v.setBackground(shape(down ? 0xff486993 : 0xff272a30, 12));
+            v.setBackground(shape(down ? 0xff486993 : 0xff272a30, 12));
         });
+        modifierViews.put(flag, button);
+    }
+    private int modifierUsage(long flag) {
+        return flag == (1L << 18) ? 0xe0 : flag == (1L << 17) ? 0xe1 : flag == (1L << 19) ? 0xe2 : 0xe3;
+    }
+    private void pressModifiers() {
+        for (long flag : modifierViews.keySet()) {
+            if ((modifiers & flag) != 0 && (heldModifiers & flag) == 0) {
+                heldModifiers |= flag; sendKey(modifierUsage(flag), true, heldModifiers);
+            }
+        }
+    }
+    private void releaseModifiers() {
+        for (var entry : modifierViews.entrySet()) {
+            long flag = entry.getKey();
+            if ((heldModifiers & flag) != 0) { heldModifiers &= ~flag; sendKey(modifierUsage(flag), false, heldModifiers); }
+            if ((modifiers & flag) == 0) continue;
+            modifiers &= ~flag;
+            entry.getValue().setBackground(shape(0xff272a30, 12));
+        }
     }
     private void sendKey(int usage, boolean down) {
         sendKey(usage, down, modifiers);
@@ -360,20 +368,22 @@ public final class MainActivity extends Activity {
         if (event.getRepeatCount() > 0) return true;
         long flags = modifiers | (event.isShiftPressed() ? 1L << 17 : 0) | (event.isCtrlPressed() ? 1L << 18 : 0)
                 | (event.isAltPressed() ? 1L << 19 : 0) | (event.isMetaPressed() ? 1L << 20 : 0);
-        sendKey(usage, event.getAction() == android.view.KeyEvent.ACTION_DOWN, flags); return true;
+        boolean down = event.getAction() == android.view.KeyEvent.ACTION_DOWN;
+        if (down && usage < 0xe0) { keyboard.finishAndForget(); pressModifiers(); }
+        sendKey(usage, down, flags); if (!down && usage < 0xe0) releaseModifiers(); return true;
     }
-    private void tapKey(int usage) { sendKey(usage, true); sendKey(usage, false); }
+    private void tapKey(int usage) { pressModifiers(); sendKey(usage, true); sendKey(usage, false); releaseModifiers(); }
     private void sendText(String text) {
         if ((modifiers & ((1L << 18) | (1L << 19) | (1L << 20))) != 0 && text.length() == 1) {
             char c = Character.toLowerCase(text.charAt(0));
             int usage = c >= 'a' && c <= 'z' ? 4 + c - 'a' : c >= '1' && c <= '9' ? 30 + c - '1' : c == '0' ? 39 : 0;
             if (usage != 0) { tapKey(usage); return; }
         }
-        try { sendAsync(8, new JSONObject().put("text", new JSONObject().put("_0", text))); }
+        try { pressModifiers(); sendAsync(8, new JSONObject().put("text", new JSONObject().put("_0", text))); releaseModifiers(); }
         catch (Exception e) { show("文字发送失败"); }
     }
     private void pointer(String action, float x, float y) {
-        try { sendAsync(8, new JSONObject().put("pointer", new JSONObject().put("_0", action).put("x", x).put("y", y))); }
+        try { if (action.endsWith("Down")) { keyboard.finishAndForget(); pressModifiers(); } sendAsync(8, new JSONObject().put("pointer", new JSONObject().put("_0", action).put("x", x).put("y", y))); if (action.endsWith("Up")) releaseModifiers(); }
         catch (Exception e) { show("指针发送失败"); }
     }
     private void sendScroll(String phase, float x, float y, float dx, float dy) {
@@ -384,11 +394,11 @@ public final class MainActivity extends Activity {
         } catch (Exception e) { show("滚动发送失败"); }
     }
     private void select(JSONObject source, boolean desktop) {
-        try { zoom.reset(); layoutVideo(); cursor.invalidate(); sendViewport(); sendAsync(6, new JSONObject().put(desktop ? "desktop" : "window", source)); }
+        try { keyboard.finishAndForget(); zoom.reset(); layoutVideo(); cursor.invalidate(); sendViewport(); sendAsync(6, new JSONObject().put(desktop ? "desktop" : "window", source)); }
         catch (Exception e) { show("选择窗口失败"); }
     }
     private void tapDesktop() {
-        if (DesktopNavigation.next(desktopActive, desktopDisplays, desktopDisplay)) sendAsync(47, new JSONObject(), true);
+        if (DesktopNavigation.next(desktopActive, desktopDisplays, desktopDisplay)) { keyboard.finishAndForget(); sendAsync(47, new JSONObject(), true); }
         else select(new JSONObject(), true);
     }
     private void showWindows() {
@@ -520,11 +530,15 @@ public final class MainActivity extends Activity {
         catch (Exception e) { show("剪贴板发送失败"); }
     }
     private void disconnect() {
-        closing = true; SillConnection c = connection;
+        keyboard.finishAndForget(); closing = true; SillConnection c = connection;
+        synchronized (reconnectLock) { reconnectLock.notifyAll(); }
         if (c != null) try { c.close(); } catch (Exception ignored) { }
     }
 
     private void show(String text) { ui.post(() -> { status.setText(text); sessionStatus.setText(text); }); }
+    private void showFor(SillConnection expected, String text) {
+        ui.post(() -> { if (connection == expected) { status.setText(text); sessionStatus.setText(text); } });
+    }
     private void connect() { start(true); }
     private void start(boolean pairing) {
         String address = host.getText().toString().trim();
@@ -550,26 +564,51 @@ public final class MainActivity extends Activity {
                     if (saved == null) throw new IllegalStateException("请先配对这台 Mac。");
                     pin = Base64.decode(saved, Base64.NO_WRAP);
                 }
-                show("正在连接…");
-                try (SillConnection session = SillConnection.connect(address, number, "sill/1", pin)) {
-                    connection = session; session.sessionTimeout();
-                    ui.post(() -> { connectionContainer.setVisibility(android.view.View.GONE); sessionPanel.setVisibility(android.view.View.VISIBLE); picture.post(this::sendViewport); });
-                    JSONObject hello = new JSONObject().put("protocol", 1).put("appVersion", "0.1.0").put("device", android.os.Build.MODEL);
-                    if (audioEnabled && AudioPlayer.supported()) { audio = new AudioPlayer(this::show); hello.put("audio", new JSONArray().put("aac-eld")); }
-                    sendJson(23, hello);
-                    sendJson(27, new JSONObject());
-                    var ping = heartbeat.scheduleAtFixedRate(() -> {
-                        try { synchronized (outputLock) { session.send(10, ByteBuffer.allocate(8).putDouble(System.nanoTime() / 1e9).array()); } }
-                        catch (Exception e) { try { session.close(); } catch (Exception ignored) { } }
-                    }, 0, 1, java.util.concurrent.TimeUnit.SECONDS);
-                    show("已连接，选择一个窗口或桌面。");
-                    try { while (running) handle(session.read()); } finally { ping.cancel(false); }
+                boolean established = false;
+                int retries = 0;
+                while (running && !closing) {
+                    long connectedAt = 0;
+                    try {
+                        if (!established) show("正在连接…");
+                        try (SillConnection session = SillConnection.connect(address, number, "sill/1", pin)) {
+                            if (!running || closing) break;
+                            pointerSync = new PointerSync(); connection = session; session.sessionTimeout();
+                            ui.post(() -> { if (connection == session) { connectionContainer.setVisibility(android.view.View.GONE); sessionPanel.setVisibility(android.view.View.VISIBLE); picture.post(this::sendViewport); } });
+                            JSONObject hello = new JSONObject().put("protocol", 1).put("appVersion", "0.1.0").put("device", android.os.Build.MODEL);
+                            if (audioEnabled && AudioPlayer.supported()) { audio = new AudioPlayer(text -> showFor(session, text)); hello.put("audio", new JSONArray().put("aac-eld")); }
+                            sendJson(23, hello);
+                            sendJson(27, new JSONObject());
+                            var ping = heartbeat.scheduleAtFixedRate(() -> {
+                                try { synchronized (outputLock) { session.send(10, ByteBuffer.allocate(8).putDouble(System.nanoTime() / 1e9).array()); } }
+                                catch (Exception e) { try { session.close(); } catch (Exception ignored) { } }
+                            }, 0, 1, java.util.concurrent.TimeUnit.SECONDS);
+                            established = true; connectedAt = android.os.SystemClock.uptimeMillis();
+                            show("已连接，选择一个窗口或桌面。");
+                            try { while (running && !closing) handle(session.read()); } finally { ping.cancel(false); }
+                        }
+                    } catch (Exception error) {
+                        if (!running || closing) break;
+                        if (connectedAt != 0 && android.os.SystemClock.uptimeMillis() - connectedAt >= 10000) retries = 0;
+                        long delay = ReconnectPolicy.delayMillis(retries);
+                        if (!established || !ReconnectPolicy.retryable(error) || delay < 0) throw error;
+                        retries++;
+                        connection = null; pointerSync = null; clipboardSubscribed = false; releaseDecoder();
+                        if (audio != null) { audio.close(); audio = null; }
+                        ui.post(() -> {
+                            hostSettings = null; pendingSettingsToken = 0; desktopDisplays = -1; desktopDisplay = 0; desktopActive = false;
+                            desktopButton.setText("桌面"); choices.removeAllViews(); thumbnails.clear(); thumbnailImages.clear();
+                            keyboard.discard(); resetCursorShape();
+                            modifiers = heldModifiers = 0; for (android.view.View button : modifierViews.values()) button.setBackground(shape(0xff272a30, 12));
+                        });
+                        show("连接中断，正在重新连接（" + retries + "/4）…");
+                        synchronized (reconnectLock) { if (running && !closing) reconnectLock.wait(delay); }
+                    }
                 }
             } catch (Exception e) { if (!closing) { android.util.Log.e("SillAndroid", "Connection failed", e); show("连接结束: " + e.getMessage()); } }
             finally {
-                connection = null; running = false; clipboardSubscribed = false; releaseDecoder();
+                connection = null; pointerSync = null; clipboardSubscribed = false; releaseDecoder();
                 if (audio != null) { audio.close(); audio = null; }
-                ui.post(() -> { hostSettings = null; pendingSettingsToken = 0; desktopDisplays = -1; desktopDisplay = 0; desktopActive = false; desktopButton.setText("桌面"); thumbnailImages.clear(); zoom.reset(); modifiers = 0; for (int i = 2; i < keyRow.getChildCount(); i++) keyRow.getChildAt(i).setBackground(shape(0xff272a30, 12)); sessionPanel.setVisibility(android.view.View.GONE); connectionContainer.setVisibility(android.view.View.VISIBLE); });
+                ui.post(() -> { hostSettings = null; pendingSettingsToken = 0; desktopDisplays = -1; desktopDisplay = 0; desktopActive = false; desktopButton.setText("桌面"); thumbnailImages.clear(); zoom.reset(); keyboard.discard(); resetCursorShape(); modifiers = heldModifiers = 0; for (android.view.View button : modifierViews.values()) button.setBackground(shape(0xff272a30, 12)); sessionPanel.setVisibility(android.view.View.GONE); connectionContainer.setVisibility(android.view.View.VISIBLE); running = false; });
             }
         });
     }
@@ -586,13 +625,15 @@ public final class MainActivity extends Activity {
     private void sendAsync(int kind, JSONObject value, boolean empty) {
         SillConnection expected = connection;
         if (expected == null) return;
+        PointerSync feed = pointerSync;
+        if (kind == 8 && feed != null && connection == expected) feed.inputQueued();
         input.execute(() -> {
             try {
                 synchronized (outputLock) {
                     if (connection == expected) expected.send(kind, empty ? new byte[0] : value.toString().getBytes(StandardCharsets.UTF_8));
                 }
             }
-            catch (Exception e) { show("发送失败: " + e.getClass().getSimpleName()); }
+            catch (Exception e) { showFor(expected, "发送失败: " + e.getClass().getSimpleName()); }
         });
     }
     private void handle(StreamWire.Message message) throws Exception {
@@ -609,14 +650,23 @@ public final class MainActivity extends Activity {
                     desktopDisplays = count; desktopDisplay = current; desktopActive = isDesktop;
                     desktopButton.setText(desktopDisplays >= 2 && desktopDisplay > 0 ? "桌面 " + desktopDisplay + "/" + desktopDisplays : "桌面");
                     desktopButton.setContentDescription(desktopDisplays >= 2 ? "桌面 " + desktopDisplay + " / " + desktopDisplays + "，再次点击切换显示器" : "桌面");
-                    choices.removeAllViews(); thumbnails.clear();
-                    addChoice("整个桌面", new JSONObject());
-                    for (int i = 0; i < windows.length(); i++) {
-                        JSONObject item = windows.optJSONObject(i); if (item == null) continue;
-                        try { addChoice(item.optString("appName") + " — " + item.optString("title"), new JSONObject().put("_0", item.getLong("id"))); }
-                        catch (Exception ignored) { }
+                    if (!sameWindowChoices(windows)) {
+                        choices.removeAllViews(); thumbnails.clear();
+                        addChoice("整个桌面", new JSONObject());
+                        for (int i = 0; i < windows.length(); i++) {
+                            JSONObject item = windows.optJSONObject(i); if (item == null) continue;
+                            try { addChoice(item.optString("appName") + " — " + item.optString("title"), new JSONObject().put("_0", item.getLong("id"))); }
+                            catch (Exception ignored) { }
+                        }
+                        thumbnailImages.keySet().retainAll(thumbnails.keySet());
                     }
-                    thumbnailImages.keySet().retainAll(thumbnails.keySet());
+                    JSONObject selected = active == null ? null : active.optJSONObject("window");
+                    long selectedId = selected == null ? -1 : selected.optLong("_0", -1);
+                    for (int i = 0; i < choices.getChildCount(); i++) {
+                        android.view.View tile = choices.getChildAt(i);
+                        boolean chosen = i == 0 ? isDesktop : tile.getTag() instanceof Long && ((Long) tile.getTag()) == selectedId;
+                        tile.setBackground(shape(chosen ? 0xff486993 : 0xff272a30, 10));
+                    }
                 });
             }
             case 3 -> {
@@ -653,6 +703,31 @@ public final class MainActivity extends Activity {
                         if (items != null) showMenu(items, "菜单", menu.optInt("version"));
                     }
                     if (menu.has("note")) show(menu.optString("note"));
+                });
+            }
+            case 14 -> {
+                byte[] data = message.payload();
+                CursorShapeBlob.Shape shape = CursorShapeBlob.parse(data);
+                if (shape == null) return;
+                android.graphics.Bitmap bitmap;
+                try { bitmap = android.graphics.BitmapFactory.decodeByteArray(data, 16, data.length - 16); }
+                catch (RuntimeException ignored) { return; }
+                SillConnection expected = connection;
+                if (bitmap != null && expected != null) ui.post(() -> {
+                    if (connection != expected) return;
+                    cursorBitmap = bitmap; cursorShape = shape; cursor.invalidate();
+                });
+            }
+            case 26 -> {
+                JSONObject report = new JSONObject(new String(message.payload(), StandardCharsets.UTF_8));
+                long seen = report.optLong("seen", 0);
+                boolean inside = report.optBoolean("inside", false);
+                double x = report.optDouble("x", Double.NaN), y = report.optDouble("y", Double.NaN);
+                PointerSync feed = pointerSync; SillConnection expected = connection;
+                if (feed != null && expected != null) ui.post(() -> {
+                    if (connection == expected && pointerSync == feed && feed.accepts(seen, inside, x, y)) {
+                        trackpad.position((float) x, (float) y); cursor.invalidate();
+                    }
                 });
             }
             case 32 -> {
@@ -730,6 +805,18 @@ public final class MainActivity extends Activity {
             } else break;
         }
     }
+    private boolean sameWindowChoices(JSONArray windows) {
+        if (choices.getChildCount() != windows.length() + 1) return false;
+        for (int i = 0; i < windows.length(); i++) {
+            JSONObject item = windows.optJSONObject(i);
+            if (item == null || !item.has("id")) return false;
+            android.view.View tile = choices.getChildAt(i + 1);
+            String title = item.optString("appName") + " — " + item.optString("title");
+            if (!(tile.getTag() instanceof Long) || ((Long) tile.getTag()).longValue() != item.optLong("id", -1)
+                    || !title.contentEquals(tile.getContentDescription())) return false;
+        }
+        return true;
+    }
     private void addChoice(String title, JSONObject source) {
         LinearLayout tile = new LinearLayout(this); tile.setOrientation(LinearLayout.VERTICAL); tile.setContentDescription(title);
         tile.setBackground(shape(0xff272a30, 10));
@@ -737,7 +824,9 @@ public final class MainActivity extends Activity {
         android.widget.ImageView image = new android.widget.ImageView(this); image.setScaleType(android.widget.ImageView.ScaleType.FIT_CENTER);
         tile.addView(image, new LinearLayout.LayoutParams(-1, 0, 1));
         TextView label = new TextView(this); label.setText(title); label.setSingleLine(true); label.setTextSize(10); label.setTextColor(-1);
-        tile.addView(label); if (source.length() != 0) { long id = source.optLong("_0"); thumbnails.put(id, image); image.setImageBitmap(thumbnailImages.get(id)); }
+        tile.addView(label);
+        if (source.length() != 0) { long id = source.optLong("_0"); tile.setTag(id); thumbnails.put(id, image); image.setImageBitmap(thumbnailImages.get(id)); }
+        else { image.setImageResource(android.R.drawable.ic_menu_view); image.setColorFilter(0xffaeb5c0); tile.setContentDescription(title + "（无实时预览）"); }
         tile.setOnClickListener(v -> select(source, source.length() == 0));
         if (source.length() != 0) tile.setOnLongClickListener(v -> {
             String[] labels = {"最小化", "全屏", "关闭窗口"};
@@ -749,10 +838,12 @@ public final class MainActivity extends Activity {
         });
     }
     private void releaseDecoder() { if (decoder != null) { try { decoder.stop(); } catch (Exception ignored) { } decoder.release(); decoder = null; decoderSurface = null; } }
+    private void resetCursorShape() { cursorBitmap = null; cursorShape = null; cursor.invalidate(); }
     @Override protected void onStart() { super.onStart(); if (discovery != null) discovery.start(); }
     @Override protected void onStop() { if (discovery != null) discovery.stop(); nearby.clear(); nearbyMacs.removeAllViews(); super.onStop(); }
     @Override protected void onDestroy() {
         running = false; SillConnection c = connection; if (c != null) try { c.close(); } catch (Exception ignored) { }
+        synchronized (reconnectLock) { reconnectLock.notifyAll(); }
         network.shutdownNow(); input.shutdownNow(); heartbeat.shutdownNow(); super.onDestroy();
     }
 }

@@ -13,7 +13,7 @@ final class PictureZoom {
                 float width, float height, float videoWidth, float videoHeight) {
         if (!Float.isFinite(factor) || factor <= 0) return;
         FrameGeometry.Rect old = frame(width, height, videoWidth, videoHeight);
-        float next = Math.max(1, Math.min(4, scale * factor));
+        float next = Math.max(1, Math.min(5, scale * factor));
         float ratio = next / scale;
         float w = old.width() * ratio, h = old.height() * ratio;
         x = focusX - (focusX - old.left()) * ratio + dx - (width - w) / 2;

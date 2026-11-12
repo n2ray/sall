@@ -18,29 +18,37 @@ import java.util.concurrent.TimeUnit;
 /** Bounded AAC-ELD playback; unsupported or malformed streams do not affect video. */
 final class AudioPlayer implements AutoCloseable {
     private final ThreadPoolExecutor worker = new ThreadPoolExecutor(1, 1, 0, TimeUnit.SECONDS,
-            new ArrayBlockingQueue<>(64), new ThreadPoolExecutor.DiscardOldestPolicy());
+            new ArrayBlockingQueue<>(64), new ThreadPoolExecutor.DiscardPolicy());
     private MediaCodec codec;
     private AudioTrack track;
     private int epoch = -1, frameCount, primeFrames, formatPriming, pcmEncoding = AudioFormat.ENCODING_PCM_16BIT;
     private long nextSequence = -1;
-    private boolean needsReset;
+    private long presentationUs;
+    private boolean needsReset, submitted, hasOutput;
+    private MediaFormat decoderFormat;
+    private String decoderName;
     private final java.util.function.Consumer<String> onError;
 
     AudioPlayer(java.util.function.Consumer<String> onError) { this.onError = onError; }
 
     static boolean supported() {
-        for (MediaCodecInfo info : new MediaCodecList(MediaCodecList.ALL_CODECS).getCodecInfos()) {
+        return decoderName() != null;
+    }
+    private static String decoderName() {
+        for (MediaCodecInfo info : new MediaCodecList(MediaCodecList.REGULAR_CODECS).getCodecInfos()) {
             if (info.isEncoder()) continue;
             for (String type : info.getSupportedTypes()) if (type.equalsIgnoreCase(MediaFormat.MIMETYPE_AUDIO_AAC)) {
                 try {
                     for (MediaCodecInfo.CodecProfileLevel profile : info.getCapabilitiesForType(type).profileLevels)
-                        if (profile.profile == MediaCodecInfo.CodecProfileLevel.AACObjectELD) return true;
+                        if (profile.profile == MediaCodecInfo.CodecProfileLevel.AACObjectELD) return info.getName();
                 } catch (RuntimeException ignored) { }
             }
         }
-        return false;
+        return null;
     }
     void receive(byte[] data) {
+        // A format supersedes queued audio; keep it ahead of later packets even under backlog.
+        if (data.length > 0 && data[0] == 1) worker.getQueue().clear();
         worker.execute(() -> {
             try {
                 if (data.length == 0) return;
@@ -60,26 +68,38 @@ final class AudioPlayer implements AutoCloseable {
             throw new IllegalArgumentException("Invalid audio format");
         byte[] cookie = Base64.decode(f.optString("cookie", ""), Base64.DEFAULT);
         if (cookie.length == 0 || cookie.length > 1024) throw new IllegalArgumentException("Invalid audio configuration");
-        release(); epoch = nextEpoch; frameCount = frames; formatPriming = priming; primeFrames = priming; nextSequence = -1; needsReset = false;
+        release(); epoch = nextEpoch; frameCount = frames; formatPriming = priming; primeFrames = frames; nextSequence = -1; needsReset = false; presentationUs = 0;
         MediaFormat format = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, 48000, 2);
         format.setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectELD);
         format.setByteBuffer("csd-0", ByteBuffer.wrap(cookie));
-        codec = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_AUDIO_AAC);
-        codec.configure(format, null, null, 0); codec.start();
+        decoderName = decoderName();
+        if (decoderName == null) throw new IllegalStateException("AAC-ELD decoder unavailable");
+        decoderFormat = format; startDecoder();
+    }
+    private void startDecoder() throws Exception {
+        codec = MediaCodec.createByCodecName(decoderName);
+        codec.configure(decoderFormat, null, null, 0); codec.start();
+        submitted = false; hasOutput = false;
     }
     private void play(AudioPackets.Batch batch) throws Exception {
         if (codec == null || batch.epoch() != epoch) return;
         if (batch.segmentStart() || needsReset || (nextSequence >= 0 && batch.sequence() != nextSequence)) {
-            codec.flush(); if (track != null) { track.pause(); track.flush(); track.play(); }
-            primeFrames = batch.segmentStart() ? formatPriming : frameCount;
+            if (AudioPackets.needsFlush(submitted, batch.segmentStart(), needsReset, nextSequence, batch.sequence())) {
+                if (hasOutput) { codec.flush(); submitted = false; }
+                else { codec.stop(); codec.release(); codec = null; startDecoder(); }
+            }
+            if (track != null) { track.pause(); track.flush(); track.play(); }
+            primeFrames = AudioPackets.primingFrames(batch.segmentStart(), frameCount, formatPriming);
             needsReset = false;
         }
         for (byte[] packet : batch.packets()) {
-            int in = codec.dequeueInputBuffer(0);
+            drain();
+            int in = codec.dequeueInputBuffer(10000);
             if (in < 0) { needsReset = true; return; }
             ByteBuffer target = codec.getInputBuffer(in); target.clear();
             if (packet.length > target.remaining()) throw new IllegalArgumentException("Audio packet too large");
-            target.put(packet); codec.queueInputBuffer(in, 0, packet.length, 0, 0);
+            target.put(packet); codec.queueInputBuffer(in, 0, packet.length, presentationUs, 0);
+            presentationUs += frameCount * 1000000L / 48000; submitted = true;
             drain();
         }
         nextSequence = (batch.sequence() + batch.packets().size()) & 0xffffffffL;
@@ -89,7 +109,10 @@ final class AudioPlayer implements AutoCloseable {
         while (codec != null) {
             int out = codec.dequeueOutputBuffer(info, 0);
             if (out == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                hasOutput = true;
                 MediaFormat f = codec.getOutputFormat();
+                if (f.getInteger(MediaFormat.KEY_SAMPLE_RATE) != 48000 || f.getInteger(MediaFormat.KEY_CHANNEL_COUNT) != 2)
+                    throw new IllegalStateException("Unsupported PCM channel layout or rate");
                 pcmEncoding = f.containsKey(MediaFormat.KEY_PCM_ENCODING) ? f.getInteger(MediaFormat.KEY_PCM_ENCODING) : AudioFormat.ENCODING_PCM_16BIT;
                 if (pcmEncoding != AudioFormat.ENCODING_PCM_16BIT && pcmEncoding != AudioFormat.ENCODING_PCM_FLOAT) throw new IllegalStateException("Unsupported PCM format");
                 if (track != null) { track.release(); track = null; }
@@ -100,6 +123,7 @@ final class AudioPlayer implements AutoCloseable {
                         .setTransferMode(AudioTrack.MODE_STREAM).setBufferSizeInBytes(Math.max(min, 48000 * 2 * (pcmEncoding == AudioFormat.ENCODING_PCM_FLOAT ? 4 : 2) / 10)).build();
                 track.play();
             } else if (out >= 0) {
+                hasOutput = true;
                 ByteBuffer pcm = codec.getOutputBuffer(out);
                 if (pcm != null && track != null && info.size > 0) {
                     int bytesPerFrame = 2 * (pcmEncoding == AudioFormat.ENCODING_PCM_FLOAT ? 4 : 2);
@@ -112,7 +136,7 @@ final class AudioPlayer implements AutoCloseable {
         }
     }
     private void release() {
-        epoch = -1; nextSequence = -1;
+        epoch = -1; nextSequence = -1; decoderFormat = null; decoderName = null; submitted = hasOutput = false;
         if (codec != null) { try { codec.stop(); } catch (Exception ignored) { } codec.release(); codec = null; }
         if (track != null) { try { track.stop(); } catch (Exception ignored) { } track.release(); track = null; }
     }
