@@ -40,6 +40,8 @@ public final class MainActivity extends Activity {
     private volatile boolean running;
     private volatile Surface surface;
     private LinearLayout root, connectionPanel, sessionPanel, choices, savedMacs, nearbyMacs, keyRow;
+    private android.widget.FrameLayout sessionLayer;
+    private LinearLayout sessionBar;
     private ScrollView connectionContainer;
     private SavedMacStore savedMacStore;
     private TextView status, sessionStatus, pictureStatus;
@@ -349,7 +351,10 @@ public final class MainActivity extends Activity {
     }
     private void buildSession() {
         sessionPanel = new LinearLayout(this); sessionPanel.setOrientation(LinearLayout.VERTICAL);
-        sessionPanel.setVisibility(android.view.View.GONE); root.addView(sessionPanel, new LinearLayout.LayoutParams(-1, -1));
+        sessionLayer = new android.widget.FrameLayout(this);
+        sessionPanel.setVisibility(android.view.View.GONE);
+        sessionLayer.addView(sessionPanel, new android.widget.FrameLayout.LayoutParams(-1, -1));
+        root.addView(sessionLayer, new LinearLayout.LayoutParams(-1, -1));
         sessionStatus = new TextView(this); sessionStatus.setTextColor(0xffaeb5c0); sessionStatus.setTextSize(12);
         sessionPanel.addView(sessionStatus);
         picture = new android.widget.FrameLayout(this); picture.setBackground(shape(0xff000000, 12));
@@ -437,7 +442,19 @@ public final class MainActivity extends Activity {
             public void onViewAttachedToWindow(android.view.View view) { }
             public void onViewDetachedFromWindow(android.view.View view) { pictureInput.cancel(); }
         });
-        LinearLayout bar = new LinearLayout(this); sessionPanel.addView(bar);
+        LinearLayout bar = new LinearLayout(this); sessionBar = bar; sessionPanel.addView(bar);
+        bar.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, oright, ob) -> {
+            if ((t != ot || b != ob) && root.getWidth() < root.getHeight() && appDrawer != null && appDrawer.isShowing()) {
+                AppDrawerDialog drawer = appDrawer;
+                int presentation = drawer.presentationVersion();
+                bar.post(() -> {
+                    if (appDrawer == drawer && connection != null)
+                        drawer.reanchor(presentation, drawerWindows, appList, appIcons, activeWindowId,
+                                desktopActive, picture, sessionLayer, sessionPanel, sessionBar,
+                                root.getWidth() > root.getHeight(), largerPictureApplied);
+                });
+            }
+        });
         Button appsButton = barButton(bar, "应用", v -> showWindows());
         menuButton = barButton(bar, "菜单", v -> showMenu(macMenus, "Mac 菜单", menuVersion));
         TextScaleControl scaleButton = new TextScaleControl(this, new TextScaleControl.Delegate() {
@@ -557,7 +574,8 @@ public final class MainActivity extends Activity {
                     root.post(() -> {
                         if (appDrawer == drawer && connection != null)
                             drawer.reanchor(presentation, drawerWindows, appList, appIcons, activeWindowId,
-                                    desktopActive, picture, root.getWidth() > root.getHeight());
+                                    desktopActive, picture, sessionLayer, sessionPanel, sessionBar,
+                                    root.getWidth() > root.getHeight(), largerPictureApplied);
                     });
                 }
                 if (settingsOpen) {
@@ -765,11 +783,12 @@ public final class MainActivity extends Activity {
         pictureInput.cancel();
         releaseHardwareKeys();
         if (!appDrawer.isShowing()) keyboard.finishAndForget();
-        if (!appDrawer.isShowing() && root.getWidth() > root.getHeight()) {
+        if (!appDrawer.isShowing()) {
             ((android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(keyboard.getWindowToken(), 0);
             keyboard.clearFocus();
         }
-        appDrawer.show(drawerWindows, appList, appIcons, activeWindowId, desktopActive, picture, root.getWidth() > root.getHeight());
+        appDrawer.show(drawerWindows, appList, appIcons, activeWindowId, desktopActive, picture,
+                sessionLayer, sessionPanel, sessionBar, root.getWidth() > root.getHeight(), largerPictureApplied);
     }
     private void refreshDrawer() { ui.removeCallbacks(drawerUpdate); ui.postDelayed(drawerUpdate, 250); }
     private void dismissMenu() {

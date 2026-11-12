@@ -13,6 +13,25 @@ final class AppDrawerModel {
     record App(String name, String bundleId) { }
     record Group(String name, String bundleId, List<Window> windows) { }
     record Results(List<Group> open, List<App> closed) { }
+    record PortraitPlacement(int topDim, int bottomStart, int bottomDim, int panelTop, int panelHeight) { }
+
+    static PortraitPlacement portraitPlacement(int height, int rowTop, int rowBottom, int gap, boolean larger) {
+        return portraitPlacement(height, rowTop, rowBottom, gap, larger, height, 0);
+    }
+
+    static PortraitPlacement portraitPlacement(int height, int rowTop, int rowBottom, int gap, boolean larger,
+                                                int visibleBottom, int minimumPanel) {
+        height = Math.max(0, height); gap = Math.max(0, gap);
+        rowTop = Math.max(0, Math.min(height, rowTop));
+        rowBottom = Math.max(rowTop, Math.min(height, rowBottom));
+        visibleBottom = Math.max(0, Math.min(height, visibleBottom));
+        // If the IME leaves no usable drawer below the row, keep the search above it.
+        if (!larger && minimumPanel > 0 && visibleBottom - rowBottom - 2 * gap < minimumPanel
+                && rowTop - 2 * gap >= minimumPanel) larger = true;
+        int top = larger ? Math.min(gap, rowTop) : Math.min(height, rowBottom + gap);
+        int end = larger ? Math.max(top, Math.min(rowTop, visibleBottom) - gap) : Math.max(top, visibleBottom - gap);
+        return new PortraitPlacement(rowTop, rowBottom, height - rowBottom, top, end - top);
+    }
 
     static boolean sourceChanged(long before, boolean beforeDesktop, long after, boolean afterDesktop) {
         return (after >= 0 || afterDesktop) && (before != after || beforeDesktop != afterDesktop);

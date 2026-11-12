@@ -1,7 +1,6 @@
 package io.github.n2ray.sill;
 
 import android.app.Activity;
-import android.app.AlertDialog;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
@@ -10,8 +9,6 @@ import android.text.InputType;
 import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.View;
-import android.view.Window;
-import android.view.WindowManager;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
@@ -31,7 +28,6 @@ final class AppDrawerDialog {
 
     private final Activity activity;
     private final Listener listener;
-    private AlertDialog dialog;
     private FrameLayout overlay;
     private android.window.OnBackInvokedCallback overlayBack;
     private EditText search;
@@ -41,6 +37,7 @@ final class AppDrawerDialog {
     private List<AppDrawerModel.App> apps = java.util.Collections.emptyList();
     private Map<String, Bitmap> icons = java.util.Collections.emptyMap();
     private final Map<String, List<ImageView>> badgeViews = new HashMap<>();
+    private final Map<View, Integer> accessibility = new HashMap<>();
     private long activeWindow = -1;
     private boolean activeDesktop;
     private int presentationVersion;
@@ -48,13 +45,13 @@ final class AppDrawerDialog {
     AppDrawerDialog(Activity activity, Listener listener) { this.activity = activity; this.listener = listener; }
 
     void show(JSONArray windowList, JSONArray appList, Map<String, Bitmap> appIcons, long active,
-              boolean desktop, FrameLayout picture, boolean landscape) {
+              boolean desktop, FrameLayout picture, FrameLayout sessionLayer, LinearLayout sessionPanel,
+              LinearLayout bar, boolean landscape, boolean largerPicture) {
         if (isShowing()) { dismiss(); return; }
         presentationVersion++;
         LinearLayout root = new LinearLayout(activity); root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(dp(14), dp(14), dp(14), dp(14)); root.setBackground(background(0xff181a1f, 20));
         root.setFocusableInTouchMode(true);
-        if (!landscape) { TextView title = text("应用和窗口", 19, Color.WHITE); root.addView(title); }
         search = new EditText(activity); search.setSingleLine(true); search.setHint("搜索应用");
         search.setTextColor(Color.WHITE); search.setHintTextColor(0xffadb3bd);
         search.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
@@ -62,16 +59,15 @@ final class AppDrawerDialog {
         root.addView(search, new LinearLayout.LayoutParams(-1, dp(52)));
         scroll = new ScrollView(activity); scroll.setFillViewport(false);
         rows = new LinearLayout(activity); rows.setOrientation(LinearLayout.VERTICAL); scroll.addView(rows);
-        int height = Math.min(dp(500), Math.max(dp(180), activity.getResources().getDisplayMetrics().heightPixels * 3 / 5));
-        root.addView(scroll, landscape ? new LinearLayout.LayoutParams(-1, 0, 1) : new LinearLayout.LayoutParams(-1, height));
+        root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
         search.addTextChangedListener(new TextWatcher() {
             public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
             public void onTextChanged(CharSequence s, int start, int before, int count) { render(false); }
             public void afterTextChanged(Editable value) { }
         });
         update(windowList, appList, appIcons, active, desktop);
+        overlay = new FrameLayout(activity);
         if (landscape) {
-            overlay = new FrameLayout(activity);
             overlay.setBackgroundColor(0x94000000);
             overlay.setOnClickListener(v -> dismiss());
             FrameLayout.LayoutParams panel = new FrameLayout.LayoutParams(Math.min(dp(380), Math.max(dp(160), picture.getWidth() - dp(44))), -1, Gravity.TOP | Gravity.START);
@@ -79,21 +75,58 @@ final class AppDrawerDialog {
             root.setOnClickListener(v -> { });
             overlay.addView(root, panel);
             picture.addView(overlay, new FrameLayout.LayoutParams(-1, -1));
-            if (android.os.Build.VERSION.SDK_INT >= 33) {
-                overlayBack = this::handleBack;
-                activity.getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
-                        android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, overlayBack);
+        } else {
+            // Keep the button row live while the remaining session area dismisses the drawer.
+            AppDrawerModel.PortraitPlacement placement = AppDrawerModel.portraitPlacement(
+                    sessionLayer.getHeight(), bar.getTop(), bar.getBottom(), dp(8), largerPicture);
+            View topDim = new View(activity), bottomDim = new View(activity);
+            topDim.setBackgroundColor(0x94000000); bottomDim.setBackgroundColor(0x94000000);
+            topDim.setOnClickListener(v -> dismiss()); bottomDim.setOnClickListener(v -> dismiss());
+            overlay.addView(topDim, new FrameLayout.LayoutParams(-1, placement.topDim(), Gravity.TOP));
+            FrameLayout.LayoutParams bottom = new FrameLayout.LayoutParams(-1, placement.bottomDim(), Gravity.TOP);
+            bottom.topMargin = placement.bottomStart(); overlay.addView(bottomDim, bottom);
+            FrameLayout.LayoutParams panel = new FrameLayout.LayoutParams(Math.max(0, sessionLayer.getWidth() - dp(28)), placement.panelHeight(), Gravity.TOP | Gravity.START);
+            panel.leftMargin = dp(14); panel.topMargin = placement.panelTop();
+            root.setOnClickListener(v -> { }); overlay.addView(root, panel);
+            for (int i = 0; i < sessionPanel.getChildCount(); i++) {
+                View child = sessionPanel.getChildAt(i);
+                if (child == bar) continue;
+                accessibility.put(child, child.getImportantForAccessibility());
+                child.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
             }
-            root.requestFocus();
-            return;
+            sessionLayer.addView(overlay, new FrameLayout.LayoutParams(-1, -1));
+            FrameLayout current = overlay;
+            current.setOnApplyWindowInsetsListener((view, insets) -> {
+                // shortcut: Android 10 lacks reliable IME insets with adjustNothing; use a compatible inset source when available.
+                if (android.os.Build.VERSION.SDK_INT >= 30) {
+                    boolean visible = insets.isVisible(android.view.WindowInsets.Type.ime());
+                    int imeBottom = visible ? insets.getInsets(android.view.WindowInsets.Type.ime()).bottom : 0;
+                    current.post(() -> {
+                        if (overlay != current || root.getParent() != current) return;
+                        int visibleBottom = sessionLayer.getHeight();
+                        if (visible) {
+                            int[] windowPos = new int[2], layerPos = new int[2];
+                            View decor = activity.getWindow().getDecorView();
+                            decor.getLocationOnScreen(windowPos); sessionLayer.getLocationOnScreen(layerPos);
+                            visibleBottom = windowPos[1] + decor.getHeight() - imeBottom - layerPos[1];
+                        }
+                        AppDrawerModel.PortraitPlacement fit = AppDrawerModel.portraitPlacement(
+                                sessionLayer.getHeight(), bar.getTop(), bar.getBottom(), dp(8),
+                                largerPicture, visibleBottom, visible ? dp(120) : 0);
+                        FrameLayout.LayoutParams params = (FrameLayout.LayoutParams) root.getLayoutParams();
+                        if (params.topMargin != fit.panelTop() || params.height != fit.panelHeight()) {
+                            params.topMargin = fit.panelTop(); params.height = fit.panelHeight(); root.setLayoutParams(params);
+                        }
+                    });
+                }
+                return insets;
+            });
+            current.requestApplyInsets();
         }
-        dialog = new AlertDialog.Builder(activity).setView(root).setNegativeButton("关闭", (d, which) -> { }).create();
-        dialog.show();
-        Window window = dialog.getWindow();
-        if (window != null) {
-            int width = Math.min(dp(420), Math.max(dp(200), activity.getResources().getDisplayMetrics().widthPixels - dp(32)));
-            window.setLayout(width, WindowManager.LayoutParams.WRAP_CONTENT);
-            window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE | WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            overlayBack = this::handleBack;
+            activity.getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                    android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, overlayBack);
         }
         root.requestFocus();
     }
@@ -124,10 +157,11 @@ final class AppDrawerDialog {
         if (rows != null && (changed || rows.getChildCount() == 0)) render(true);
     }
 
-    boolean isShowing() { return overlay != null || (dialog != null && dialog.isShowing()); }
+    boolean isShowing() { return overlay != null; }
     int presentationVersion() { return presentationVersion; }
     void reanchor(int expectedVersion, JSONArray windowList, JSONArray appList, Map<String, Bitmap> appIcons,
-                  long active, boolean desktop, FrameLayout picture, boolean landscape) {
+                  long active, boolean desktop, FrameLayout picture, FrameLayout sessionLayer, LinearLayout sessionPanel,
+                  LinearLayout bar, boolean landscape, boolean largerPicture) {
         if (!isShowing() || presentationVersion != expectedVersion) return;
         String query = search.getText().toString();
         int selectionStart = search.getSelectionStart(), selectionEnd = search.getSelectionEnd();
@@ -137,7 +171,7 @@ final class AppDrawerDialog {
         boolean imeVisible = android.os.Build.VERSION.SDK_INT >= 30 && insets != null
                 ? insets.isVisible(android.view.WindowInsets.Type.ime()) : focused;
         dismiss();
-        show(windowList, appList, appIcons, active, desktop, picture, landscape);
+        show(windowList, appList, appIcons, active, desktop, picture, sessionLayer, sessionPanel, bar, landscape, largerPicture);
         EditText restored = search;
         restored.setText(query);
         if (selectionStart >= 0 && selectionEnd >= 0)
@@ -179,7 +213,8 @@ final class AppDrawerDialog {
             if (overlay.getParent() instanceof android.view.ViewGroup parent) parent.removeView(overlay);
             overlay = null;
         }
-        if (dialog != null) { dialog.dismiss(); dialog = null; }
+        for (var entry : accessibility.entrySet()) entry.getKey().setImportantForAccessibility(entry.getValue());
+        accessibility.clear();
     }
 
     private void render(boolean keepScroll) {
