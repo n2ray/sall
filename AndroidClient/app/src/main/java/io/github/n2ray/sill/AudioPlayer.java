@@ -29,6 +29,8 @@ final class AudioPlayer implements AutoCloseable {
     private String decoderName;
     private final java.util.function.Consumer<String> onError;
     private volatile long generation;
+    private volatile boolean playbackEnabled = true;
+    private byte[] latestFormat;
     private boolean closed;
 
     AudioPlayer(java.util.function.Consumer<String> onError) { this.onError = onError; }
@@ -51,7 +53,14 @@ final class AudioPlayer implements AutoCloseable {
     synchronized void receive(byte[] data) {
         if (closed) return;
         // A format supersedes queued audio; keep it ahead of later packets even under backlog.
-        if (data.length > 0 && data[0] == 1) { generation++; worker.getQueue().clear(); }
+        if (data.length > 0 && data[0] == 1) {
+            generation++; worker.getQueue().clear();
+            latestFormat = data.length <= 4096 ? data.clone() : null;
+        }
+        if (!playbackEnabled) {
+            if (data.length > 0 && data[0] == 1) worker.execute(this::release);
+            return;
+        }
         long expectedGeneration = generation;
         worker.execute(() -> {
             try {
@@ -60,6 +69,23 @@ final class AudioPlayer implements AutoCloseable {
                 if (data[0] == 1) configure(data);
                 else if (data[0] == 2) play(AudioPackets.parse(data), expectedGeneration);
             } catch (Exception e) { if (generation == expectedGeneration) { android.util.Log.w("SillAndroid", "Audio stopped", e); release(); onError.accept("声音解码失败，画面仍可使用"); } }
+        });
+    }
+    synchronized void setPlaybackEnabled(boolean enabled) {
+        if (closed || playbackEnabled == enabled) return;
+        playbackEnabled = enabled; generation++; worker.getQueue().clear();
+        long expectedGeneration = generation;
+        byte[] format = latestFormat;
+        worker.execute(() -> {
+            if (generation != expectedGeneration) return;
+            release();
+            if (!enabled || format == null) return;
+            try { configure(format); }
+            catch (Exception e) {
+                if (generation == expectedGeneration) {
+                    release(); onError.accept("声音恢复失败，画面仍可使用");
+                }
+            }
         });
     }
     private void configure(byte[] data) throws Exception {
@@ -138,7 +164,7 @@ final class AudioPlayer implements AutoCloseable {
                     pcm.position(info.offset + skip); pcm.limit(info.offset + info.size);
                     if (!AudioPcmWriter.writeFully(pcm,
                             buffer -> track.write(buffer, buffer.remaining(), AudioTrack.WRITE_NON_BLOCKING),
-                            () -> generation != expectedGeneration)) {
+                            () -> generation != expectedGeneration || !playbackEnabled)) {
                         codec.releaseOutputBuffer(out, false);
                         return;
                     }
@@ -154,7 +180,7 @@ final class AudioPlayer implements AutoCloseable {
     }
     @Override public synchronized void close() {
         if (closed) return;
-        closed = true; generation++;
+        closed = true; generation++; latestFormat = null;
         worker.getQueue().clear(); worker.execute(this::release); worker.shutdown();
     }
 }

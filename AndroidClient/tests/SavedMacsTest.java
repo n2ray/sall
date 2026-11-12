@@ -79,6 +79,22 @@ public final class SavedMacsTest {
                 new SavedMacs.Mac(SavedMacs.Identity.migrated(collision), List.of(lan), null)), Map.of()));
         check(SavedMacs.Identity.paired(first, PairLink.macId(first), "Mac\n\u202eName", key).name().equals("MacName"),
                 "Stored display names must not contain controls");
+        byte[] vectorKey = new byte[32]; java.util.Arrays.fill(vectorKey, (byte) 0x11);
+        String vectorEncoded = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(vectorKey);
+        SavedMacStore discoveryStore = new SavedMacStore(new MemoryPreferences());
+        SavedMacs.Identity discovered = SavedMacs.Identity.paired(first, PairLink.macId(first), "Trusted", vectorEncoded);
+        SavedMacs.Identity duplicate = SavedMacs.Identity.paired(second, PairLink.macId(second), "Other", vectorEncoded);
+        String tag = "oaKjpKWmL4V47Ctm";
+        discoveryStore.paired(discovered, lan);
+        check(discovered.equals(discoveryStore.recognized(tag)), "Tag must identify a unique saved Mac");
+        check(java.util.Arrays.equals(first, discoveryStore.recognizedPin(discovered, tag)), "Discovery must keep the saved certificate pin");
+        check(discoveryStore.all().get(0).addresses().equals(List.of(lan)), "Unverified discovered address must not be saved");
+        check(discoveryStore.recognizedPin(discovered, "oaKjpKWmL4V47Ctn") == null, "Invalid tag must not select a pin");
+        discoveryStore.paired(duplicate, vpn);
+        check(discoveryStore.recognized(tag) == null && discoveryStore.recognizedPin(discovered, tag) == null,
+                "Ambiguous tag must not choose an identity");
+        discoveryStore.forget(discovered);
+        check(discoveryStore.recognizedPin(discovered, tag) == null, "Forgotten identity cannot reconnect from a stale row");
         System.out.println("Saved Mac identity, migration, persistence and forget checks passed");
     }
 

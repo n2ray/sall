@@ -61,5 +61,11 @@ javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/InitialSourc
 java -ea -cp "$test_dir" io.github.n2ray.sill.InitialSourcePolicyTest
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/TextScale.java "$root"/tests/TextScaleTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sill.TextScaleTest
-javac -d "$test_dir" "$root"/tests/fixtures/android/content/SharedPreferences.java "$root"/app/src/main/java/io/github/n2ray/sill/PairLink.java "$root"/app/src/main/java/io/github/n2ray/sill/SavedMacs.java "$root"/app/src/main/java/io/github/n2ray/sill/SavedMacStore.java "$root"/tests/SavedMacsTest.java
+javac -d "$test_dir" "$root"/tests/fixtures/android/content/SharedPreferences.java "$root"/app/src/main/java/io/github/n2ray/sill/PairLink.java "$root"/app/src/main/java/io/github/n2ray/sill/SavedMacs.java "$root"/app/src/main/java/io/github/n2ray/sill/SavedMacStore.java "$root"/app/src/main/java/io/github/n2ray/sill/RecognitionTag.java "$root"/tests/SavedMacsTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sill.SavedMacsTest
+javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/RecognitionTag.java "$root"/tests/RecognitionTagTest.java
+java -ea -cp "$test_dir" io.github.n2ray.sill.RecognitionTagTest
+javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/DiscoveryEpoch.java "$root"/tests/DiscoveryEpochTest.java
+java -ea -cp "$test_dir" io.github.n2ray.sill.DiscoveryEpochTest
+javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/PipPolicy.java "$root"/tests/PipPolicyTest.java
+java -ea -cp "$test_dir" io.github.n2ray.sill.PipPolicyTest

@@ -15,6 +15,28 @@ final class SavedMacStore {
 
     synchronized List<SavedMacs.Mac> all() { return SavedMacs.read(preferences.getAll()); }
 
+    synchronized SavedMacs.Identity recognized(String tag) {
+        SavedMacs.Identity match = null;
+        for (SavedMacs.Mac mac : all()) {
+            String encoded = mac.identity().recognitionKey();
+            if (encoded.isEmpty()) continue;
+            byte[] key;
+            try { key = java.util.Base64.getUrlDecoder().decode(encoded); }
+            catch (IllegalArgumentException e) { continue; }
+            if (!RecognitionTag.matches(tag, key)) continue;
+            if (match != null) return null;
+            match = mac.identity();
+        }
+        return match;
+    }
+
+    synchronized byte[] recognizedPin(SavedMacs.Identity expected, String tag) {
+        SavedMacs.Identity matched = recognized(tag);
+        if (matched == null || !matched.macId().equals(expected.macId())
+                || !matched.fingerprint().equals(expected.fingerprint())) return null;
+        return matched.pin();
+    }
+
     synchronized byte[] pin(SavedMacs.Endpoint endpoint) {
         Object legacy = preferences.getAll().get(endpoint.legacyKey());
         if (legacy instanceof String encoded) {
