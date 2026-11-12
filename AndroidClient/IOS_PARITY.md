@@ -2,7 +2,7 @@
 
 Reference: the iOS source in this repository, including `StreamScreen.swift`, `PortraitStreamScreen.swift`, `StreamClient.swift`, `TrackpadView.swift`, `TextComposition.swift`, `HostSettingsPanel.swift`, and their protocol/test helpers. The installed Mac host in the initial test is Sill 0.6.1; features in the current repository may require a newer host. A check here means code and its specific verification exist, not blanket equivalence.
 
-User choices that intentionally differ from iOS: the picture behaves as a relative trackpad in both orientations; landscape has controls at the sides; preserve the whole window instead of cropping when a Mac app cannot fit.
+Product direction: follow the iOS client's layout and interaction by default. Earlier Android-specific picture-trackpad, side-control landscape layout, and automatic text-scale adjustment are being replaced by the original behavior.
 
 ## Connection and security
 
@@ -15,17 +15,17 @@ User choices that intentionally differ from iOS: the picture behaves as a relati
 ## Windows and picture
 
 - [ ] Window catalog, app icons, app launching, menu and thumbnail commands exist. The searchable grouped application drawer was verified on the Xiaomi (search and open); drag-to-reorder, configurable hold time, full menu state and accessible actions remain.
-- [ ] Selected-window fitting: preserve aspect ratio and full content; automatic fitting is implemented and one constrained Mail window was verified by host logs. Test repeated source changes, rotation, app minimum sizes and host refusal.
-- [ ] Stage Manager may cause the Mac host to supply a tilted thumbnail. A selected window gets a locally captured stream preview; background previews may remain skewed or stale. Test window closure, source changes and cache cleanup.
+- [ ] Selected-window fitting: iOS starts with Aa off and fits the complete picture without stretching. Test repeated source changes, rotation, app minimum sizes and host refusal; some applications cannot fill the picture without cropping.
+- [ ] Stage Manager may cause the Mac host to supply a tilted thumbnail. The iOS client displays the host thumbnail; Android follows that behavior. Test window closure, source changes and cache cleanup.
 - [ ] Desktop display cycling is implemented only when the host advertises it. The tested Mac 0.6.1 does not; the Android client cannot add the missing host capability.
 - [ ] Zoom, pan and gesture ownership: current 1–5× pinch is present; test the complete finger lifecycle, cancellation, rotation and focal-point preservation against `StreamZoom.swift`.
-- [ ] Portrait Larger Picture, soft keyboard accommodation and responsive layouts; retain the user's landscape controls and trackpad choices.
+- [ ] Portrait Larger Picture, soft keyboard accommodation and responsive layouts; the standard portrait and landscape structures now follow iOS and still need real-device checks.
 
 ## Input and local interaction
 
-- [ ] Trackpad single/double click, drag, two-finger scroll and right click, scroll momentum, reverse scrolling, three/four-finger gestures and cancel/rotation behavior; never send a click during a pinch. On 2026-11-12 the user confirmed two-finger scrolling and momentum felt smooth without accidental clicks on the Xiaomi. A persistent reverse-scroll setting is implemented; its direction and lifecycle cancellation still need device checks. Three/four-finger Mac gestures on the separate trackpad are implemented and gated on host capability, but need real multi-touch testing; the picture area does not yet recognize three-finger gestures.
+- [ ] Trackpad single/double click, drag, two-finger scroll and right click, scroll momentum, reverse scrolling, three/four-finger gestures and cancel/rotation behavior; never send a click during a pinch. On 2026-11-12 the user confirmed two-finger scrolling and momentum felt smooth without accidental clicks on the Xiaomi. A persistent reverse-scroll setting and capability-gated Mac gestures are implemented; the new direct picture-input path and multi-touch gestures need real-device checks.
 - [ ] IME composition, correction, selection, emoji and dictation: basic Android suffix correction exists; port/check iOS composition fences and stale callback handling with real Chinese input.
-- [ ] Physical keyboard: local-dialog focus gating and stale IME callback protection are implemented with logic checks; verify with a real keyboard, then complete modifiers, repeat, function keys, shortcuts and older host compatibility.
+- [ ] Physical keyboard: local-dialog focus gating, function keys and capability-gated repeat are implemented with logic checks; verify real keyboards, shortcuts, older hosts and third-party input methods.
 - [ ] Mouse and pointer: shape and basic host position exist; complete source/ownership, out-of-frame visibility, physical mouse buttons and wheel, and no cursor jumps after reconnect.
 - [ ] Clipboard: opt-in text sharing and acknowledgement-before-paste are implemented with logic checks; verify slow-network cancellation on a real Mac and complete echo handling, background behavior and precise status.
 
@@ -33,7 +33,7 @@ User choices that intentionally differ from iOS: the picture behaves as a relati
 
 - [ ] Sound: AAC-ELD decoding is experimental and off by default. Test real playback and implement iOS-quality timing, mute, output-route changes, reconnect and audio/video synchronization.
 - [ ] Complete host settings and local preferences, with capability gating, host acknowledgements and failure handling; include scrolling, gestures, long-press duration and Larger Picture.
-- [ ] Picture in Picture, foreground/background handling, idle screen policy, and prevention of background clipboard updates.
+- [ ] Picture in Picture and foreground/background handling; idle-screen policy and foreground-only clipboard updates have logic checks but need device lifecycle verification.
 - [ ] TalkBack, larger fonts, announcements and actions; connection/error/version/slow-network status and first-run guidance.
 - [ ] Foldables and external displays: design for Android's own device capabilities after phone functionality is verified; do not claim iPhone Duo-specific behavior is already supported.
 

@@ -19,10 +19,11 @@ final class TrackpadView extends View {
     private final Paint paint = new Paint(3);
     private float x = .5f, y = .5f, lastX, lastY, startX, startY;
     private long downAt, lastScrollAt, momentumAt;
-    private boolean moved, twoFinger, scrolling, dragging, touchActive, touchOwner, silenced, reversed, coasting;
+    private boolean moved, twoFinger, scrolling, dragging, touchActive, touchOwner, silenced, reversed, coasting, pictureBusy;
     private int scrollSign = 1;
     private float momentumX, momentumY, momentumWidth;
     private VelocityTracker velocity;
+    private Runnable beforeTwoFinger;
     private final ScrollMomentum momentum = new ScrollMomentum();
     private final MultiFingerGesture multiFinger = new MultiFingerGesture();
     private boolean macGesturesEnabled;
@@ -55,6 +56,10 @@ final class TrackpadView extends View {
     }
     float pointerX() { return x; }
     float pointerY() { return y; }
+    boolean busyForPicture() { return touchActive && touchOwner; }
+    boolean beginPicture() { if (touchActive) return false; pictureBusy = true; stopMomentum(); return true; }
+    void endPicture() { pictureBusy = false; }
+    void setBeforeTwoFinger(Runnable action) { beforeTwoFinger = action; }
     void position(float x, float y) { this.x = clamp(x); this.y = clamp(y); }
     void setReverseScrolling(boolean reverse) { reversed = reverse; }
     void setMacGesturesEnabled(boolean enabled) { macGesturesEnabled = enabled; }
@@ -98,6 +103,7 @@ final class TrackpadView extends View {
     }
     boolean touch(MotionEvent event, float areaWidth, boolean allowLongPress) {
         if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+            if (allowLongPress && pictureBusy) return true;
             if (touchActive) return true;
             touchActive = true; touchOwner = allowLongPress;
             recycleVelocity(); velocity = VelocityTracker.obtain();
@@ -134,6 +140,7 @@ final class TrackpadView extends View {
                 if (allowLongPress) postDelayed(longPress, 500); return true;
             case MotionEvent.ACTION_POINTER_DOWN:
                 removeCallbacks(longPress);
+                if (allowLongPress && event.getPointerCount() == 2 && beforeTwoFinger != null) beforeTwoFinger.run();
                 if (event.getPointerCount() >= 2) stopMomentum();
                 if (dragging) { listener.pointer("leftUp", x, y); dragging = false; }
                 if (event.getPointerCount() >= 3) return true;

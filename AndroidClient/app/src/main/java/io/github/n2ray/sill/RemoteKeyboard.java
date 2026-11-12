@@ -23,6 +23,9 @@ final class RemoteKeyboard extends View {
         setContentDescription("Mac 键盘输入");
     }
     @Override public boolean onCheckIsTextEditor() { return true; }
+    boolean isComposing() {
+        return active != null && BaseInputConnection.getComposingSpanStart(active.getEditable()) >= 0;
+    }
     @Override public InputConnection onCreateInputConnection(EditorInfo out) {
         releaseKeys(); finishCurrent();
         final long thisGeneration = generation.next();

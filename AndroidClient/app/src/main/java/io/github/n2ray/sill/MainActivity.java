@@ -43,17 +43,18 @@ public final class MainActivity extends Activity {
     private RemoteKeyboard keyboard;
     private TrackpadView trackpad;
     private android.widget.FrameLayout picture;
+    private SessionScreenAwake screenAwake;
     private SurfaceView video;
     private TextView lockOverlay;
     private android.view.View cursor;
+    private PictureInput pictureInput;
     private android.graphics.Bitmap cursorBitmap;
     private CursorShapeBlob.Shape cursorShape;
     private final java.util.Map<Long, android.widget.ImageView> thumbnails = new java.util.HashMap<>();
     private final java.util.Map<Long, android.graphics.Bitmap> thumbnailImages = new java.util.HashMap<>();
     private final java.util.Map<String, android.graphics.Bitmap> appIcons = new java.util.LinkedHashMap<>();
     private final java.util.Map<String, java.util.List<android.widget.ImageView>> iconBadges = new java.util.HashMap<>();
-    private final java.util.Set<Long> streamedPreviews = new java.util.HashSet<>();
-    private long activeWindowId = -1, activeChangedAt, lastSnapshotRequest;
+    private long activeWindowId = -1;
     private final PictureZoom zoom = new PictureZoom();
     private final Object surfaceLock = new Object();
     private volatile boolean clipboardEnabled;
@@ -64,19 +65,19 @@ public final class MainActivity extends Activity {
     private boolean audioEnabled;
     private AudioPlayer audio;
     private volatile boolean clipboardSubscribed;
-    private Double textScale = .6, effectiveScale = .6;
-    private int fitAttempts;
-    private long fitAttemptAt, videoFormatAt;
-    private double activeWindowWidth, activeWindowHeight;
+    private Double textScale;
     private final Runnable viewportUpdate = this::sendViewport;
     private int desktopDisplays = -1, desktopDisplay, hostGestures;
     private boolean desktopActive;
-    private Button desktopButton, orientationButton;
+    private Button desktopButton, menuButton;
     private volatile boolean closing;
     private long modifiers;
     private long heldModifiers;
     private final java.util.Map<Long, android.view.View> modifierViews = new java.util.LinkedHashMap<>();
-    private final java.util.Map<Integer, Integer> hardwareKeysDown = new java.util.LinkedHashMap<>();
+    private final HardwareKeyFlow hardwareKeys = new HardwareKeyFlow();
+    private SillConnection hardwareKeySession;
+    private volatile boolean hostKeyRepeat;
+    private volatile boolean hostKeyRepeatKnown;
     private JSONArray appList = new JSONArray(), macMenus = new JSONArray();
     private JSONArray drawerWindows = new JSONArray();
     private AppDrawerDialog appDrawer;
@@ -106,7 +107,7 @@ public final class MainActivity extends Activity {
         getWindow().setFlags(android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN, android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN);
         root = new LinearLayout(this); root.setOrientation(LinearLayout.VERTICAL);
         int pad = (int) (12 * getResources().getDisplayMetrics().density);
-        root.setPadding(pad, pad, pad, pad); setContentView(root);
+        root.setPadding(pad, pad, pad, pad); setContentView(root); screenAwake = new SessionScreenAwake(root);
         if (android.os.Build.VERSION.SDK_INT >= 30) root.post(() -> {
             android.view.WindowInsetsController controller = root.getWindowInsetsController();
             if (controller != null) {
@@ -200,7 +201,7 @@ public final class MainActivity extends Activity {
         sessionPanel.addView(picture, new LinearLayout.LayoutParams(-1, dp(230)));
         picture.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, oright, ob) -> {
             if ((r - l) != (oright - ol) || (b - t) != (ob - ot)) picture.post(() -> {
-                layoutVideo(); resetWindowFit(); scheduleViewport();
+                layoutVideo(); scheduleViewport();
             });
         });
         video = new SurfaceView(this); picture.addView(video, new android.widget.FrameLayout.LayoutParams(-1, -1));
@@ -240,47 +241,44 @@ public final class MainActivity extends Activity {
         lockOverlay.setTextColor(0xffd6d9de); lockOverlay.setTextSize(16); lockOverlay.setPadding(dp(20), dp(20), dp(20), dp(20));
         lockOverlay.setBackgroundColor(0xff111216); lockOverlay.setText("正在等待 Mac 画面…");
         picture.addView(lockOverlay, new android.widget.FrameLayout.LayoutParams(-1, -1));
-        android.view.ScaleGestureDetector scaleGesture = new android.view.ScaleGestureDetector(this, new android.view.ScaleGestureDetector.SimpleOnScaleGestureListener() {
-            private float lastX, lastY;
-            @Override public boolean onScaleBegin(android.view.ScaleGestureDetector detector) { lastX = detector.getFocusX(); lastY = detector.getFocusY(); return true; }
-            @Override public boolean onScale(android.view.ScaleGestureDetector detector) {
-                float x = detector.getFocusX(), y = detector.getFocusY();
-                zoom.change(detector.getScaleFactor(), lastX, lastY, x - lastX, y - lastY,
-                        picture.getWidth(), picture.getHeight(), videoWidth, videoHeight);
-                lastX = x; lastY = y; layoutVideo(); cursor.invalidate(); return true;
+        pictureInput = new PictureInput(cursor, zoom, new PictureInput.Listener() {
+            public boolean beginPicture() {
+                if (trackpad == null) return false;
+                trackpad.setBeforeTwoFinger(pictureInput::stopMomentum); return trackpad.beginPicture();
             }
+            public void endPicture() { if (trackpad != null) trackpad.endPicture(); }
+            public boolean connected() { return connection != null; }
+            public boolean reverseScrolling() { return getPreferences(0).getBoolean("reverseScrolling", false); }
+            public FrameGeometry.Rect frame() { return zoom.frame(cursor.getWidth(), cursor.getHeight(), videoWidth, videoHeight); }
+            public void pointer(String action, float x, float y) {
+                trackpad.position(x, y); cursor.invalidate(); MainActivity.this.pointer(action, x, y);
+            }
+            public void scroll(String phase, float x, float y, float dx, float dy) { sendScroll(phase, x, y, dx, dy); }
+            public void gesture(String name, int fingers) {
+                SillConnection expected = connection;
+                ui.post(() -> { if (expected != null && connection == expected) sendMacGesture(name, fingers); });
+            }
+            public void zoomChanged() { layoutVideo(); cursor.invalidate(); }
         });
-        PictureGesture pictureGesture = new PictureGesture();
-        cursor.setOnTouchListener((view, event) -> {
-            if (connection == null) return false;
-            if (view.getWidth() == 0 || view.getHeight() == 0) return false;
-            PictureGesture.Action action = switch (event.getActionMasked()) {
-                case MotionEvent.ACTION_DOWN -> PictureGesture.Action.DOWN;
-                case MotionEvent.ACTION_POINTER_DOWN -> PictureGesture.Action.POINTER_DOWN;
-                default -> PictureGesture.Action.OTHER;
-            };
-            PictureGesture.Dispatch dispatch = pictureGesture.dispatch(action);
-            if (dispatch == PictureGesture.Dispatch.CANCEL_TRACKPAD) {
-                MotionEvent cancel = MotionEvent.obtain(event); cancel.setAction(MotionEvent.ACTION_CANCEL);
-                trackpad.touch(cancel, view.getWidth(), false); cancel.recycle();
-            }
-            scaleGesture.onTouchEvent(event);
-            return dispatch == PictureGesture.Dispatch.TRACKPAD ? trackpad.touch(event, view.getWidth(), false) : true;
+        cursor.setOnTouchListener(pictureInput);
+        cursor.addOnAttachStateChangeListener(new android.view.View.OnAttachStateChangeListener() {
+            public void onViewAttachedToWindow(android.view.View view) { }
+            public void onViewDetachedFromWindow(android.view.View view) { pictureInput.cancel(); }
         });
         LinearLayout bar = new LinearLayout(this); sessionPanel.addView(bar);
-        barButton(bar, "应用", v -> showWindows());
-        barButton(bar, "菜单", v -> showMenu(macMenus, "Mac 菜单", menuVersion));
-        barButton(bar, "Aa", v -> chooseScale());
-        barButton(bar, "键盘", v -> { keyboard.requestFocus(); ((android.view.inputmethod.InputMethodManager)getSystemService(INPUT_METHOD_SERVICE)).showSoftInput(keyboard, 0); });
+        Button appsButton = barButton(bar, "应用", v -> showWindows());
+        menuButton = barButton(bar, "菜单", v -> showMenu(macMenus, "Mac 菜单", menuVersion));
+        Button scaleButton = barButton(bar, "Aa", v -> chooseScale());
+        Button keyboardButton = barButton(bar, "键盘", v -> toggleKeyboard());
         desktopButton = barButton(bar, "桌面", v -> tapDesktop());
-        orientationButton = barButton(bar, "横屏", v -> setRequestedOrientation(
-                getResources().getConfiguration().orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
-                        ? android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-                        : android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE));
-        barButton(bar, "设置", v -> settings());
+        Button settingsButton = barButton(bar, "设置", v -> settings());
         android.widget.HorizontalScrollView strip = new android.widget.HorizontalScrollView(this);
         strip.setHorizontalScrollBarEnabled(false); choices = new LinearLayout(this); choices.setOrientation(LinearLayout.HORIZONTAL);
-        strip.addView(choices); sessionPanel.addView(strip, new LinearLayout.LayoutParams(-1, dp(72)));
+        strip.addView(choices);
+        LinearLayout stripRow = new LinearLayout(this); stripRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        bar.removeView(menuButton); stripRow.addView(strip, new LinearLayout.LayoutParams(0, -1, 1));
+        stripRow.addView(menuButton, new LinearLayout.LayoutParams(dp(50), dp(50)));
+        sessionPanel.addView(stripRow, new LinearLayout.LayoutParams(-1, dp(62)));
         LinearLayout keys = new LinearLayout(this); keyRow = keys; sessionPanel.addView(keys);
         barButton(keys, "esc", v -> { keyboard.finishAndForget(); tapKey(41); });
         barButton(keys, "tab", v -> { keyboard.finishAndForget(); tapKey(43); });
@@ -296,44 +294,43 @@ public final class MainActivity extends Activity {
         });
         trackpad.setReverseScrolling(getPreferences(0).getBoolean("reverseScrolling", false));
         sessionPanel.addView(trackpad, new LinearLayout.LayoutParams(-1, 0, 1));
-        LinearLayout rightPane = new LinearLayout(this); rightPane.setOrientation(LinearLayout.VERTICAL);
-        LinearLayout keysSecond = new LinearLayout(this);
         root.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, oright, ob) -> {
             boolean landscape = r - l > b - t;
+            if (oright > ol && ob > ot && landscape != (oright - ol > ob - ot) && pictureInput != null) pictureInput.cancel();
             int visible = landscape ? android.view.View.GONE : android.view.View.VISIBLE;
-            sessionStatus.setVisibility(visible); strip.setVisibility(visible);
-            orientationButton.setText(landscape ? "竖屏" : "横屏");
-            if (landscape && rightPane.getParent() == null) {
-                sessionPanel.removeView(bar); sessionPanel.removeView(keys); sessionPanel.removeView(trackpad);
-                for (int i = 0; i < 3; i++) { android.view.View key = keys.getChildAt(3); keys.removeViewAt(3); keysSecond.addView(key); }
-                rightPane.addView(keys); rightPane.addView(keysSecond); rightPane.addView(trackpad, new LinearLayout.LayoutParams(-1, 0, 1));
-                sessionPanel.setOrientation(LinearLayout.HORIZONTAL);
-                sessionPanel.addView(bar, 1, new LinearLayout.LayoutParams(dp(65), -1));
-                sessionPanel.addView(rightPane, sessionPanel.indexOfChild(strip) + 1, new LinearLayout.LayoutParams(dp(150), -1));
-                bar.setOrientation(LinearLayout.VERTICAL);
-                for (int i = 0; i < bar.getChildCount(); i++) bar.getChildAt(i).setLayoutParams(new LinearLayout.LayoutParams(-1, 0, 1));
-            } else if (!landscape && rightPane.getParent() != null) {
-                sessionPanel.removeView(bar); sessionPanel.removeView(rightPane);
-                rightPane.removeView(keys); rightPane.removeView(keysSecond); rightPane.removeView(trackpad);
-                while (keysSecond.getChildCount() > 0) { android.view.View key = keysSecond.getChildAt(0); keysSecond.removeViewAt(0); keys.addView(key); }
-                sessionPanel.setOrientation(LinearLayout.VERTICAL); bar.setOrientation(LinearLayout.HORIZONTAL);
-                sessionPanel.addView(bar, 2, new LinearLayout.LayoutParams(-1, -2));
-                sessionPanel.addView(keys, sessionPanel.indexOfChild(strip) + 1, new LinearLayout.LayoutParams(-1, -2));
-                sessionPanel.addView(trackpad, sessionPanel.indexOfChild(keys) + 1, new LinearLayout.LayoutParams(-1, 0, 1));
-                for (int i = 0; i < bar.getChildCount(); i++) bar.getChildAt(i).setLayoutParams(new LinearLayout.LayoutParams(0, dp(46), 1));
+            sessionStatus.setVisibility(visible); keys.setVisibility(visible); trackpad.setVisibility(visible);
+            stripRow.setVisibility(visible);
+            if (landscape && strip.getParent() != bar) {
+                stripRow.removeView(strip); stripRow.removeView(menuButton); sessionPanel.removeView(bar);
+                bar.addView(strip, 1, new LinearLayout.LayoutParams(0, dp(52), 1));
+                bar.addView(menuButton, 2, new LinearLayout.LayoutParams(dp(48), dp(46)));
+                sessionPanel.addView(bar, 1);
+            } else if (!landscape && strip.getParent() != stripRow) {
+                bar.removeView(strip); bar.removeView(menuButton); sessionPanel.removeView(bar);
+                stripRow.addView(strip, new LinearLayout.LayoutParams(0, -1, 1));
+                stripRow.addView(menuButton, new LinearLayout.LayoutParams(dp(50), dp(50)));
+                sessionPanel.addView(bar, 2);
             }
             int width = r - l - root.getPaddingLeft() - root.getPaddingRight();
             int height = b - t - root.getPaddingTop() - root.getPaddingBottom();
-            int wanted = landscape ? -1 : Math.min(Math.round(width / 1.6f), Math.round(height * .42f));
+            refreshMenuButton();
+            for (Button button : new Button[]{appsButton, scaleButton, keyboardButton, desktopButton, settingsButton}) {
+                LinearLayout.LayoutParams bp = (LinearLayout.LayoutParams) button.getLayoutParams();
+                int bw = landscape ? dp(48) : 0; float weight = landscape ? 0 : 1;
+                if (bp.width != bw || bp.weight != weight || bp.height != dp(50)) {
+                    bp.width = bw; bp.weight = weight; bp.height = dp(50); button.setLayoutParams(bp);
+                }
+            }
+            int wanted = landscape ? 0 : PhoneStreamLayout.pictureHeight(width, height, dp(200), dp(120));
             LinearLayout.LayoutParams params = (LinearLayout.LayoutParams) picture.getLayoutParams();
-            int wantedWidth = landscape ? 0 : -1; float weight = landscape ? 1 : 0;
+            int wantedWidth = -1; float weight = landscape ? 1 : 0;
             if (params.height != wanted || params.width != wantedWidth || params.weight != weight) {
                 params.height = wanted; params.width = wantedWidth; params.weight = weight; picture.setLayoutParams(params);
             }
         });
         keyboard = new RemoteKeyboard(this, new RemoteKeyboard.Listener() {
-            public void text(String value) { sendText(value); }
-            public void key(int usage, boolean down) { if (down) pressModifiers(); sendKey(usage, down); if (!down) releaseModifiers(); }
+            public void text(String value) { screenAwake.personActed(); sendText(value); }
+            public void key(int usage, boolean down) { if (down) { screenAwake.personActed(); pressModifiers(); } sendKey(usage, down); if (!down) releaseModifiers(); }
         });
         sessionPanel.addView(keyboard, new LinearLayout.LayoutParams(1, 1));
     }
@@ -341,6 +338,21 @@ public final class MainActivity extends Activity {
         Button b = button(row, label, action); LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, dp(46), 1);
         p.setMargins(dp(2), dp(3), dp(2), dp(3)); b.setLayoutParams(p); b.setPadding(0, 0, 0, 0);
         return b;
+    }
+    private void toggleKeyboard() {
+        android.view.inputmethod.InputMethodManager manager = (android.view.inputmethod.InputMethodManager)getSystemService(INPUT_METHOD_SERVICE);
+        android.view.WindowInsets insets = root.getRootWindowInsets();
+        boolean visible = android.os.Build.VERSION.SDK_INT >= 30 && insets != null
+                ? insets.isVisible(android.view.WindowInsets.Type.ime()) : keyboard.hasFocus();
+        if (visible) { manager.hideSoftInputFromWindow(keyboard.getWindowToken(), 0); keyboard.clearFocus(); }
+        else { keyboard.requestFocus(); manager.showSoftInput(keyboard, 0); }
+    }
+    private void refreshMenuButton() {
+        if (menuButton == null || root == null) return;
+        int width = root.getWidth() - root.getPaddingLeft() - root.getPaddingRight();
+        boolean landscape = root.getWidth() > root.getHeight();
+        boolean fits = width >= dp(landscape ? 6 * 48 + 100 : 320);
+        menuButton.setVisibility(fits && macMenus.length() > 0 ? android.view.View.VISIBLE : android.view.View.GONE);
     }
     private void modifier(LinearLayout row, String label, long flag) {
         Button button = barButton(row, label, v -> {
@@ -378,12 +390,20 @@ public final class MainActivity extends Activity {
     @Override public boolean dispatchKeyEvent(android.view.KeyEvent event) {
         android.view.View focused = getCurrentFocus();
         if (!HardwareKeyGate.sendRemote(connection != null, hasWindowFocus(), sessionPanel.getVisibility() == android.view.View.VISIBLE,
-                focused != null && focused != keyboard && focused.onCheckIsTextEditor()) ||
-                event.getDeviceId() < 0 || (event.getSource() & android.view.InputDevice.SOURCE_KEYBOARD) == 0)
+                focused != null && focused != keyboard && focused.onCheckIsTextEditor())) {
+            releaseHardwareKeys();
             return super.dispatchKeyEvent(event);
+        }
+        if (event.getDeviceId() < 0 || (event.getSource() & android.view.InputDevice.SOURCE_KEYBOARD) != android.view.InputDevice.SOURCE_KEYBOARD)
+            return super.dispatchKeyEvent(event);
+        if (event.getAction() != android.view.KeyEvent.ACTION_DOWN && event.getAction() != android.view.KeyEvent.ACTION_UP)
+            return super.dispatchKeyEvent(event);
+        if (event.getAction() == android.view.KeyEvent.ACTION_DOWN) screenAwake.personActed();
+        if (hardwareKeySession != connection) { hardwareKeys.release(); hardwareKeySession = connection; }
         int code = event.getKeyCode(), usage;
         if (code >= android.view.KeyEvent.KEYCODE_A && code <= android.view.KeyEvent.KEYCODE_Z) usage = 4 + code - android.view.KeyEvent.KEYCODE_A;
         else if (code >= android.view.KeyEvent.KEYCODE_1 && code <= android.view.KeyEvent.KEYCODE_9) usage = 30 + code - android.view.KeyEvent.KEYCODE_1;
+        else if (code >= android.view.KeyEvent.KEYCODE_F1 && code <= android.view.KeyEvent.KEYCODE_F12) usage = 58 + code - android.view.KeyEvent.KEYCODE_F1;
         else usage = switch (code) {
             case android.view.KeyEvent.KEYCODE_0 -> 39; case android.view.KeyEvent.KEYCODE_ENTER -> 40;
             case android.view.KeyEvent.KEYCODE_ESCAPE -> 41; case android.view.KeyEvent.KEYCODE_DEL -> 42;
@@ -394,6 +414,8 @@ public final class MainActivity extends Activity {
             case android.view.KeyEvent.KEYCODE_APOSTROPHE -> 52; case android.view.KeyEvent.KEYCODE_GRAVE -> 53;
             case android.view.KeyEvent.KEYCODE_COMMA -> 54; case android.view.KeyEvent.KEYCODE_PERIOD -> 55;
             case android.view.KeyEvent.KEYCODE_SLASH -> 56; case android.view.KeyEvent.KEYCODE_FORWARD_DEL -> 76;
+            case android.view.KeyEvent.KEYCODE_MOVE_HOME -> 74; case android.view.KeyEvent.KEYCODE_PAGE_UP -> 75;
+            case android.view.KeyEvent.KEYCODE_MOVE_END -> 77; case android.view.KeyEvent.KEYCODE_PAGE_DOWN -> 78;
             case android.view.KeyEvent.KEYCODE_DPAD_RIGHT -> 79; case android.view.KeyEvent.KEYCODE_DPAD_LEFT -> 80;
             case android.view.KeyEvent.KEYCODE_DPAD_DOWN -> 81; case android.view.KeyEvent.KEYCODE_DPAD_UP -> 82;
             case android.view.KeyEvent.KEYCODE_CTRL_LEFT -> 0xe0; case android.view.KeyEvent.KEYCODE_SHIFT_LEFT -> 0xe1;
@@ -403,22 +425,30 @@ public final class MainActivity extends Activity {
             default -> 0;
         };
         if (usage == 0) return super.dispatchKeyEvent(event);
-        if (event.getRepeatCount() > 0) return true;
+        long identity = ((long) event.getDeviceId() << 32) | (code & 0xffffffffL);
+        boolean down = event.getAction() == android.view.KeyEvent.ACTION_DOWN;
+        HardwareKeyFlow.Action action = down
+                ? hardwareKeys.down(identity, usage, keyboard.hasFocus() && keyboard.isComposing(), !hostKeyRepeatKnown || hostKeyRepeat, event.getRepeatCount())
+                : hardwareKeys.up(identity);
+        if (action == HardwareKeyFlow.Action.INPUT_METHOD) return super.dispatchKeyEvent(event);
+        if (action == HardwareKeyFlow.Action.IGNORE) return true;
         long flags = modifiers | (event.isShiftPressed() ? 1L << 17 : 0) | (event.isCtrlPressed() ? 1L << 18 : 0)
                 | (event.isAltPressed() ? 1L << 19 : 0) | (event.isMetaPressed() ? 1L << 20 : 0);
-        boolean down = event.getAction() == android.view.KeyEvent.ACTION_DOWN;
-        if (down) hardwareKeysDown.put(code, usage);
-        else if (hardwareKeysDown.remove(code) == null) return true;
-        if (down && usage < 0xe0) { keyboard.finishAndForget(); pressModifiers(); }
+        if (action == HardwareKeyFlow.Action.REMOTE_REPEAT) { sendKey(usage, false, flags); sendKey(usage, true, flags); return true; }
+        if (action == HardwareKeyFlow.Action.REMOTE_DOWN && usage < 0xe0) { keyboard.finishAndForget(); pressModifiers(); }
         sendKey(usage, down, flags); if (!down && usage < 0xe0) releaseModifiers(); return true;
+    }
+    private void releaseHardwareKeys() {
+        java.util.List<Integer> released = hardwareKeys.release();
+        if (connection != null && connection == hardwareKeySession)
+            for (int usage : released) sendKey(usage, false, 0);
+        hardwareKeySession = null;
+        if (!released.isEmpty()) releaseModifiers();
     }
     @Override public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
         if (!hasFocus) clipboardReceipt.cancel();
-        if (!hasFocus && !hardwareKeysDown.isEmpty()) {
-            for (int usage : hardwareKeysDown.values()) sendKey(usage, false, 0);
-            hardwareKeysDown.clear(); releaseModifiers();
-        }
+        if (!hasFocus) releaseHardwareKeys();
     }
     private void tapKey(int usage) { pressModifiers(); sendKey(usage, true); sendKey(usage, false); releaseModifiers(); }
     private void sendText(String text) {
@@ -449,11 +479,13 @@ public final class MainActivity extends Activity {
         } catch (Exception e) { show("手势发送失败"); }
     }
     private void select(JSONObject source, boolean desktop) {
+        pictureInput.cancel();
         trackpad.cancelGestures();
-        try { clipboardReceipt.cancel(); keyboard.finishAndForget(); zoom.reset(); layoutVideo(); cursor.invalidate(); resetWindowFit(); sendViewport(); sendAsync(6, new JSONObject().put(desktop ? "desktop" : "window", source)); }
+        try { clipboardReceipt.cancel(); keyboard.finishAndForget(); zoom.reset(); layoutVideo(); cursor.invalidate(); sendViewport(); sendAsync(6, new JSONObject().put(desktop ? "desktop" : "window", source)); }
         catch (Exception e) { show("选择窗口失败"); }
     }
     private void tapDesktop() {
+        pictureInput.cancel();
         trackpad.cancelGestures();
         if (DesktopNavigation.next(desktopActive, desktopDisplays, desktopDisplay)) { clipboardReceipt.cancel(); keyboard.finishAndForget(); sendAsync(47, new JSONObject(), true); }
         else select(new JSONObject(), true);
@@ -493,11 +525,8 @@ public final class MainActivity extends Activity {
         if (desktopActive) { show("文字大小只用于调整单个窗口；桌面保持原来的尺寸。"); return; }
         String[] labels = {"不调整", "0.5×", "0.6×", "0.75×", "1×", "1.25×", "1.5×"};
         new android.app.AlertDialog.Builder(this).setTitle("文字大小").setItems(labels, (dialog, index) -> {
-            textScale = index == 0 ? null : new double[]{0, .5, .6, .75, 1, 1.25, 1.5}[index]; resetWindowFit(); scheduleViewport();
+            textScale = index == 0 ? null : new double[]{0, .5, .6, .75, 1, 1.25, 1.5}[index]; scheduleViewport();
         }).show();
-    }
-    private void resetWindowFit() {
-        effectiveScale = textScale; fitAttempts = 0; fitAttemptAt = android.os.SystemClock.uptimeMillis();
     }
     private void scheduleViewport() {
         ui.removeCallbacks(viewportUpdate); ui.postDelayed(viewportUpdate, 250);
@@ -507,7 +536,7 @@ public final class MainActivity extends Activity {
         try {
             float density = getResources().getDisplayMetrics().density;
             JSONObject v = new JSONObject().put("width", picture.getWidth() / density).put("height", picture.getHeight() / density).put("fps", 60);
-            if (effectiveScale != null) v.put("scale", effectiveScale); sendAsync(9, v);
+            if (textScale != null) v.put("scale", textScale); sendAsync(9, v);
         } catch (Exception e) { show("画面尺寸发送失败"); }
     }
     private void layoutVideo() {
@@ -611,6 +640,7 @@ public final class MainActivity extends Activity {
         catch (Exception e) { show("剪贴板发送失败"); }
     }
     private void disconnect() {
+        pictureInput.cancel();
         trackpad.cancelGestures();
         clipboardReceipt.cancel(); keyboard.finishAndForget(); closing = true; SillConnection c = connection;
         synchronized (reconnectLock) { reconnectLock.notifyAll(); }
@@ -665,7 +695,7 @@ public final class MainActivity extends Activity {
                             var ping = heartbeat.scheduleAtFixedRate(() -> {
                                 try { synchronized (outputLock) { session.send(10, ByteBuffer.allocate(8).putDouble(System.nanoTime() / 1e9).array()); } }
                                 catch (Exception e) { try { session.close(); } catch (Exception ignored) { } }
-                            }, 0, 1, java.util.concurrent.TimeUnit.SECONDS);
+                            }, 0, 250, java.util.concurrent.TimeUnit.MILLISECONDS);
                             established = true; connectedAt = android.os.SystemClock.uptimeMillis();
                             show("已连接，选择一个窗口或桌面。");
                             try { while (running && !closing) handle(session.read()); } finally { ping.cancel(false); }
@@ -679,10 +709,10 @@ public final class MainActivity extends Activity {
                         connection = null; hostLock = null; lastParameters = null; revealFrame.set(null); recoveryGeneration = -1; pointerSync = null; clipboardSubscribed = false; hostClipboardAvailable = false; clipboardSource = ""; clipboardReceipt.cancel(); releaseDecoder();
                         if (audio != null) { audio.close(); audio = null; }
                         ui.post(() -> {
-                            hostSettings = null; pendingSettingsToken = 0; desktopDisplays = -1; desktopDisplay = 0; desktopActive = false; hostGestures = 0; trackpad.setMacGesturesEnabled(false);
-                            desktopButton.setText("桌面"); choices.removeAllViews(); thumbnails.clear(); thumbnailImages.clear(); appIcons.clear(); iconBadges.clear(); streamedPreviews.clear(); activeWindowId = -1;
+                            hostSettings = null; pendingSettingsToken = 0; desktopDisplays = -1; desktopDisplay = 0; desktopActive = false; hostGestures = 0; hostKeyRepeat = false; hostKeyRepeatKnown = false; trackpad.setMacGesturesEnabled(false);
+                            desktopButton.setText("桌面"); choices.removeAllViews(); thumbnails.clear(); thumbnailImages.clear(); appIcons.clear(); iconBadges.clear(); activeWindowId = -1;
                             if (appDrawer != null) appDrawer.dismiss(); drawerWindows = new JSONArray(); appList = new JSONArray();
-                            trackpad.cancelGestures(); keyboard.discard(); resetCursorShape();
+                            screenAwake.setStreaming(false); pictureInput.cancel(); trackpad.cancelGestures(); keyboard.discard(); resetCursorShape();
                             modifiers = heldModifiers = 0; for (android.view.View button : modifierViews.values()) button.setBackground(shape(0xff272a30, 12));
                         });
                         show("连接中断，正在重新连接（" + retries + "/4）…");
@@ -693,7 +723,7 @@ public final class MainActivity extends Activity {
             finally {
                 connection = null; hostLock = null; lastParameters = null; revealFrame.set(null); recoveryGeneration = -1; pointerSync = null; clipboardSubscribed = false; hostClipboardAvailable = false; clipboardSource = ""; clipboardReceipt.cancel(); releaseDecoder();
                 if (audio != null) { audio.close(); audio = null; }
-                ui.post(() -> { hostSettings = null; pendingSettingsToken = 0; desktopDisplays = -1; desktopDisplay = 0; desktopActive = false; hostGestures = 0; trackpad.setMacGesturesEnabled(false); desktopButton.setText("桌面"); thumbnailImages.clear(); appIcons.clear(); iconBadges.clear(); streamedPreviews.clear(); activeWindowId = -1; if (appDrawer != null) appDrawer.dismiss(); drawerWindows = new JSONArray(); appList = new JSONArray(); zoom.reset(); trackpad.cancelGestures(); keyboard.discard(); resetCursorShape(); modifiers = heldModifiers = 0; for (android.view.View button : modifierViews.values()) button.setBackground(shape(0xff272a30, 12)); sessionPanel.setVisibility(android.view.View.GONE); connectionContainer.setVisibility(android.view.View.VISIBLE); running = false; });
+                ui.post(() -> { hostSettings = null; pendingSettingsToken = 0; desktopDisplays = -1; desktopDisplay = 0; desktopActive = false; hostGestures = 0; hostKeyRepeat = false; hostKeyRepeatKnown = false; trackpad.setMacGesturesEnabled(false); desktopButton.setText("桌面"); thumbnailImages.clear(); appIcons.clear(); iconBadges.clear(); activeWindowId = -1; if (appDrawer != null) appDrawer.dismiss(); drawerWindows = new JSONArray(); appList = new JSONArray(); zoom.reset(); screenAwake.setStreaming(false); pictureInput.cancel(); trackpad.cancelGestures(); keyboard.discard(); resetCursorShape(); modifiers = heldModifiers = 0; for (android.view.View button : modifierViews.values()) button.setBackground(shape(0xff272a30, 12)); sessionPanel.setVisibility(android.view.View.GONE); connectionContainer.setVisibility(android.view.View.VISIBLE); running = false; });
             }
         });
     }
@@ -771,8 +801,11 @@ public final class MainActivity extends Activity {
                     if (connection != listConnection || listConnection == null) return;
                     int count = list.optInt("desktopDisplays", 0), current = list.optInt("desktopDisplay", 0);
                     hostGestures = list.optInt("gestures", 0);
+                    hostKeyRepeat = list.optInt("keyRepeat", 0) >= 1;
+                    hostKeyRepeatKnown = true;
                     trackpad.setMacGesturesEnabled(hostGestures >= 1 && getPreferences(0).getBoolean("macGestures", true));
                     JSONObject active = list.optJSONObject("active"); boolean isDesktop = active != null && active.has("desktop");
+                    screenAwake.setStreaming(active != null && (isDesktop || active.has("window")));
                     String source = active == null ? "" : active.toString();
                     if (!source.equals(clipboardSource)) { clipboardReceipt.cancel(); clipboardSource = source; }
                     if (count != desktopDisplays || current != desktopDisplay || isDesktop != desktopActive)
@@ -789,20 +822,12 @@ public final class MainActivity extends Activity {
                             catch (Exception ignored) { }
                         }
                         thumbnailImages.keySet().retainAll(thumbnails.keySet());
-                        streamedPreviews.retainAll(thumbnails.keySet());
                     }
                     JSONObject selected = active == null ? null : active.optJSONObject("window");
                     long selectedId = selected == null ? -1 : selected.optLong("_0", -1);
                     if (activeWindowId != selectedId) {
-                        activeWindowId = selectedId; activeChangedAt = android.os.SystemClock.uptimeMillis();
-                        activeWindowWidth = activeWindowHeight = 0; resetWindowFit(); scheduleViewport();
-                    }
-                    activeWindowWidth = activeWindowHeight = 0;
-                    if (selectedId >= 0) for (int i = 0; i < windows.length(); i++) {
-                        JSONObject window = windows.optJSONObject(i);
-                        if (window != null && window.optLong("id", -1) == selectedId) {
-                            activeWindowWidth = window.optDouble("width", 0); activeWindowHeight = window.optDouble("height", 0); break;
-                        }
+                        activeWindowId = selectedId;
+                        scheduleViewport();
                     }
                     for (int i = 0; i < choices.getChildCount(); i++) {
                         android.view.View tile = choices.getChildAt(i);
@@ -852,7 +877,7 @@ public final class MainActivity extends Activity {
                     android.graphics.BitmapFactory.Options options = new android.graphics.BitmapFactory.Options();
                     options.inSampleSize = Math.max(1, Math.max(bounds.outWidth, bounds.outHeight) / 256);
                     android.graphics.Bitmap bitmap = android.graphics.BitmapFactory.decodeByteArray(bytes, 4, bytes.length - 4, options);
-                    if (bitmap != null) ui.post(() -> { android.widget.ImageView image = thumbnails.get(id); if (image != null && !streamedPreviews.contains(id)) { thumbnailImages.put(id, bitmap); image.setImageBitmap(bitmap); } });
+                    if (bitmap != null) ui.post(() -> { android.widget.ImageView image = thumbnails.get(id); if (image != null) { thumbnailImages.put(id, bitmap); image.setImageBitmap(bitmap); } });
                 }
             }
             case 4 -> {
@@ -894,7 +919,7 @@ public final class MainActivity extends Activity {
             case 24 -> {
                 JSONObject menu = new JSONObject(new String(message.payload(), StandardCharsets.UTF_8));
                 ui.post(() -> {
-                    if (menu.has("menus")) { menuVersion = menu.optInt("version"); macMenus = menu.optJSONArray("menus"); if (macMenus == null) macMenus = new JSONArray(); }
+                    if (menu.has("menus")) { menuVersion = menu.optInt("version"); macMenus = menu.optJSONArray("menus"); if (macMenus == null) macMenus = new JSONArray(); refreshMenuButton(); }
                     else if (menu.optInt("answering", -1) == pendingMenuToken && menu.has("items")) {
                         pendingMenuToken = 0; JSONArray items = menu.optJSONArray("items");
                         if (items != null) showMenu(items, "菜单", menu.optInt("version"));
@@ -1030,48 +1055,14 @@ public final class MainActivity extends Activity {
         MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
         while (decoder != null) {
             int out = decoder.dequeueOutputBuffer(info, 0);
-            if (out >= 0) {
-                decoder.releaseOutputBuffer(out, true);
-                long now = android.os.SystemClock.uptimeMillis();
-                if (now - lastSnapshotRequest >= 2000) { lastSnapshotRequest = now; ui.post(this::captureActivePreview); }
-            }
+            if (out >= 0) decoder.releaseOutputBuffer(out, true);
             else if (out == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                 MediaFormat format = decoder.getOutputFormat();
                 int w = format.getInteger("width"), h = format.getInteger("height");
                 if (format.containsKey("crop-left") && format.containsKey("crop-right")) w = format.getInteger("crop-right") - format.getInteger("crop-left") + 1;
                 if (format.containsKey("crop-top") && format.containsKey("crop-bottom")) h = format.getInteger("crop-bottom") - format.getInteger("crop-top") + 1;
-                if (w > 0 && h > 0) { videoWidth = w; videoHeight = h; ui.post(() -> { videoFormatAt = android.os.SystemClock.uptimeMillis(); layoutVideo(); cursor.invalidate(); }); }
+                if (w > 0 && h > 0) { videoWidth = w; videoHeight = h; ui.post(() -> { layoutVideo(); cursor.invalidate(); }); }
             } else break;
-        }
-    }
-    private void captureActivePreview() {
-        long id = activeWindowId; SillConnection expected = connection; HostLockState lock = hostLock;
-        if (id < 0 || expected == null || lock == null || lock.isCovered() || lock.needsFreshFrame() || !thumbnails.containsKey(id) ||
-                android.os.SystemClock.uptimeMillis() - activeChangedAt < 1000 ||
-                video.getWidth() < 2 || video.getHeight() < 2 || !video.getHolder().getSurface().isValid()) return;
-        adjustWindowFit();
-        float factor = Math.min(208f / videoWidth, 132f / videoHeight);
-        android.graphics.Bitmap bitmap = android.graphics.Bitmap.createBitmap(Math.max(2, Math.round(videoWidth * factor)),
-                Math.max(2, Math.round(videoHeight * factor)), android.graphics.Bitmap.Config.ARGB_8888);
-        try {
-            android.view.PixelCopy.request(video, bitmap, result -> {
-                if (result != android.view.PixelCopy.SUCCESS || connection != expected || hostLock != lock || lock.isCovered() || lock.needsFreshFrame() || activeWindowId != id) return;
-                android.widget.ImageView image = thumbnails.get(id);
-                if (image != null) { streamedPreviews.add(id); thumbnailImages.put(id, bitmap); image.setImageBitmap(bitmap); }
-            }, ui);
-        } catch (IllegalArgumentException ignored) { }
-    }
-    private void adjustWindowFit() {
-        long now = android.os.SystemClock.uptimeMillis();
-        if (connection == null || activeWindowId < 0 || effectiveScale == null || fitAttempts >= 2 ||
-                now - activeChangedAt < 3000 || now - videoFormatAt < 2000 || now - fitAttemptAt < 4000 ||
-                picture.getWidth() <= 0 || picture.getHeight() <= 0) return;
-        float density = getResources().getDisplayMetrics().density;
-        double next = WindowFit.next(effectiveScale, picture.getWidth() / density, picture.getHeight() / density,
-                videoWidth, videoHeight, activeWindowWidth, activeWindowHeight);
-        if (next < effectiveScale) {
-            effectiveScale = next; fitAttempts++; fitAttemptAt = now; scheduleViewport();
-            android.util.Log.i("SillAndroid", "Adjusting window fit (attempt " + fitAttempts + ")");
         }
     }
     private boolean sameWindowChoices(JSONArray windows) {
@@ -1114,8 +1105,12 @@ public final class MainActivity extends Activity {
     private void releaseDecoder() { revealFrame.set(null); recoveryGeneration = -1; if (decoder != null) { try { decoder.stop(); } catch (Exception ignored) { } decoder.release(); decoder = null; decoderSurface = null; } }
     private void resetCursorShape() { cursorBitmap = null; cursorShape = null; cursor.invalidate(); }
     @Override protected void onStart() { super.onStart(); if (discovery != null) discovery.start(); }
-    @Override protected void onStop() { clipboardReceipt.cancel(); if (trackpad != null) trackpad.cancelGestures(); if (discovery != null) discovery.stop(); nearby.clear(); nearbyMacs.removeAllViews(); super.onStop(); }
+    @Override protected void onResume() { super.onResume(); if (screenAwake != null) screenAwake.setForeground(true); }
+    @Override protected void onPause() { if (screenAwake != null) screenAwake.setForeground(false); super.onPause(); }
+    @Override public void onUserInteraction() { super.onUserInteraction(); if (screenAwake != null) screenAwake.personActed(); }
+    @Override protected void onStop() { clipboardReceipt.cancel(); if (pictureInput != null) pictureInput.cancel(); if (trackpad != null) trackpad.cancelGestures(); if (discovery != null) discovery.stop(); nearby.clear(); nearbyMacs.removeAllViews(); super.onStop(); }
     @Override protected void onDestroy() {
+        if (screenAwake != null) screenAwake.close();
         running = false; SillConnection c = connection; if (c != null) try { c.close(); } catch (Exception ignored) { }
         synchronized (reconnectLock) { reconnectLock.notifyAll(); }
         network.shutdownNow(); input.shutdownNow(); heartbeat.shutdownNow(); super.onDestroy();
