@@ -10,6 +10,8 @@ java -ea -cp "$test_dir" io.github.n2ray.sill.HevcTest
 java -ea -cp "$test_dir" io.github.n2ray.sill.FrameGeometryTest
 java -ea -cp "$test_dir" io.github.n2ray.sill.PictureZoomTest
 java -ea -cp "$test_dir" io.github.n2ray.sill.AudioPacketsTest
+javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/AudioPcmWriter.java "$root"/tests/AudioPcmWriterTest.java
+java -ea -cp "$test_dir" io.github.n2ray.sill.AudioPcmWriterTest
 java -ea -cp "$test_dir" io.github.n2ray.sill.DesktopNavigationTest
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/RemoteTextState.java "$root"/tests/RemoteTextStateTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sill.RemoteTextStateTest
@@ -49,3 +51,5 @@ javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/PairLink.jav
 java -ea -cp "$test_dir" io.github.n2ray.sill.PairLinkTest
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/KeyframeRecovery.java "$root"/tests/KeyframeRecoveryTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sill.KeyframeRecoveryTest
+javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/WindowHold.java "$root"/tests/WindowHoldTest.java
+java -ea -cp "$test_dir" io.github.n2ray.sill.WindowHoldTest

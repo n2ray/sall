@@ -14,7 +14,7 @@ Product direction: follow the iOS client's layout and interaction by default. Ea
 
 ## Windows and picture
 
-- [ ] Window catalog, app icons, app launching, menu and thumbnail commands exist. The application drawer now follows iOS app-name search and cycles windows per application; the revised behavior needs Xiaomi verification. iOS-style presentation, drag-to-reorder, configurable hold time, full menu state and accessible actions remain.
+- [ ] Window catalog, app icons, app launching, menu and thumbnail commands exist. The application drawer follows iOS app-name search and cycles windows per application; the window strip has a configurable hold time and anchored action menu. These changes need Xiaomi verification. iOS-style presentation, drag-to-reorder, full menu state and accessible actions remain.
 - [ ] Selected-window fitting: iOS starts with Aa off and fits the complete picture without stretching. Test repeated source changes, rotation, app minimum sizes and host refusal; some applications cannot fill the picture without cropping.
 - [ ] Stage Manager may cause the Mac host to supply a tilted thumbnail. The iOS client displays the host thumbnail; Android follows that behavior. Test window closure, source changes and cache cleanup.
 - [ ] Desktop display cycling is implemented only when the host advertises it. The tested Mac 0.6.1 does not; the Android client cannot add the missing host capability.
@@ -32,7 +32,7 @@ Product direction: follow the iOS client's layout and interaction by default. Ea
 ## Audio, settings and lifecycle
 
 - [ ] Viewport frame rate follows display capability with a 60 fps cap on remote or power-saving connections; verify dynamic changes on hardware. Android VPN route classification may not identify every split-tunnel route.
-- [ ] Sound: AAC-ELD decoding is experimental and off by default. Test real playback and implement iOS-quality timing, mute, output-route changes, reconnect and audio/video synchronization.
+- [ ] Sound: AAC-ELD decoding is experimental and off by default. Partial PCM writes are retried with cancellation and logic tests; test real playback and implement iOS-quality timing, mute, output-route changes, reconnect and audio/video synchronization.
 - [ ] Complete host settings and local preferences, with capability gating, host acknowledgements and failure handling; include scrolling, gestures, long-press duration and Larger Picture.
 - [ ] Picture in Picture and foreground/background handling; idle-screen policy and foreground-only clipboard updates have logic checks but need device lifecycle verification.
 - [ ] TalkBack, larger fonts, announcements and actions; connection/error/version/slow-network status and first-run guidance.

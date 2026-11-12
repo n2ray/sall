@@ -28,6 +28,8 @@ final class AudioPlayer implements AutoCloseable {
     private MediaFormat decoderFormat;
     private String decoderName;
     private final java.util.function.Consumer<String> onError;
+    private volatile long generation;
+    private boolean closed;
 
     AudioPlayer(java.util.function.Consumer<String> onError) { this.onError = onError; }
 
@@ -46,15 +48,18 @@ final class AudioPlayer implements AutoCloseable {
         }
         return null;
     }
-    void receive(byte[] data) {
+    synchronized void receive(byte[] data) {
+        if (closed) return;
         // A format supersedes queued audio; keep it ahead of later packets even under backlog.
-        if (data.length > 0 && data[0] == 1) worker.getQueue().clear();
+        if (data.length > 0 && data[0] == 1) { generation++; worker.getQueue().clear(); }
+        long expectedGeneration = generation;
         worker.execute(() -> {
             try {
+                if (generation != expectedGeneration) return;
                 if (data.length == 0) return;
                 if (data[0] == 1) configure(data);
-                else if (data[0] == 2) play(AudioPackets.parse(data));
-            } catch (Exception e) { android.util.Log.w("SillAndroid", "Audio stopped", e); release(); onError.accept("声音解码失败，画面仍可使用"); }
+                else if (data[0] == 2) play(AudioPackets.parse(data), expectedGeneration);
+            } catch (Exception e) { if (generation == expectedGeneration) { android.util.Log.w("SillAndroid", "Audio stopped", e); release(); onError.accept("声音解码失败，画面仍可使用"); } }
         });
     }
     private void configure(byte[] data) throws Exception {
@@ -81,7 +86,7 @@ final class AudioPlayer implements AutoCloseable {
         codec.configure(decoderFormat, null, null, 0); codec.start();
         submitted = false; hasOutput = false;
     }
-    private void play(AudioPackets.Batch batch) throws Exception {
+    private void play(AudioPackets.Batch batch, long expectedGeneration) throws Exception {
         if (codec == null || batch.epoch() != epoch) return;
         if (batch.segmentStart() || needsReset || (nextSequence >= 0 && batch.sequence() != nextSequence)) {
             if (AudioPackets.needsFlush(submitted, batch.segmentStart(), needsReset, nextSequence, batch.sequence())) {
@@ -93,18 +98,20 @@ final class AudioPlayer implements AutoCloseable {
             needsReset = false;
         }
         for (byte[] packet : batch.packets()) {
-            drain();
+            if (generation != expectedGeneration) return;
+            drain(expectedGeneration);
+            if (generation != expectedGeneration) return;
             int in = codec.dequeueInputBuffer(10000);
             if (in < 0) { needsReset = true; return; }
             ByteBuffer target = codec.getInputBuffer(in); target.clear();
             if (packet.length > target.remaining()) throw new IllegalArgumentException("Audio packet too large");
             target.put(packet); codec.queueInputBuffer(in, 0, packet.length, presentationUs, 0);
             presentationUs += frameCount * 1000000L / 48000; submitted = true;
-            drain();
+            drain(expectedGeneration);
         }
         nextSequence = (batch.sequence() + batch.packets().size()) & 0xffffffffL;
     }
-    private void drain() {
+    private void drain(long expectedGeneration) throws InterruptedException {
         MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
         while (codec != null) {
             int out = codec.dequeueOutputBuffer(info, 0);
@@ -129,7 +136,12 @@ final class AudioPlayer implements AutoCloseable {
                     int bytesPerFrame = 2 * (pcmEncoding == AudioFormat.ENCODING_PCM_FLOAT ? 4 : 2);
                     int skip = Math.min(info.size, primeFrames * bytesPerFrame); primeFrames -= skip / bytesPerFrame;
                     pcm.position(info.offset + skip); pcm.limit(info.offset + info.size);
-                    track.write(pcm, pcm.remaining(), AudioTrack.WRITE_NON_BLOCKING);
+                    if (!AudioPcmWriter.writeFully(pcm,
+                            buffer -> track.write(buffer, buffer.remaining(), AudioTrack.WRITE_NON_BLOCKING),
+                            () -> generation != expectedGeneration)) {
+                        codec.releaseOutputBuffer(out, false);
+                        return;
+                    }
                 }
                 codec.releaseOutputBuffer(out, false);
             } else break;
@@ -140,5 +152,9 @@ final class AudioPlayer implements AutoCloseable {
         if (codec != null) { try { codec.stop(); } catch (Exception ignored) { } codec.release(); codec = null; }
         if (track != null) { try { track.stop(); } catch (Exception ignored) { } track.release(); track = null; }
     }
-    @Override public void close() { worker.getQueue().clear(); worker.execute(this::release); worker.shutdown(); }
+    @Override public synchronized void close() {
+        if (closed) return;
+        closed = true; generation++;
+        worker.getQueue().clear(); worker.execute(this::release); worker.shutdown();
+    }
 }
