@@ -2062,6 +2062,7 @@ public final class MainActivity extends Activity {
         tourOverlay.showStep(tourRun, copy, targets, room);
     }
     private void disconnect() {
+        status.setText("已断开连接。");
         dismissSettings(false);
         if (appDrawer != null) appDrawer.dismiss();
         dismissWindowControls(); cancelWindowDrag();

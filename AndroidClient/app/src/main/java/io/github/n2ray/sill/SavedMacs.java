@@ -156,7 +156,7 @@ final class SavedMacs {
                     List<Endpoint> typed = new ArrayList<>(), discovered = new ArrayList<>();
                     List<Advertised> advertised = new ArrayList<>(); List<Remembered> remembered = new ArrayList<>();
                     for (String row : origins.split("\\n")) {
-                        if (row.isEmpty()) continue;
+                        if (row.isBlank()) continue;
                         String[] parts = row.split("\\t", -1);
                         Endpoint endpoint = Endpoint.fromLegacyKey(parts[3]);
                         switch (parts[0]) {

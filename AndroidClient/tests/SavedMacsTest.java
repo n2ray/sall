@@ -32,6 +32,17 @@ public final class SavedMacsTest {
         check(new SavedMacStore(preferences).all().equals(store.all()), "Migration must be idempotent");
         check(java.util.Arrays.equals(store.pin(ipv6), first), "Old IPv6 connection remains pinned");
 
+        MemoryPreferences xmlWhitespace = new MemoryPreferences();
+        SavedMacStore xmlStore = new SavedMacStore(xmlWhitespace);
+        xmlStore.paired(SavedMacs.Identity.migrated(first), lan);
+        String originsKey = SavedMacs.PREFIX + PairLink.macId(first) + ":addressOrigins";
+        String originsText = (String) xmlWhitespace.values.get(originsKey);
+        xmlWhitespace.values.put(originsKey, originsText + "    ");
+        check(new SavedMacStore(xmlWhitespace).all().get(0).addresses().equals(List.of(lan)),
+                "XML indentation after the final newline must not discard a saved identity");
+        xmlWhitespace.values.put(originsKey, originsText + "invalid");
+        check(new SavedMacStore(xmlWhitespace).all().isEmpty(), "Nonblank malformed rows remain rejected");
+
         SavedMacs.Identity one = SavedMacs.Identity.paired(first, PairLink.macId(first), "Office Mac", key);
         SavedMacs.Identity two = SavedMacs.Identity.paired(second, PairLink.macId(second), "Office Mac", key);
         MemoryPreferences damaged = new MemoryPreferences();
