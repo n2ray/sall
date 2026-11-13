@@ -26,17 +26,18 @@ final class AndroidConnectionPreviewBackend implements ConnectionPreviewStore.Ba
     private static final String KEY_PREFIX = "sill-preview-v1-";
     private final Context context;
     private final String keyPrefix, cacheDirectory, tombstoneDirectory;
+    private final boolean keyCreationAllowed;
     AndroidConnectionPreviewBackend(Context context) {
-        this(context, KEY_PREFIX, "sill-previews", "sill-preview-tombstones");
+        this(context, KEY_PREFIX, "sill-previews", "sill-preview-tombstones", true);
     }
-    private AndroidConnectionPreviewBackend(Context context, String keyPrefix, String cacheDirectory, String tombstoneDirectory) {
+    private AndroidConnectionPreviewBackend(Context context, String keyPrefix, String cacheDirectory, String tombstoneDirectory, boolean keyCreationAllowed) {
         this.context = context.getApplicationContext(); this.keyPrefix = keyPrefix;
-        this.cacheDirectory = cacheDirectory; this.tombstoneDirectory = tombstoneDirectory;
+        this.cacheDirectory = cacheDirectory; this.tombstoneDirectory = tombstoneDirectory; this.keyCreationAllowed = keyCreationAllowed;
     }
-    static AndroidConnectionPreviewBackend probe(Context context, String token) {
+    static AndroidConnectionPreviewBackend probe(Context context, String token, boolean keyCreationAllowed) {
         if (token == null || !token.matches("[0-9a-f]{32}")) throw new IllegalArgumentException("Invalid probe token");
         String namespace = "sill-preview-probe-" + token;
-        return new AndroidConnectionPreviewBackend(context, namespace + "-", namespace, namespace);
+        return new AndroidConnectionPreviewBackend(context, namespace + "-", namespace, namespace, keyCreationAllowed);
     }
 
     @Override public boolean available() {
@@ -55,7 +56,7 @@ final class AndroidConnectionPreviewBackend implements ConnectionPreviewStore.Ba
             if (!(existing instanceof SecretKey key)) throw new GeneralSecurityException("Invalid key type");
             return key;
         }
-        if (!create || !available()) return null;
+        if (!create || !keyCreationAllowed || !available()) return null;
         KeyGenerator generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
         generator.init(new KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT)
                 .setKeySize(256).setBlockModes(KeyProperties.BLOCK_MODE_GCM)

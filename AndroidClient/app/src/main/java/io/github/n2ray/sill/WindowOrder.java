@@ -21,6 +21,9 @@ final class WindowOrder {
         int shift = (int) Math.copySign(Math.floor(Math.abs(distance) + 0.5), distance);
         return Math.max(0, Math.min(count - 1, start + shift));
     }
+    static int dragSlotOffset(int index, int from, int target) {
+        return index > from && index <= target ? -1 : index < from && index >= target ? 1 : 0;
+    }
     static List<Long> retainMissing(List<Long> visible, List<Long> saved) {
         List<Long> result = new ArrayList<>(visible);
         for (Long id : saved) if (!result.contains(id)) result.add(id);

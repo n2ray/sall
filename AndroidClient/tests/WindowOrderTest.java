@@ -17,6 +17,14 @@ public final class WindowOrderTest {
         assert WindowOrder.dragTarget(1, -50, 100, 3) == 0;
         assert WindowOrder.dragTarget(1, -500, 100, 3) == 0;
         assert WindowOrder.dragTarget(1, 0, 0, 3) == -1;
+        assert WindowOrder.dragSlotOffset(0, 0, 2) == 0;
+        assert WindowOrder.dragSlotOffset(1, 0, 2) == -1;
+        assert WindowOrder.dragSlotOffset(2, 0, 2) == -1;
+        assert WindowOrder.dragSlotOffset(3, 0, 2) == 0;
+        assert WindowOrder.dragSlotOffset(0, 2, 0) == 1;
+        assert WindowOrder.dragSlotOffset(1, 2, 0) == 1;
+        assert WindowOrder.dragSlotOffset(2, 2, 0) == 0;
+        assert WindowOrder.dragSlotOffset(1, 1, 1) == 0;
         List<Long> original = List.of(1L, 2L, 3L);
         List<Long> preview = new ArrayList<>(original);
         assert WindowOrder.move(preview, 1, WindowOrder.dragTarget(0, 51, 100, 3));

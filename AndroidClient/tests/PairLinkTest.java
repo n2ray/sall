@@ -31,6 +31,12 @@ public final class PairLinkTest {
         assert link.candidates(java.util.List.of(remote)).stream().filter(a -> a.equals(remote)).count() == 2;
         assert link.addresses.get(1).host().equals("fd7a:115c:a1e0::1234") && link.addresses.get(1).port() == 17455;
         byte[] copy = link.secret(); copy[0] = 1; assert link.secret()[0] == 0;
+        byte[] nonzero = new byte[16]; java.util.Arrays.fill(nonzero, (byte) 7);
+        PairLink retry = PairLink.parse(base.replace("s=" + secret,
+                "s=" + Base64.getUrlEncoder().withoutPadding().encodeToString(nonzero)));
+        byte[] attempt = retry.secret(); java.util.Arrays.fill(attempt, (byte) 0);
+        assert retry.secret()[0] == 7; // Clearing a failed worker's copy preserves the confirmed link for retry.
+        retry.clearSecret(); for (byte b : retry.secret()) assert b == 0;
         assert PairLink.parse(base).name.equals("Mac");
         assert PairLink.parse(base + "&n=Bad%E2%80%AE%20Mac").name.equals("Bad Mac");
         assert PairLink.parse(base + "&a=10.0.0.1&a=10.0.0.2&a=10.0.0.3&a=10.0.0.4&a=10.0.0.5&a=10.0.0.6").addresses.size() == 5;

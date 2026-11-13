@@ -37,6 +37,14 @@ public final class MainActivity extends Activity {
     private volatile SillConnection connection;
     private SessionAuthorization activeAuthorization;
     private PairingAuthorization pendingPairing;
+    private final OverlayPairingAuthorization overlayPairing = new OverlayPairingAuthorization();
+    private OverlayPairingAuthorization.Attempt overlayAttempt;
+    private SillConnection overlayOwner;
+    private android.app.AlertDialog overlayPairDialog;
+    private static final boolean OVERLAY_EXTERNAL_ENABLED = false; // enable only after independent security/device review
+    private PairLink overlayLink;
+    private Runnable overlayDeadline;
+    private volatile boolean overlayPairBlocked;
     private QrPairingAttempt qrAttempt;
     private PairLink qrLink;
     private Runnable qrBegin;
@@ -198,6 +206,11 @@ public final class MainActivity extends Activity {
     private android.view.View activeWindowHoldView;
     private Runnable activeWindowHoldRunnable;
     private float draggedWindowOriginalZ;
+    private android.view.View settlingWindow;
+    private float settlingWindowOriginalZ;
+    private long windowDragVisualGeneration;
+    private android.view.ViewTreeObserver.OnPreDrawListener windowDropPreDraw;
+    private android.view.ViewTreeObserver windowDropObserver;
     private int dragFrom, dragTo;
     private java.util.List<Long> dragPreview;
     private static final int MOVE_LEFT_ACTION = 0x00ff0001, MOVE_RIGHT_ACTION = 0x00ff0002;
@@ -302,7 +315,7 @@ public final class MainActivity extends Activity {
                 String tag = discovery.recognitionTag(name);
                 SavedMacs.Identity recognized = savedMacStore.recognized(tag);
                 String label = recognized != null && !recognized.name().isEmpty() ? recognized.name() : name;
-                Button row = button(nearbyMacs, "附近 · " + label, v -> {
+                Button row = button(nearbyMacs, "附近 · " + label + " · 连接时验证", v -> {
                     if (running) { show("请先取消当前连接。"); return; }
                     host.setText(address); port.setText(String.valueOf(number));
                     if (recognized != null) start(false, recognized, tag);
@@ -345,6 +358,11 @@ public final class MainActivity extends Activity {
         final PairLink link;
         try { link = PairLink.parse(raw); }
         catch (IllegalArgumentException e) { show("无效的 Sill 配对链接。"); return; }
+        if (connection != null) {
+            if (OVERLAY_EXTERNAL_ENABLED) openOverlayPair(link);
+            else { link.clearSecret(); show("已有连接，请先断开后重新打开配对链接。"); }
+            return;
+        }
         StringBuilder message = new StringBuilder("请确认这是你自己的 Mac：\n\n").append(link.name).append("\n");
         for (PairLink.Address a : link.addresses) message.append("\n").append(a.display(link.port));
         if (link.addresses.isEmpty()) message.append("\n将在本地网络查找此 Mac。");
@@ -367,6 +385,116 @@ public final class MainActivity extends Activity {
         android.app.AlertDialog dialog = pairConfirmation; pairConfirmation = null;
         if (link != null) link.clearSecret();
         if (dialog != null) dialog.dismiss();
+    }
+
+    private static void closePairResource(java.io.Closeable resource) {
+        if (resource != null) try { resource.close(); } catch (java.io.IOException ignored) { }
+    }
+    private void openOverlayPair(PairLink supplied) {
+        if (supplied == null) return;
+        if (overlayPairDialog != null) { if (supplied != null) supplied.clearSecret(); return; }
+        SillConnection owner = connection;
+        synchronized (savedMacStore) {
+            if (owner == null || owner != connection || closing) { if (supplied != null) supplied.clearSecret(); return; }
+            overlayPairing.session(owner, owner.peerFingerprint()); overlayOwner = owner;
+        }
+        dismissSettings(false); dismissMenu(); if (appDrawer != null) appDrawer.dismiss();
+        pictureInput.cancel(); trackpad.cancelGestures(); releaseHardwareKeys(); keyboard.finishAndForget();
+        synchronized (outputLock) { clipboardReceipt.cancel(); tourInputGeneration++; overlayPairBlocked = true; }
+        LinearLayout body = new LinearLayout(this); body.setOrientation(LinearLayout.VERTICAL); body.setPadding(dp(20), dp(8), dp(20), 0);
+        TextView info = new TextView(this); info.setTextColor(0xffeef0f3); info.setTextSize(15); body.addView(info);
+        overlayLink = supplied;
+        StringBuilder details = new StringBuilder("请确认这是你自己的 Mac：\n").append(supplied.name);
+        for (PairLink.Address address : supplied.addresses) details.append("\n").append(address.display(supplied.port));
+        if (supplied.addresses.isEmpty()) details.append("\n将在本地网络查找此 Mac。");
+        info.setText(details.append("\n\n仅信任来自你自己 Mac 的配对链接。"));
+        android.app.AlertDialog dialog = new android.app.AlertDialog.Builder(this).setTitle("确认配对 Mac")
+                .setView(body).setNegativeButton("取消", (d, which) -> {
+                    if (overlayPairDialog == d) closeOverlayPair();
+                }).setPositiveButton("配对", null).create();
+        overlayPairDialog = dialog;
+        dialog.setOnCancelListener(d -> { if (overlayPairDialog == dialog) closeOverlayPair(); });
+        dialog.setOnDismissListener(d -> { if (overlayPairDialog == dialog) closeOverlayPair(); });
+        dialog.show();
+        dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            if (overlayPairDialog == dialog && overlayLink == supplied && overlayAttempt == null) beginOverlayPair(supplied, info);
+        });
+    }
+    private void closeOverlayPair() {
+        android.app.AlertDialog dialog = overlayPairDialog; overlayPairDialog = null;
+        if (overlayDeadline != null) { ui.removeCallbacks(overlayDeadline); overlayDeadline = null; }
+        if (overlayLink != null) { overlayLink.clearSecret(); overlayLink = null; }
+        SillConnection owner = overlayOwner; overlayOwner = null; overlayAttempt = null;
+        java.io.Closeable resource;
+        synchronized (savedMacStore) { resource = overlayPairing.detachSession(owner); }
+        closePairResource(resource);
+        synchronized (outputLock) { overlayPairBlocked = false; }
+        if (dialog != null) dialog.dismiss();
+    }
+    private void beginOverlayPair(PairLink link, TextView info) {
+        SillConnection owner = overlayOwner;
+        byte[] pin = link.fingerprint(), secret = link.secret();
+        java.util.List<PairLink.Address> local = link.localCandidates(discovery.pairingDoors());
+        java.util.List<PairLink.Address> candidates = link.candidates(local);
+        long now = android.os.SystemClock.uptimeMillis(), deadline = now + 45000;
+        OverlayPairingAuthorization.Attempt run;
+        synchronized (savedMacStore) {
+            run = owner != null && connection == owner && !closing ? overlayPairing.begin(owner, pin, deadline, now) : null;
+        }
+        if (run == null) { java.util.Arrays.fill(secret, (byte) 0); closeOverlayPair(); return; }
+        overlayAttempt = run; info.setText("正在配对 " + link.name + "…");
+        if (overlayPairDialog != null) overlayPairDialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setEnabled(false);
+        overlayDeadline = () -> {
+            if (overlayAttempt != run) return;
+            long tick = android.os.SystemClock.uptimeMillis();
+            OverlayPairingAuthorization.Expiry expiry = overlayPairing.expire(run, tick);
+            if (expiry == OverlayPairingAuthorization.Expiry.COMMITTED) { overlayDeadline = null; return; }
+            if (expiry == OverlayPairingAuthorization.Expiry.EARLY) { ui.postDelayed(overlayDeadline, Math.max(1, deadline - tick)); return; }
+            overlayAttempt = null; overlayDeadline = null;
+            info.setText("与 " + link.name + " 配对超时，请重试。");
+            if (overlayPairDialog != null) overlayPairDialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setEnabled(true);
+        };
+        ui.postDelayed(overlayDeadline, 45000);
+        OverlayPairingDispatch.execute(qrNetwork, () -> {
+            SavedMacs.Identity authenticated = null; PairLink.Address winner = null;
+            try {
+                for (int i = 0; i < candidates.size(); i++) {
+                    PairLink.Address address = candidates.get(i); int number = address.port() == 0 ? link.port : address.port();
+                    RemoteDial.Attempt transport = new RemoteDial.Attempt();
+                    if (!overlayPairing.track(run, transport, android.os.SystemClock.uptimeMillis())) break;
+                    try (SillConnection pair = SillConnection.connect(address.host(), number, "sill-pair/1", pin,
+                            i < local.size() ? 1200 : 10000, i < local.size() ? 1800 : 15000, transport)) {
+                        transport.check();
+                        SavedMacs.Identity result = pair.pairQrIdentity(secret, android.os.Build.MODEL, android.os.Build.DEVICE);
+                        transport.check(); authenticated = result; winner = address;
+                    } catch (Exception ignored) { }
+                    finally { overlayPairing.finishTransport(run, transport); }
+                    if (authenticated != null) break;
+                }
+            } finally { java.util.Arrays.fill(secret, (byte) 0); }
+            SavedMacs.Identity result = authenticated; PairLink.Address address = winner;
+            boolean saved = result != null && address != null && OverlayPairingDispatch.saved(() -> {
+                int number = address.port() == 0 ? link.port : address.port();
+                synchronized (savedMacStore) {
+                        return connection == owner && !closing && overlayPairing.commit(run, result.pin(), android.os.SystemClock.uptimeMillis(),
+                                () -> savedMacStore.paired(result, new SavedMacs.Endpoint(address.host(), number)));
+                }
+            });
+            boolean success = saved;
+            ui.post(() -> {
+                if (overlayAttempt != run || overlayOwner != owner || overlayPairDialog == null) return;
+                if (overlayDeadline != null) { ui.removeCallbacks(overlayDeadline); overlayDeadline = null; }
+                overlayAttempt = null;
+                if (success) { closeOverlayPair(); refreshSavedMacs(); show("配对成功，当前连接未改变。"); }
+                else { overlayPairing.cancel(run); info.setText("与 " + link.name + " 配对失败，请确认 Mac 配对窗口和网络后重试。");
+                    overlayPairDialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setEnabled(true); }
+            });
+        }, () -> {
+            java.util.Arrays.fill(secret, (byte) 0); overlayPairing.cancel(run); overlayAttempt = null;
+            if (overlayDeadline != null) { ui.removeCallbacks(overlayDeadline); overlayDeadline = null; }
+            info.setText("与 " + link.name + " 的配对线程仍在结束，请重试。");
+            if (overlayPairDialog != null) overlayPairDialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setEnabled(true);
+        });
     }
 
     private void pairLink(PairLink link) {
@@ -690,6 +818,8 @@ public final class MainActivity extends Activity {
         for (SavedMacs.Mac mac : section.getValue()) {
             android.view.View row;
             boolean connecting = running && mac.identity().macId().equals(connectingMacId);
+            SavedMacs.Endpoint preferred = mac.preferred();
+            String statusLabel = connecting ? "正在连接…" : ConnectionRouteLabel.saved(mac, preferred, System.currentTimeMillis() / 1000.0);
             if (connectionTiles) {
                 if (tileRow == null || inRow == Math.max(1, savedMacColumns)) {
                     tileRow = new LinearLayout(this); tileRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -711,9 +841,9 @@ public final class MainActivity extends Activity {
                 TextView name = new TextView(this); name.setText(mac.displayName()); name.setTextSize(14); name.setTextColor(0xffeef0f3);
                 name.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
                 name.setSingleLine(true); name.setEllipsize(android.text.TextUtils.TruncateAt.END); description.addView(name);
-                TextView kind = new TextView(this); kind.setText(connecting ? "正在连接…" : "已配对"); kind.setTextSize(12); kind.setTextColor(0xffa4abb5); description.addView(kind);
-                tile.addView(description); tile.setContentDescription(mac.displayName() + (connecting ? "，正在连接" : "，已配对"));
-                tile.setOnClickListener(v -> connectSavedMac(mac.identity(), mac.preferred()));
+                TextView kind = new TextView(this); kind.setText(statusLabel); kind.setTextSize(12); kind.setTextColor(0xffa4abb5); description.addView(kind);
+                tile.addView(description); tile.setContentDescription(mac.displayName() + "，" + statusLabel);
+                tile.setOnClickListener(v -> connectSavedMac(mac.identity(), preferred));
                 LinearLayout.LayoutParams tileParams = new LinearLayout.LayoutParams(0, -2, 1);
                 if (inRow > 0) tileParams.leftMargin = dp(10); tileRow.addView(tile, tileParams); inRow++;
                 if (Math.max(1, savedMacColumns) == 2 && inRow == 1) {
@@ -734,9 +864,9 @@ public final class MainActivity extends Activity {
                 TextView name = new TextView(this); name.setText(mac.displayName()); name.setTextColor(0xffeef0f3); name.setTextSize(15);
                 name.setSingleLine(true); name.setEllipsize(android.text.TextUtils.TruncateAt.END);
                 LinearLayout.LayoutParams nameParams = new LinearLayout.LayoutParams(0, -2, 1); nameParams.leftMargin = dp(12); list.addView(name, nameParams);
-                TextView route = new TextView(this); route.setText(connecting ? "正在连接…" : "已配对"); route.setTextColor(0xffa4abb5); route.setTextSize(13); list.addView(route);
-                list.setContentDescription(mac.displayName() + (connecting ? "，正在连接" : "，已配对"));
-                list.setOnClickListener(v -> connectSavedMac(mac.identity(), mac.preferred()));
+                TextView route = new TextView(this); route.setText(statusLabel); route.setTextColor(0xffa4abb5); route.setTextSize(13); list.addView(route);
+                list.setContentDescription(mac.displayName() + "，" + statusLabel);
+                list.setOnClickListener(v -> connectSavedMac(mac.identity(), preferred));
                 savedMacs.addView(list, new LinearLayout.LayoutParams(-1, -2)); row = list;
             }
             row.setOnLongClickListener(v -> { showSavedMacMenu(mac); return true; });
@@ -814,9 +944,11 @@ public final class MainActivity extends Activity {
                 .setMessage("这只移除手机上的记录；如需撤销 Mac 的信任，请在 Mac 的 Sill 设置中移除设备。")
                 .setNegativeButton("取消", null).setPositiveButton("移除", (dialog, which) -> {
                     java.io.Closeable cancelled = null;
+                    java.io.Closeable overlayCancelled;
                     synchronized (savedMacStore) {
                         if (!ConnectionGroups.canEdit(running, isSavedIdentity(mac.identity()))) { show("Mac 记录已变化，请重试。"); return; }
                         savedMacStore.forget(mac.identity());
+                        overlayCancelled = overlayPairing.forget(mac.identity().pin());
                         if (activeAuthorization != null && activeAuthorization.matches(mac.identity().pin())) {
                             closing = true; cancelled = activeAuthorization.revoke();
                         }
@@ -825,6 +957,7 @@ public final class MainActivity extends Activity {
                             if (pairingResource != null) { closing = true; cancelled = pairingResource; }
                         }
                     }
+                    closePairResource(overlayCancelled);
                     if (cancelled != null) try { cancelled.close(); } catch (java.io.IOException ignored) { }
                     synchronized (reconnectLock) { reconnectLock.notifyAll(); }
                     refreshSavedMacs();
@@ -1044,6 +1177,7 @@ public final class MainActivity extends Activity {
         }; tourStrip = strip;
         strip.setHorizontalScrollBarEnabled(false); choices = new LinearLayout(this); choices.setOrientation(LinearLayout.HORIZONTAL);
         choices.setGravity(android.view.Gravity.CENTER_VERTICAL); choices.setPadding(dp(2), 0, dp(2), 0);
+        choices.setClipChildren(false);
         strip.addView(choices);
         LinearLayout stripRow = new LinearLayout(this); stripRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
         bar.removeView(menuButton); stripRow.addView(strip, new LinearLayout.LayoutParams(0, -1, 1));
@@ -1370,6 +1504,7 @@ public final class MainActivity extends Activity {
     }
     @Override public boolean dispatchKeyEvent(android.view.KeyEvent event) {
         if (pip != null && pip.active()) return super.dispatchKeyEvent(event);
+        if (overlayPairBlocked) return super.dispatchKeyEvent(event);
         if (tourInputBlocked && tourOverlay != null) {
             if (tourOverlay.handleBack(event.getKeyCode(), event)) return true;
             return super.dispatchKeyEvent(event);
@@ -1693,7 +1828,7 @@ public final class MainActivity extends Activity {
         input.execute(() -> {
             try {
                 synchronized (outputLock) {
-                    if (connection == owner && !tourInputBlocked && generation == tourInputGeneration && allowedForLock(kind, message)) owner.send(kind, message.toString().getBytes(StandardCharsets.UTF_8));
+                    if (connection == owner && !tourInputBlocked && !overlayPairBlocked && generation == tourInputGeneration && allowedForLock(kind, message)) owner.send(kind, message.toString().getBytes(StandardCharsets.UTF_8));
                 }
             } catch (Exception e) { showFor(owner, "菜单请求失败"); }
         });
@@ -2390,7 +2525,7 @@ public final class MainActivity extends Activity {
     private boolean clipboardChipUncovered() {
         HostLockState lock = hostLock;
         return keyframeForeground && hasWindowFocus() && sessionPanel != null && sessionPanel.getVisibility() == android.view.View.VISIBLE
-                && (pip == null || !pip.active()) && !settingsOpen && !tourInputBlocked
+                && (pip == null || !pip.active()) && !settingsOpen && !tourInputBlocked && !overlayPairBlocked
                 && (appDrawer == null || !appDrawer.isShowing()) && (menuDialog == null || !menuDialog.isShowing())
                 && (windowControls == null || !windowControls.isShowing()) && draggedWindow == null && activeWindowHold == null
                 && !scaleRulerOpen && lock != null && lock.reason() == HostLockState.Reason.NONE;
@@ -2483,6 +2618,8 @@ public final class MainActivity extends Activity {
     }
     private void pasteClipboard() { pasteClipboard(null); }
     private void pasteClipboard(Long requestedChange) {
+        if (overlayPairBlocked || !keyframeForeground || !hasWindowFocus() || (pip != null && pip.active())
+                || hostLock == null || hostLock.reason() != HostLockState.Reason.NONE) return;
         if (requestedChange != null) {
             if (!clipboardChipAllowed()) return;
             observeClipboardMetadata();
@@ -2531,7 +2668,7 @@ public final class MainActivity extends Activity {
                 try {
                     synchronized (outputLock) {
                         HostLockState lock = hostLock;
-                        if (connection != expected || tourInputBlocked || !keyframeForeground || !clipboardEnabled || !hostClipboardAvailable ||
+                        if (connection != expected || tourInputBlocked || overlayPairBlocked || !keyframeForeground || !clipboardEnabled || !hostClipboardAvailable ||
                                 !hasWindowFocus() || (pip != null && pip.active()) || lock == null || lock.reason() != HostLockState.Reason.NONE ||
                                 !source.equals(clipboardSource) || !clipboardReceipt.pending(token)) return;
                         expected.send(32, payload); expected.send(10, nonce);
@@ -2550,7 +2687,7 @@ public final class MainActivity extends Activity {
     }
     private boolean clipboardMayPaste(SillConnection expected, String source) {
         HostLockState lock = hostLock;
-        return !tourInputBlocked && ClipboardPastePolicy.paste(pasteRightAway, true, connection == expected,
+        return !tourInputBlocked && !overlayPairBlocked && ClipboardPastePolicy.paste(pasteRightAway, true, connection == expected,
                 clipboardEnabled, hostClipboardAvailable, keyframeStreaming && source.equals(clipboardSource),
                 keyframeForeground && (pip == null || !pip.active()),
                 lock != null && lock.reason() == HostLockState.Reason.NONE);
@@ -2731,10 +2868,10 @@ public final class MainActivity extends Activity {
         endTour(true);
     }
     private boolean tourControl(int kind) {
-        return kind == 6 || kind == 7 || kind == 8 || kind == 15 || kind == 25 || kind == 28 || kind == 47;
+        return kind == 6 || kind == 7 || kind == 8 || kind == 15 || kind == 17 || kind == 25 || kind == 28 || kind == 47;
     }
     private boolean allowedForTour(int kind, JSONObject value) {
-        return !tourInputBlocked || !tourControl(kind) || isRelease(kind, value);
+        return !(tourInputBlocked || overlayPairBlocked) || !tourControl(kind) || isRelease(kind, value);
     }
     private boolean allowedTourGeneration(int kind, JSONObject value, long generation) {
         return generation == tourInputGeneration || !tourControl(kind) || isRelease(kind, value);
@@ -2776,6 +2913,7 @@ public final class MainActivity extends Activity {
         tourOverlay.showStep(tourRun, copy, targets, room);
     }
     private void disconnect() {
+        closeOverlayPair();
         if (scaleControl != null) scaleControl.cancel();
         status.setText("已断开连接。");
         dismissSettings(false);
@@ -2783,11 +2921,21 @@ public final class MainActivity extends Activity {
         dismissWindowControls(); cancelWindowDrag();
         pictureInput.cancel();
         trackpad.cancelGestures();
-        clipboardReceipt.cancel(); keyboard.finishAndForget(); closing = true;
+        clipboardReceipt.cancel(); keyboard.finishAndForget();
+        synchronized (savedMacStore) { closing = true; }
         RemoteDial.Attempt dial = pendingDial; if (dial != null) dial.close();
         SillConnection c = connection;
         synchronized (reconnectLock) { reconnectLock.notifyAll(); }
         if (c != null) try { c.close(); } catch (Exception ignored) { }
+    }
+
+    private void clearConnectionForOverlay() {
+        SillConnection old; java.io.Closeable resource;
+        synchronized (savedMacStore) {
+            old = connection; resource = overlayPairing.detachSession(old); connection = null;
+        }
+        closePairResource(resource);
+        if (old != null) ui.post(() -> { if (overlayOwner == old) closeOverlayPair(); });
     }
 
     private void show(String text) {
@@ -2956,7 +3104,7 @@ public final class MainActivity extends Activity {
                         if (!established || (goodbye == null && !ReconnectPolicy.retryable(error)) || delay < 0) throw error;
                         retries++;
                         if (pip != null && pip.active()) ui.post(pip::stop);
-                connection = null; hostLock = null; keyframeRecovery = null; keyframeStreaming = false; recoveryFrame.set(null); lastParameters = null; revealFrame.set(null); recoveryGeneration = -1; pointerSync = null; clipboardSubscribed = false; hostClipboardAvailable = false; clipboardSource = ""; clipboardReceipt.cancel(); releaseDecoder();
+                clearConnectionForOverlay(); hostLock = null; keyframeRecovery = null; keyframeStreaming = false; recoveryFrame.set(null); lastParameters = null; revealFrame.set(null); recoveryGeneration = -1; pointerSync = null; clipboardSubscribed = false; hostClipboardAvailable = false; clipboardSource = ""; clipboardReceipt.cancel(); releaseDecoder();
                         if (audio != null) { localAudio.setPlayer(null); audio.close(); audio = null; }
                         ui.post(() -> {
                             if (scaleControl != null) scaleControl.cancel();
@@ -2978,7 +3126,7 @@ public final class MainActivity extends Activity {
             finally {
                 synchronized (savedMacStore) { if (pendingPairing == pairingGuard) pendingPairing = null; }
                 if (pip != null && pip.active()) ui.post(pip::stop);
-                connection = null; hostLock = null; keyframeRecovery = null; keyframeStreaming = false; recoveryFrame.set(null); lastParameters = null; revealFrame.set(null); recoveryGeneration = -1; pointerSync = null; clipboardSubscribed = false; hostClipboardAvailable = false; clipboardSource = ""; clipboardReceipt.cancel(); releaseDecoder();
+                clearConnectionForOverlay(); hostLock = null; keyframeRecovery = null; keyframeStreaming = false; recoveryFrame.set(null); lastParameters = null; revealFrame.set(null); recoveryGeneration = -1; pointerSync = null; clipboardSubscribed = false; hostClipboardAvailable = false; clipboardSource = ""; clipboardReceipt.cancel(); releaseDecoder();
                 if (audio != null) { localAudio.setPlayer(null); audio.close(); audio = null; }
                 ui.post(() -> { if (scaleControl != null) scaleControl.cancel(); endTour(false); dismissSettings(false); dismissStaleMenu(); dismissWindowControls(); cancelWindowDrag(); hostSettings = null; pendingSettingsToken = 0; desktopDisplays = -1; desktopDisplay = 0; desktopActive = false; hostGestures = 0; hostKeyRepeat = false; hostKeyRepeatKnown = false; trackpad.setMacGesturesEnabled(false); desktopButton.setText("桌面"); thumbnailImages.clear(); appIcons.clear(); iconBadges.clear(); activeWindowId = -1; if (appDrawer != null) appDrawer.dismiss(); drawerWindows = new JSONArray(); appList = new JSONArray(); zoom.reset(); screenAwake.setStreaming(false); pictureInput.cancel(); trackpad.cancelGestures(); keyboard.discard(); resetCursorShape(); modifiers = heldModifiers = 0; for (android.view.View button : modifierViews.values()) button.setBackground(shape(0xff272a30, 12)); sessionPanel.setVisibility(android.view.View.GONE); connectionContainer.setVisibility(android.view.View.VISIBLE); applyContentInsets(); running = false; updateConnectionCancel(); });
             }
@@ -3474,9 +3622,15 @@ public final class MainActivity extends Activity {
                 for (SavedMacs.Mac mac : savedMacStore.all())
                     if (java.security.MessageDigest.isEqual(pin, mac.identity().pin())) { identity = mac.identity(); break; }
                 GoodbyePolicy.Outcome result = GoodbyePolicy.outcome(goodbye, identity == null ? "Mac" : identity.name(), identity != null);
-                if ("removed".equals(goodbye.reason()) && (connection == messageSession
-                        || candidateAttempt != null && pendingDial == candidateAttempt && running && !closing) && savedMacStore.forgetPin(pin))
-                    ui.post(this::refreshSavedMacs);
+                java.io.Closeable forgottenPair = null; boolean forgotten = false;
+                if ("removed".equals(goodbye.reason())) synchronized (savedMacStore) {
+                    if (connection == messageSession || candidateAttempt != null && pendingDial == candidateAttempt && running && !closing) {
+                        forgotten = savedMacStore.forgetPin(pin);
+                        forgottenPair = overlayPairing.forget(pin);
+                    }
+                }
+                closePairResource(forgottenPair);
+                if (forgotten) ui.post(this::refreshSavedMacs);
                 throw new GoodbyePolicy.Ended(result);
             }
         }
@@ -3620,20 +3774,73 @@ public final class MainActivity extends Activity {
         tile.sendAccessibilityEvent(android.view.accessibility.AccessibilityEvent.TYPE_VIEW_SELECTED);
     }
     private void cancelWindowDrag() {
+        windowDragVisualGeneration++;
+        if (windowDropObserver != null && windowDropObserver.isAlive() && windowDropPreDraw != null)
+            windowDropObserver.removeOnPreDrawListener(windowDropPreDraw);
+        windowDropObserver = null; windowDropPreDraw = null;
         if (activeWindowHoldView != null && activeWindowHoldRunnable != null)
             activeWindowHoldView.removeCallbacks(activeWindowHoldRunnable);
         if (activeWindowHold != null) activeWindowHold.cancel();
         activeWindowHold = null; activeWindowHoldView = null; activeWindowHoldRunnable = null;
-        if (draggedWindow == null) { refreshClipboardChip(); return; }
-        draggedWindow.setTranslationZ(draggedWindowOriginalZ);
-        for (int i = 0; i < choices.getChildCount(); i++) { choices.getChildAt(i).setTranslationX(0); choices.getChildAt(i).setScaleX(1); choices.getChildAt(i).setScaleY(1); }
-        draggedWindow = null; dragPreview = null; choices.requestDisallowInterceptTouchEvent(false);
+        if (settlingWindow != null) { settlingWindow.setTranslationZ(settlingWindowOriginalZ); settlingWindow = null; }
+        if (draggedWindow != null) draggedWindow.setTranslationZ(draggedWindowOriginalZ);
+        if (choices != null) for (int i = 0; i < choices.getChildCount(); i++) {
+            android.view.View item = choices.getChildAt(i); item.animate().cancel();
+            item.setTranslationX(0); item.setScaleX(1); item.setScaleY(1);
+        }
+        draggedWindow = null; dragPreview = null;
+        if (choices != null) choices.requestDisallowInterceptTouchEvent(false);
         refreshClipboardChip();
     }
     private void dropWindowDrag() {
         android.view.View tile = draggedWindow; int target = dragTo;
+        boolean animate = tile != null && android.animation.ValueAnimator.areAnimatorsEnabled();
+        java.util.Map<android.view.View, Float> positions = new java.util.IdentityHashMap<>();
+        float scaleX = 1, scaleY = 1, raisedZ = 0, originalZ = draggedWindowOriginalZ;
+        SillConnection owner = connection;
+        if (animate) {
+            for (int i = 0; i < choices.getChildCount(); i++) {
+                android.view.View item = choices.getChildAt(i); item.animate().cancel();
+                positions.put(item, item.getLeft() + item.getTranslationX());
+            }
+            scaleX = tile.getScaleX(); scaleY = tile.getScaleY(); raisedZ = tile.getTranslationZ();
+        }
         cancelWindowDrag();
-        if (tile != null) { moveWindow(tile, target); persistWindowOrder(); }
+        if (tile == null) return;
+        moveWindow(tile, target); persistWindowOrder();
+        if (!animate || tile.getParent() != choices) return;
+        final float startScaleX = scaleX, startScaleY = scaleY;
+        final long generation = windowDragVisualGeneration;
+        settlingWindow = tile; settlingWindowOriginalZ = originalZ; tile.setTranslationZ(raisedZ);
+        windowDropObserver = choices.getViewTreeObserver();
+        if (!windowDropObserver.isAlive()) { tile.setTranslationZ(originalZ); settlingWindow = null; windowDropObserver = null; return; }
+        windowDropPreDraw = new android.view.ViewTreeObserver.OnPreDrawListener() {
+            @Override public boolean onPreDraw() {
+                if (windowDropObserver != null && windowDropObserver.isAlive()) windowDropObserver.removeOnPreDrawListener(this);
+                windowDropObserver = null; windowDropPreDraw = null;
+                if (generation != windowDragVisualGeneration || owner != connection || tile.getParent() != choices
+                        || !android.animation.ValueAnimator.areAnimatorsEnabled()) {
+                    if (settlingWindow == tile) { tile.setTranslationZ(originalZ); settlingWindow = null; }
+                    return true;
+                }
+                for (int i = 0; i < choices.getChildCount(); i++) {
+                    android.view.View item = choices.getChildAt(i); Float previous = positions.get(item);
+                    if (previous == null) continue;
+                    item.setTranslationX(previous - item.getLeft());
+                    if (item == tile) { item.setScaleX(startScaleX); item.setScaleY(startScaleY); }
+                    android.view.ViewPropertyAnimator transition = item.animate().translationX(0).scaleX(1).scaleY(1)
+                            .setDuration(300).setInterpolator(new android.view.animation.OvershootInterpolator(.5f));
+                    if (item == tile) transition.withEndAction(() -> {
+                        if (generation == windowDragVisualGeneration && settlingWindow == tile) {
+                            tile.setTranslationZ(originalZ); settlingWindow = null;
+                        }
+                    });
+                    transition.start();
+                }
+                return true;
+            }
+        };
+        windowDropObserver.addOnPreDrawListener(windowDropPreDraw); choices.invalidate();
     }
     private boolean sameWindowChoices(JSONArray windows) {
         if (choices.getChildCount() != windows.length()) return false;
@@ -3721,6 +3928,7 @@ public final class MainActivity extends Activity {
             }
             @Override public boolean performAccessibilityAction(android.view.View view, int action, android.os.Bundle args) {
                 if (action == MOVE_LEFT_ACTION || action == MOVE_RIGHT_ACTION) {
+                    cancelWindowDrag();
                     int target = choices.indexOfChild(view) + (action == MOVE_LEFT_ACTION ? -1 : 1);
                     moveWindow(view, target); persistWindowOrder(); return true;
                 }
@@ -3765,7 +3973,11 @@ public final class MainActivity extends Activity {
                                 dismissWindowControls(); draggedWindow = tile; dragFrom = choices.indexOfChild(tile); dragTo = dragFrom;
                                 dragPreview = visibleWindowIds();
                                 draggedWindowOriginalZ = tile.getTranslationZ(); tile.setTranslationZ(dp(16));
-                                tile.setScaleX(1.08f); tile.setScaleY(1.08f);
+                                tile.animate().cancel();
+                                if (android.animation.ValueAnimator.areAnimatorsEnabled())
+                                    tile.animate().scaleX(1.08f).scaleY(1.08f).setDuration(150)
+                                            .setInterpolator(new android.view.animation.OvershootInterpolator(.5f)).start();
+                                else { tile.setScaleX(1.08f); tile.setScaleY(1.08f); }
                                 tile.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS);
                             }
                             if (draggedWindow == tile) {
@@ -3774,12 +3986,17 @@ public final class MainActivity extends Activity {
                                 if (target != dragTo && dragPreview != null && WindowOrder.move(dragPreview, (Long) tile.getTag(), target)) {
                                     dragTo = target;
                                     tile.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK);
+                                    for (int i = 0; i < choices.getChildCount(); i++) {
+                                        android.view.View other = choices.getChildAt(i); if (other == tile) continue;
+                                        float destination = WindowOrder.dragSlotOffset(i, dragFrom, dragTo) * slot;
+                                        other.animate().cancel();
+                                        if (android.animation.ValueAnimator.areAnimatorsEnabled())
+                                            other.animate().translationX(destination).setDuration(300)
+                                                    .setInterpolator(new android.view.animation.OvershootInterpolator(.5f)).start();
+                                        else other.setTranslationX(destination);
+                                    }
                                 }
                                 tile.setTranslationX(dx);
-                                for (int i = 0; i < choices.getChildCount(); i++) {
-                                    android.view.View other = choices.getChildAt(i); if (other == tile) continue;
-                                    other.setTranslationX(i > dragFrom && i <= dragTo ? -slot : i < dragFrom && i >= dragTo ? slot : 0);
-                                }
                             }
                         } else if (gesture.move(event.getX(), event.getY(), dp(12))) view.removeCallbacks(hold);
                         return true;
@@ -3938,7 +4155,7 @@ public final class MainActivity extends Activity {
         if (screenAwake != null) screenAwake.setForeground(false);
         super.onPause();
     }
-    @Override protected void onUserLeaveHint() { super.onUserLeaveHint(); if (pip != null) pip.leave(); }
+    @Override protected void onUserLeaveHint() { super.onUserLeaveHint(); closeOverlayPair(); if (pip != null) pip.leave(); }
     @Override public void onPictureInPictureModeChanged(boolean active, android.content.res.Configuration configuration) {
         super.onPictureInPictureModeChanged(active, configuration);
         if (active) keyframeForeground = false;
@@ -3964,11 +4181,12 @@ public final class MainActivity extends Activity {
         return super.dispatchTouchEvent(event);
     }
     @Override public boolean dispatchGenericMotionEvent(MotionEvent event) {
-        if (tourInputBlocked) return true;
+        if (tourInputBlocked || overlayPairBlocked) return true;
         return super.dispatchGenericMotionEvent(event);
     }
-    @Override protected void onStop() { if (pip != null && pip.active()) pip.stop(); dismissSettings(false); dismissMenu(); if (appDrawer != null) appDrawer.dismiss(); dismissWindowControls(); cancelWindowDrag(); stopFpsObservers(); clipboardReceipt.cancel(); if (pictureInput != null) pictureInput.cancel(); if (trackpad != null) trackpad.cancelGestures(); if (discovery != null) discovery.stop(); nearby.clear(); nearbyMacs.removeAllViews(); super.onStop(); }
+    @Override protected void onStop() { closeOverlayPair(); if (pip != null && pip.active()) pip.stop(); dismissSettings(false); dismissMenu(); if (appDrawer != null) appDrawer.dismiss(); dismissWindowControls(); cancelWindowDrag(); stopFpsObservers(); clipboardReceipt.cancel(); if (pictureInput != null) pictureInput.cancel(); if (trackpad != null) trackpad.cancelGestures(); if (discovery != null) discovery.stop(); nearby.clear(); nearbyMacs.removeAllViews(); super.onStop(); }
     @Override protected void onDestroy() {
+        closeOverlayPair();
         ui.removeCallbacks(clipboardChipTick);
         clearPairConfirmation();
         android.view.accessibility.AccessibilityManager accessibility = (android.view.accessibility.AccessibilityManager) getSystemService(ACCESSIBILITY_SERVICE);

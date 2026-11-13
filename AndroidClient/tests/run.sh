@@ -89,6 +89,8 @@ java -ea -cp "$test_dir" io.github.n2ray.sill.TextScaleTest
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/PhysicalMouse.java "$root"/tests/PhysicalMouseTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sill.PhysicalMouseTest
 javac -d "$test_dir" "$root"/tests/fixtures/android/content/SharedPreferences.java "$root"/app/src/main/java/io/github/n2ray/sill/PairLink.java "$root"/app/src/main/java/io/github/n2ray/sill/SavedMacs.java "$root"/app/src/main/java/io/github/n2ray/sill/SavedMacStore.java "$root"/app/src/main/java/io/github/n2ray/sill/SignedMacInfo.java "$root"/app/src/main/java/io/github/n2ray/sill/RecognitionTag.java "$root"/tests/SavedMacsTest.java
+javac -cp "$test_dir" -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/ConnectionRouteLabel.java "$root"/tests/ConnectionRouteLabelTest.java
+java -ea -cp "$test_dir" io.github.n2ray.sill.ConnectionRouteLabelTest
 java -ea -cp "$test_dir" io.github.n2ray.sill.SavedMacsTest
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/RecognitionTag.java "$root"/tests/RecognitionTagTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sill.RecognitionTagTest
@@ -117,5 +119,9 @@ javac -cp "$test_dir" -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/s
 java -ea -cp "$test_dir" io.github.n2ray.sill.SessionAuthorizationTest
 javac -cp "$test_dir" -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/PairingAuthorization.java "$root"/tests/PairingAuthorizationTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sill.PairingAuthorizationTest
+javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/OverlayPairingAuthorization.java "$root"/tests/OverlayPairingAuthorizationTest.java
+java -ea -cp "$test_dir" io.github.n2ray.sill.OverlayPairingAuthorizationTest
+javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/OverlayPairingDispatch.java "$root"/tests/OverlayPairingDispatchTest.java
+java -ea -cp "$test_dir" io.github.n2ray.sill.OverlayPairingDispatchTest
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/QrPairingAttempt.java "$root"/tests/QrPairingAttemptTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sill.QrPairingAttemptTest
