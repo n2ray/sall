@@ -15,6 +15,17 @@ final class WindowOrder {
         if (from < 0 || target < 0 || target >= values.size() || from == target) return false;
         values.remove(from); values.add(target, id); return true;
     }
+    static int dragTarget(int start, float displacement, int slot, int count) {
+        if (slot <= 0 || count <= 0) return -1;
+        float distance = displacement / slot;
+        int shift = (int) Math.copySign(Math.floor(Math.abs(distance) + 0.5), distance);
+        return Math.max(0, Math.min(count - 1, start + shift));
+    }
+    static List<Long> retainMissing(List<Long> visible, List<Long> saved) {
+        List<Long> result = new ArrayList<>(visible);
+        for (Long id : saved) if (!result.contains(id)) result.add(id);
+        return result;
+    }
     static List<Long> capped(List<Long> order, List<Long> live) {
         List<Long> result = new ArrayList<>();
         for (Long id : order) if (live.contains(id) && !result.contains(id)) result.add(id);

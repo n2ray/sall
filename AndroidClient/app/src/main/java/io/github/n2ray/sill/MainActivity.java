@@ -72,6 +72,7 @@ public final class MainActivity extends Activity {
     private volatile String clipboardSource = "";
     private boolean audioEnabled;
     private volatile AudioPlayer audio;
+    private volatile String audioEndpointHost;
     private LocalAudioControl localAudio;
     private PipController pip;
     private boolean pipEnabled, pipUi;
@@ -126,7 +127,12 @@ public final class MainActivity extends Activity {
     private String windowOrderMac = "";
     private java.util.List<Long> windowOrder = new java.util.ArrayList<>();
     private android.view.View draggedWindow;
+    private WindowHold activeWindowHold;
+    private android.view.View activeWindowHoldView;
+    private Runnable activeWindowHoldRunnable;
+    private float draggedWindowOriginalZ;
     private int dragFrom, dragTo;
+    private java.util.List<Long> dragPreview;
     private static final int MOVE_LEFT_ACTION = 0x00ff0001, MOVE_RIGHT_ACTION = 0x00ff0002;
     private static final int CLOSE_WINDOW_ACTION = 0x00ff0003, MINIMIZE_WINDOW_ACTION = 0x00ff0004, FULL_SCREEN_ACTION = 0x00ff0005;
     private final Runnable drawerUpdate = () -> {
@@ -729,6 +735,7 @@ public final class MainActivity extends Activity {
         if (!hasFocus) releaseHardwareKeys();
         if (!hasFocus && pictureInput != null) pictureInput.cancel();
         if (!hasFocus && trackpad != null) trackpad.cancelGestures();
+        if (!hasFocus) { dismissWindowControls(); cancelWindowDrag(); }
     }
     private void tapKey(int usage) { pressModifiers(); sendKey(usage, true); sendKey(usage, false); releaseModifiers(); }
     private void sendText(String text) {
@@ -881,6 +888,7 @@ public final class MainActivity extends Activity {
             android.util.Log.i("SillAndroid", "Viewport: queued " + Math.round(picture.getWidth() / density) + "x" + Math.round(picture.getHeight() / density) + " scale=" + textScale);
             sendAsync(9, v);
             lastViewportFps = fps;
+            updateAudioTiming();
         } catch (Exception e) { show("画面尺寸发送失败"); }
     }
     private int wantedViewportFps() {
@@ -906,8 +914,32 @@ public final class MainActivity extends Activity {
     }
     private void fpsChanged() {
         ui.post(() -> {
+            updateAudioTiming();
             if (fpsObserversStarted && connection != null && lastViewportFps != wantedViewportFps()) scheduleViewport();
         });
+    }
+    private void updateAudioTiming() {
+        AudioPlayer player = audio;
+        if (player == null) return;
+        android.view.Display display = root == null ? null : root.getDisplay();
+        float hz = display == null ? 60 : display.getRefreshRate();
+        if (!Float.isFinite(hz) || hz <= 0) hz = 60;
+        JSONObject settings = hostSettings == null ? null : hostSettings.optJSONObject("settings");
+        int fps = Math.min(lastViewportFps > 0 ? lastViewportFps : 60, settings == null ? 60 : settings.optInt("maxFPS", 60));
+        JSONObject stream = hostSettings == null ? null : hostSettings.optJSONObject("stream");
+        double reportedFPS = stream == null ? Double.NaN : stream.optDouble("fps", Double.NaN);
+        player.timing(1.0 / hz, AudioRuntime.streamFPS(reportedFPS, fps));
+        android.net.NetworkCapabilities caps = null;
+        try {
+            android.net.ConnectivityManager networks = (android.net.ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            if (networks != null) caps = networks.getNetworkCapabilities(networks.getActiveNetwork());
+        } catch (RuntimeException ignored) { }
+        boolean tunnel = caps == null || caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)
+                || caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR);
+        java.net.InetAddress address = null;
+        try { if (audioEndpointHost != null) address = android.net.InetAddresses.parseNumericAddress(audioEndpointHost); }
+        catch (IllegalArgumentException ignored) { }
+        player.setRemote(ViewportFps.away(address, tunnel));
     }
     private void startFpsObservers() {
         if (fpsObserversStarted) return;
@@ -1339,7 +1371,7 @@ public final class MainActivity extends Activity {
                             synchronized (outputLock) { initialSource = new InitialSourcePolicy(); connection = session; }
                             session.sessionTimeout();
                             ui.post(() -> { if (connection == session) { renderLockOverlay(sessionLock, session); connectionContainer.setVisibility(android.view.View.GONE); sessionPanel.setVisibility(android.view.View.VISIBLE); picture.post(this::sendViewport); } });
-                            if (wantsAudio) { audio = new AudioPlayer(text -> showFor(session, text)); localAudio.setWatched(pictureWatched()); localAudio.setPlayer(audio); }
+                            if (wantsAudio) { audioEndpointHost = route.endpoint().host(); audio = new AudioPlayer(text -> showFor(session, text)); localAudio.setWatched(pictureWatched()); localAudio.setPlayer(audio); ui.post(this::updateAudioTiming); }
                             for (StreamWire.Message initial : route.value().initial()) handle(initial, session);
                             KeyframeRecovery sessionRecovery = keyframeRecovery;
                             var ping = heartbeat.scheduleAtFixedRate(() -> {
@@ -1460,6 +1492,7 @@ public final class MainActivity extends Activity {
         handle(message, messageSession, null);
     }
     private void handle(StreamWire.Message message, SillConnection messageSession, RemoteDial.Attempt candidateAttempt) throws Exception {
+        long audioArrivalNanos = System.nanoTime();
         switch (message.kind()) {
             case 18 -> {
                 if (messageSession != connection || message.payload().length > 98304) return;
@@ -1588,6 +1621,8 @@ public final class MainActivity extends Activity {
                 if (pong.length == 8) {
                     double elapsed = System.nanoTime() / 1e9 - ByteBuffer.wrap(pong).getDouble();
                     if (Double.isFinite(elapsed) && elapsed >= 0 && elapsed <= 60) {
+                        AudioPlayer player = audio;
+                        if (player != null && messageSession == connection) player.rttSample(elapsed, audioArrivalNanos);
                         long now = android.os.SystemClock.uptimeMillis();
                         if (now - keyframeRttWindow >= 1000) { keyframeRttWindow = now; keyframeWorstRtt = 0; }
                         keyframeWorstRtt = Math.max(keyframeWorstRtt, (long) (elapsed * 1000));
@@ -1657,9 +1692,12 @@ public final class MainActivity extends Activity {
                 ui.post(() -> { appList = apps; refreshDrawer(); });
             }
             case 16 -> {
+                if (connection != messageSession) return;
                 JSONObject state = new JSONObject(new String(message.payload(), StandardCharsets.UTF_8));
                 ui.post(() -> {
+                    if (connection != messageSession) return;
                     hostSettings = state;
+                    updateAudioTiming();
                     if (scaleControl != null) scaleControl.refresh();
                     if (pendingSettingsToken != 0 && state.optInt("answering", -1) == pendingSettingsToken) {
                         JSONObject s = state.optJSONObject("settings"); Object actual = s == null ? null : s.opt(pendingSettingsField);
@@ -1722,7 +1760,7 @@ public final class MainActivity extends Activity {
                     });
                 }
             }
-            case 43 -> { AudioPlayer player = audio; if (player != null) { byte[] data = message.payload(); localAudio.received(data); player.receive(data); } }
+            case 43 -> { AudioPlayer player = audio; if (player != null && messageSession == connection) { byte[] data = message.payload(); localAudio.received(data); player.receive(data, message.timestamp(), audioArrivalNanos); } }
             case 0 -> {
                 Hevc.Parameters params = Hevc.parameters(message.payload()); nalSize = params.lengthSize();
                 lastParameters = params;
@@ -1733,6 +1771,8 @@ public final class MainActivity extends Activity {
                 else interruptPicture();
             }
             case 1 -> {
+                AudioPlayer player = audio;
+                if (player != null && messageSession == connection) player.videoFrame(message.timestamp(), audioArrivalNanos);
                 HostLockState lock = hostLock;
                 if (lock == null || lock.isCovered()) return;
                 Surface target; long epoch;
@@ -1929,13 +1969,18 @@ public final class MainActivity extends Activity {
         if (from < 0 || target < 0 || target >= choices.getChildCount() || from == target) return;
         java.util.List<Long> ids = visibleWindowIds();
         if (!WindowOrder.move(ids, (Long) tile.getTag(), target)) return;
-        choices.removeViewAt(from); choices.addView(tile, target); windowOrder = ids;
+        choices.removeViewAt(from); choices.addView(tile, target); windowOrder = WindowOrder.retainMissing(ids, windowOrder);
         tile.sendAccessibilityEvent(android.view.accessibility.AccessibilityEvent.TYPE_VIEW_SELECTED);
     }
     private void cancelWindowDrag() {
+        if (activeWindowHoldView != null && activeWindowHoldRunnable != null)
+            activeWindowHoldView.removeCallbacks(activeWindowHoldRunnable);
+        if (activeWindowHold != null) activeWindowHold.cancel();
+        activeWindowHold = null; activeWindowHoldView = null; activeWindowHoldRunnable = null;
         if (draggedWindow == null) return;
+        draggedWindow.setTranslationZ(draggedWindowOriginalZ);
         for (int i = 0; i < choices.getChildCount(); i++) { choices.getChildAt(i).setTranslationX(0); choices.getChildAt(i).setScaleX(1); choices.getChildAt(i).setScaleY(1); }
-        draggedWindow = null; choices.requestDisallowInterceptTouchEvent(false);
+        draggedWindow = null; dragPreview = null; choices.requestDisallowInterceptTouchEvent(false);
     }
     private void dropWindowDrag() {
         android.view.View tile = draggedWindow; int target = dragTo;
@@ -2010,25 +2055,33 @@ public final class MainActivity extends Activity {
             public boolean onTouch(android.view.View view, android.view.MotionEvent event) {
                 switch (event.getActionMasked()) {
                     case android.view.MotionEvent.ACTION_DOWN -> {
+                        cancelWindowDrag();
                         gesture.begin(event.getX(), event.getY());
+                        activeWindowHold = gesture; activeWindowHoldView = view; activeWindowHoldRunnable = hold;
                         gestureSession = connection;
                         lastRawX = event.getRawX(); lastRawY = event.getRawY();
                         int tenths = Math.max(2, Math.min(20, getPreferences(0).getInt("thumbnailHoldTenths", 5)));
                         view.postDelayed(hold, tenths * 100L); return true;
                     }
                     case android.view.MotionEvent.ACTION_MOVE -> {
-                        if (!keyframeForeground || gestureSession == null || connection != gestureSession) { view.removeCallbacks(hold); gesture.cancel(); if (draggedWindow == tile) cancelWindowDrag(); return true; }
+                        if (!keyframeForeground || gestureSession == null || connection != gestureSession) { view.removeCallbacks(hold); gesture.cancel(); if (draggedWindow == tile || activeWindowHold == gesture) cancelWindowDrag(); return true; }
                         lastRawX = event.getRawX(); lastRawY = event.getRawY();
                         if (gesture.isHeld()) {
                             float dx = lastRawX - heldX, dy = lastRawY - heldY;
                             if (draggedWindow == null && (Math.abs(dx) > dp(8) || Math.abs(dy) > dp(8))) {
                                 dismissWindowControls(); draggedWindow = tile; dragFrom = choices.indexOfChild(tile); dragTo = dragFrom;
+                                dragPreview = visibleWindowIds();
+                                draggedWindowOriginalZ = tile.getTranslationZ(); tile.setTranslationZ(dp(16));
                                 tile.setScaleX(1.08f); tile.setScaleY(1.08f);
                                 tile.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS);
                             }
                             if (draggedWindow == tile) {
                                 int slot = tile.getWidth() + dp(6);
-                                dragTo = Math.max(0, Math.min(choices.getChildCount() - 1, dragFrom + Math.round(dx / slot)));
+                                int target = WindowOrder.dragTarget(dragFrom, dx, slot, choices.getChildCount());
+                                if (target != dragTo && dragPreview != null && WindowOrder.move(dragPreview, (Long) tile.getTag(), target)) {
+                                    dragTo = target;
+                                    tile.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK);
+                                }
                                 tile.setTranslationX(dx);
                                 for (int i = 0; i < choices.getChildCount(); i++) {
                                     android.view.View other = choices.getChildAt(i); if (other == tile) continue;
@@ -2040,12 +2093,12 @@ public final class MainActivity extends Activity {
                     }
                     case android.view.MotionEvent.ACTION_UP -> {
                         view.removeCallbacks(hold);
-                        if (!keyframeForeground || gestureSession == null || connection != gestureSession) { gesture.cancel(); if (draggedWindow == tile) cancelWindowDrag(); return true; }
+                        if (!keyframeForeground || gestureSession == null || connection != gestureSession) { gesture.cancel(); if (draggedWindow == tile || activeWindowHold == gesture) cancelWindowDrag(); return true; }
                         if (draggedWindow == tile) dropWindowDrag();
-                        else if (gesture.end()) view.performClick();
+                        else { boolean tap = gesture.end(); if (activeWindowHold == gesture) cancelWindowDrag(); if (tap) view.performClick(); }
                         if (view.getParent() != null) view.getParent().requestDisallowInterceptTouchEvent(false); return true;
                     }
-                    case android.view.MotionEvent.ACTION_CANCEL -> { view.removeCallbacks(hold); gesture.cancel(); if (draggedWindow == tile) { if (keyframeForeground && gestureSession != null && connection == gestureSession) dropWindowDrag(); else cancelWindowDrag(); } if (view.getParent() != null) view.getParent().requestDisallowInterceptTouchEvent(false); return true; }
+                    case android.view.MotionEvent.ACTION_CANCEL -> { view.removeCallbacks(hold); gesture.cancel(); if (draggedWindow == tile || activeWindowHold == gesture) cancelWindowDrag(); if (view.getParent() != null) view.getParent().requestDisallowInterceptTouchEvent(false); return true; }
                     default -> { return true; }
                 }
             }
