@@ -271,7 +271,7 @@ public final class MainActivity extends Activity {
                     if (running) { show("请先取消当前连接。"); return; }
                     host.setText(address); port.setText(String.valueOf(number));
                     if (recognized != null) start(false, recognized, tag);
-                    else if (savedMacStore.pin(new SavedMacs.Endpoint(address, number)) != null) start(false);
+                    else if (savedMacStore.pin(new SavedMacs.Endpoint(address, number)) != null) start(false, null, null, false);
                     else { setAddingMac(true, true); show("请在 Mac 的 Sill 中打开配对窗口并输入配对码。"); }
                 });
                 styleConnectionRow(row);
@@ -368,7 +368,7 @@ public final class MainActivity extends Activity {
                 int number = selected.port() == 0 ? link.port : selected.port();
                 getPreferences(0).edit().putString("host", selected.host()).putString("port", String.valueOf(number)).apply();
                 host.setText(selected.host()); port.setText(String.valueOf(number)); code.setText(""); refreshSavedMacs();
-                start(false);
+                start(false, null, null, false);
             });
         }); } catch (java.util.concurrent.RejectedExecutionException busy) {
             cancelQrPairing(); show("配对线程仍在结束，请稍后重试。");
@@ -2093,11 +2093,14 @@ public final class MainActivity extends Activity {
         }, 5000);
     }
     private void connect() { start(true); }
-    private void start(boolean pairing) { start(pairing, null); }
+    private void start(boolean pairing) { start(pairing, null, null, true); }
     private void start(boolean pairing, SavedMacs.Identity selectedIdentity) {
-        start(pairing, selectedIdentity, null);
+        start(pairing, selectedIdentity, null, false);
     }
     private void start(boolean pairing, SavedMacs.Identity selectedIdentity, String recognitionTag) {
+        start(pairing, selectedIdentity, recognitionTag, false);
+    }
+    private void start(boolean pairing, SavedMacs.Identity selectedIdentity, String recognitionTag, boolean typedByUser) {
         String address = host.getText().toString().trim();
         String password = code.getText().toString();
         int number;
@@ -2201,7 +2204,7 @@ public final class MainActivity extends Activity {
                             synchronized (savedMacStore) {
                                 authorization.track(session);
                                 verifiedThisRun = route.endpoint();
-                                savedMacStore.connected(pin, route.endpoint(), selectedIdentity == null && route.endpoint().equals(endpoint));
+                                savedMacStore.connected(pin, route.endpoint(), SavedMacs.manuallyEnteredRoute(typedByUser, endpoint, route.endpoint()));
                             }
                             HostLockState sessionLock = new HostLockState(false); sessionLock.requireFreshFrame();
                             picturePresented = false; hostLock = sessionLock; keyframeRecovery = new KeyframeRecovery(); keyframeStreaming = false; keyframeWorstRtt = 0; keyframeRttWindow = 0; recoveryFrame.set(null); lastParameters = null; revealFrame.set(null); recoveryGeneration = -1;
@@ -2211,7 +2214,7 @@ public final class MainActivity extends Activity {
                                 synchronized (outputLock) { initialSource = new InitialSourcePolicy(); connection = session; }
                             }
                             session.sessionTimeout();
-                            ui.post(() -> { if (connection == session) { tourNewSession(session); renderLockOverlay(sessionLock, session); setAddingMac(false, false); connectionContainer.setVisibility(android.view.View.GONE); sessionPanel.setVisibility(android.view.View.VISIBLE); updateSessionLayout.run(); picture.post(this::sendViewport); } });
+                            ui.post(() -> { if (connection == session) { refreshSavedMacs(); tourNewSession(session); renderLockOverlay(sessionLock, session); setAddingMac(false, false); connectionContainer.setVisibility(android.view.View.GONE); sessionPanel.setVisibility(android.view.View.VISIBLE); updateSessionLayout.run(); picture.post(this::sendViewport); } });
                             if (wantsAudio) { audioEndpointHost = route.endpoint().host(); audio = new AudioPlayer(text -> showFor(session, text)); localAudio.setWatched(pictureWatched()); localAudio.setPlayer(audio); ui.post(this::updateAudioTiming); }
                             for (StreamWire.Message initial : route.value().initial()) handle(initial, session);
                             KeyframeRecovery sessionRecovery = keyframeRecovery;

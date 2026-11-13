@@ -9,6 +9,9 @@ import java.util.Map;
 /** Identity rules shared by storage, pairing and the saved connection list. */
 final class SavedMacs {
     static final String PREFIX = "savedMac.v1:";
+    static boolean manuallyEnteredRoute(boolean typedByUser, Endpoint requested, Endpoint actual) {
+        return typedByUser && requested.equals(actual);
+    }
     record Endpoint(String host, int port) {
         Endpoint {
             if (host == null || host.isBlank() || host.length() > 253 || port < 1 || port > 65535

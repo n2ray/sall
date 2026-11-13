@@ -97,6 +97,27 @@ final class SavedMacStore {
                     mac.advertised(), mac.remembered(), mac.listedAt()));
             write(records, preferences.edit()).apply(); return;
         }
+        // Only an explicitly typed and successfully authenticated legacy endpoint may repair its own damaged record.
+        if (!typed) return;
+        Map<String, ?> values = preferences.getAll();
+        if (pin == null || pin.length != 32) return;
+        String id = PairLink.macId(pin), base = SavedMacs.PREFIX + id + ":";
+        if (records.stream().anyMatch(mac -> mac.identity().macId().equals(id))) return;
+        Object legacy = values.get(endpoint.legacyKey()), stored = values.get(base + "pin");
+        Object origins = values.get(base + "addressOrigins"), issued = values.get(base + "infoIssuedAt");
+        if (!(legacy instanceof String oldPin) || !(stored instanceof String recordPin)
+                || !(origins instanceof String) || !(issued instanceof String timestamp)) return;
+        try {
+            if (!java.security.MessageDigest.isEqual(pin, SavedMacs.decodePin(oldPin))
+                    || !java.security.MessageDigest.isEqual(pin, SavedMacs.decodePin(recordPin))) return;
+            double at = Double.parseDouble(timestamp);
+            if (!Double.isFinite(at) || at < 0) return;
+            String name = values.get(base + "name") instanceof String text ? text : "";
+            String recognition = values.get(base + "recognition") instanceof String text ? text : "";
+            SavedMacs.Identity identity = new SavedMacs.Identity(id, recordPin, name, recognition);
+            records.add(new SavedMacs.Mac(identity, List.of(endpoint), endpoint, at));
+            write(records, preferences.edit()).apply();
+        } catch (IllegalArgumentException ignored) { }
     }
 
     // Call only after SignedMacInfo.verify has authenticated the payload against this TLS session.

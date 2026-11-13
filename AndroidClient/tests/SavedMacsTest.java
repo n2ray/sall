@@ -15,6 +15,9 @@ public final class SavedMacsTest {
         SavedMacs.Endpoint lan = new SavedMacs.Endpoint("192.168.1.7", 7455);
         SavedMacs.Endpoint vpn = new SavedMacs.Endpoint("100.87.1.2", 7455);
         SavedMacs.Endpoint ipv6 = new SavedMacs.Endpoint("fd7a:115c:a1e0::1234", 7455);
+        check(SavedMacs.manuallyEnteredRoute(true, lan, lan), "Only the exact address the user entered becomes manual");
+        check(!SavedMacs.manuallyEnteredRoute(true, lan, vpn), "Fallback from a typed address is not itself typed");
+        check(!SavedMacs.manuallyEnteredRoute(false, lan, lan), "Discovery, QR, and saved-card routes are not manually entered");
         MemoryPreferences preferences = new MemoryPreferences();
         preferences.values.put(lan.legacyKey(), SavedMacs.encode(first));
         preferences.values.put(vpn.legacyKey(), SavedMacs.encode(first));
@@ -31,6 +34,45 @@ public final class SavedMacsTest {
 
         SavedMacs.Identity one = SavedMacs.Identity.paired(first, PairLink.macId(first), "Office Mac", key);
         SavedMacs.Identity two = SavedMacs.Identity.paired(second, PairLink.macId(second), "Office Mac", key);
+        MemoryPreferences damaged = new MemoryPreferences();
+        SavedMacStore repair = new SavedMacStore(damaged); repair.paired(one, lan);
+        String damagedBase = SavedMacs.PREFIX + one.macId() + ":";
+        damaged.values.put(damagedBase + "infoIssuedAt", "100");
+        damaged.values.put(damagedBase + "addressOrigins", "broken");
+        check(repair.all().isEmpty() && java.util.Arrays.equals(repair.pin(lan), first),
+                "A damaged record can leave only the old pinned connection path");
+        repair.connected(first, lan, false);
+        check(repair.all().isEmpty(), "A non-manual connection cannot promote an old endpoint to a typed address");
+        repair.connected(second, lan, true);
+        check(repair.all().isEmpty(), "Another TLS identity cannot repair the legacy endpoint");
+        repair.connected(first, lan, true);
+        SavedMacs.Mac recovered = repair.all().get(0);
+        check(recovered.identity().equals(one) && recovered.addresses().equals(List.of(lan))
+                        && recovered.infoIssuedAt() == 100 && recovered.preferred().equals(lan),
+                "A verified legacy connection repairs only its own endpoint and retains replay state");
+        check(!repair.refresh(first, new SignedMacInfo.Update(one.macId(), "stale", 99, true, List.of(vpn))),
+                "Repair must not reset signed Mac info replay protection");
+        repair.forget(one); repair.connected(first, lan, true);
+        check(repair.all().isEmpty(), "A late connection cannot restore an explicitly forgotten pin");
+        MemoryPreferences badTimestamp = new MemoryPreferences();
+        SavedMacStore unsafeRepair = new SavedMacStore(badTimestamp); unsafeRepair.paired(one, lan);
+        badTimestamp.values.put(damagedBase + "infoIssuedAt", "invalid");
+        badTimestamp.values.put(damagedBase + "addressOrigins", "broken");
+        unsafeRepair.connected(first, lan, true);
+        check(unsafeRepair.all().isEmpty(), "Cannot repair if the anti-replay timestamp is invalid");
+        MemoryPreferences expiredPrefs = new MemoryPreferences();
+        SavedMacStore expiredRepair = new SavedMacStore(expiredPrefs); expiredRepair.paired(one, lan);
+        expiredPrefs.values.put(vpn.legacyKey(), one.fingerprint());
+        expiredPrefs.values.put(damagedBase + "addressOrigins", "remembered\tvpn\t1\t" + vpn.legacyKey() + "\nbroken");
+        expiredRepair.connected(first, vpn, false);
+        check(expiredRepair.all().isEmpty(), "An expired advertised VPN route cannot be recovered as manual after a damaged record");
+        MemoryPreferences collisionPrefs = new MemoryPreferences();
+        SavedMacStore collisionRepair = new SavedMacStore(collisionPrefs); collisionRepair.paired(one, lan);
+        byte[] sameIdOtherPin = first.clone(); sameIdOtherPin[31] = 1;
+        collisionPrefs.values.put(damagedBase + "pin", SavedMacs.encode(sameIdOtherPin));
+        collisionPrefs.values.put(damagedBase + "addressOrigins", "broken");
+        collisionRepair.connected(first, lan, true);
+        check(collisionRepair.all().isEmpty(), "A matching short Mac ID cannot replace a different full certificate pin");
         store.paired(one, lan);
         store.paired(two, new SavedMacs.Endpoint("192.168.1.8", 7455));
         check(store.all().size() == 2, "Different pins with the same name must not merge");
