@@ -163,6 +163,7 @@ public final class MainActivity extends Activity {
     private android.app.AlertDialog settingsDialog;
     private Runnable refreshSettingsMute;
     private Runnable refreshInlineHostSettings;
+    private Runnable refreshSettingsCapabilities;
     private android.widget.PopupMenu qualityMenu;
     private static final String[] QUALITY_NAMES = {"低", "节省", "均衡", "高", "专业", "极高", "极限"};
     private static final int[] QUALITY_RATES = {4000000, 8000000, 15000000, 25000000, 40000000, 80000000, 150000000};
@@ -254,6 +255,7 @@ public final class MainActivity extends Activity {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        clipboardEnabled = initialClipboardEnabled();
         savedMacStore = new SavedMacStore(getPreferences(0));
         loadTourMemory();
         android.view.accessibility.AccessibilityManager accessibility = (android.view.accessibility.AccessibilityManager) getSystemService(ACCESSIBILITY_SERVICE);
@@ -296,7 +298,6 @@ public final class MainActivity extends Activity {
         });
         root.setBackgroundColor(0xff08090b);
         buildConnectionScreen();
-        clipboardEnabled = getPreferences(0).getBoolean("shareClipboard", false);
         pasteRightAway = getPreferences(0).getBoolean("pasteRightAway", true);
         audioEnabled = getPreferences(0).getBoolean("experimentalAudio", false);
         localAudio = new LocalAudioControl(this, getPreferences(0).getBoolean("soundMuted", false), muted -> {
@@ -1956,6 +1957,32 @@ public final class MainActivity extends Activity {
         video.setTranslationX(enlarged.left() + enlarged.width() / 2 - picture.getWidth() / 2f);
         video.setTranslationY(enlarged.top() + enlarged.height() / 2 - picture.getHeight() / 2f);
     }
+    private boolean initialClipboardEnabled() {
+        android.content.SharedPreferences prefs = getPreferences(0);
+        long first = 0, updated = 0;
+        try {
+            android.content.pm.PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
+            first = info.firstInstallTime; updated = info.lastUpdateTime;
+        } catch (android.content.pm.PackageManager.NameNotFoundException | RuntimeException unavailable) {
+            // Unknown installation history must retain the previous default.
+        }
+        ClipboardDefaultPolicy.Store store = new ClipboardDefaultPolicy.Store() {
+            public boolean contains() { return prefs.contains("shareClipboard"); }
+            public boolean value() { return prefs.getBoolean("shareClipboard", false); }
+            public boolean hasExistingData() { return !prefs.getAll().isEmpty(); }
+            public boolean commit(boolean enabled) {
+                try {
+                    boolean saved = prefs.edit().putBoolean("shareClipboard", enabled).commit();
+                    if (!saved) android.util.Log.w("SillAndroid", "Clipboard default could not be persisted");
+                    return saved;
+                } catch (RuntimeException failure) {
+                    android.util.Log.w("SillAndroid", "Clipboard default could not be persisted");
+                    throw failure;
+                }
+            }
+        };
+        return ClipboardDefaultPolicy.initialize(store, first, updated, System.currentTimeMillis());
+    }
     private void settings() { settings(false); }
     private void settings(boolean reanchor) {
         if (!reanchor) invalidateChipAcknowledged();
@@ -2064,16 +2091,23 @@ public final class MainActivity extends Activity {
         addSettingsHeading(rows, "Mac");
         LinearLayout hostRows = new LinearLayout(this); hostRows.setOrientation(LinearLayout.VERTICAL); rows.addView(hostRows);
         String[] hostSnapshot = {null};
+        TextView[] audioNoteView = {null};
         refreshInlineHostSettings = () -> {
             if (settingsOverlay != overlay) return;
             JSONObject state = hostSettings, values = state == null ? null : state.optJSONObject("settings");
+            String audioNote = values != null && Boolean.TRUE.equals(values.opt("sendAudio"))
+                    && state.opt("audioNote") instanceof String text ? text.trim() : "";
+            if (audioNoteView[0] != null) {
+                audioNoteView[0].setText(audioNote);
+                audioNoteView[0].setVisibility(audioNote.isEmpty() ? android.view.View.GONE : android.view.View.VISIBLE);
+            }
             String snapshot = values == null ? "none" : values.opt("bitrate") + "|" + values.opt("captureScale") + "|"
                     + values.opt("maxFPS") + "|" + values.opt("prioritizeSpeed") + "|" + values.opt("virtualDisplay")
                     + "|" + values.opt("sendAudio") + "|" + state.opt("virtualDisplayAvailable") + "|" + state.opt("virtualDisplayNote");
             snapshot += "|" + pendingSettingsToken + "|" + pendingSettingsField;
             if (snapshot.equals(hostSnapshot[0])) return;
             if (qualityMenu != null) { qualityMenu.dismiss(); qualityMenu = null; }
-            hostSnapshot[0] = snapshot; hostRows.removeAllViews();
+            hostSnapshot[0] = snapshot; hostRows.removeAllViews(); audioNoteView[0] = null;
             if (values == null) { addSettingsNote(hostRows, "正在等待 Mac 提供设置。"); return; }
             LinearLayout streamGroup = new LinearLayout(this); streamGroup.setOrientation(LinearLayout.VERTICAL);
             streamGroup.setBackground(shape(0xff23262c, 12));
@@ -2083,18 +2117,27 @@ public final class MainActivity extends Activity {
             addHostChoice(streamGroup, "分辨率", "captureScale", values.opt("captureScale"));
             addHostChoice(streamGroup, "帧率", "maxFPS", values.opt("maxFPS"));
             if (streamGroup.getChildCount() == 0) hostRows.removeView(streamGroup);
-            if (values.opt("prioritizeSpeed") instanceof Boolean value)
+            if (values.opt("prioritizeSpeed") instanceof Boolean value) {
                 addHostToggle(hostRows, "优先编码速度", "prioritizeSpeed", value, true, null);
+                addSettingsNote(hostRows, "Mac 忙碌时可降低延迟，画面可能更柔和。");
+            }
             if (values.opt("virtualDisplay") instanceof Boolean value) {
                 Boolean available = state.opt("virtualDisplayAvailable") instanceof Boolean b ? b : null;
                 boolean enabled = HostSettingsOptions.canChangeVirtualDisplay(value, available);
                 String note = state.opt("virtualDisplayNote") instanceof String text ? text.trim() : "";
                 if (note.isEmpty() && !enabled) note = "此 Mac 暂不支持虚拟显示器";
                 addHostToggle(hostRows, "虚拟显示器", "virtualDisplay", value, enabled, note);
+                if (note.isEmpty()) addSettingsNote(hostRows, "所选窗口在串流时移到 Mac 的不可见显示器上，被遮挡时仍可更新。");
+                addSettingsNote(hostRows, "对连接这台 Mac 的所有设备生效；画面会短暂重新启动。");
             }
             Boolean sound = values.opt("sendAudio") instanceof Boolean b ? b : null;
             addHostToggle(hostRows, "Mac 发送声音（测试版）", "sendAudio", Boolean.TRUE.equals(sound), sound != null,
                     sound == null ? "更新 Mac 上的 Sill 以使用声音。" : null);
+            if (Boolean.TRUE.equals(sound)) {
+                audioNoteView[0] = addSettingsNote(hostRows, audioNote);
+                audioNoteView[0].setVisibility(audioNote.isEmpty() ? android.view.View.GONE : android.view.View.VISIBLE);
+            }
+            if (sound != null) addSettingsNote(hostRows, "开启后 Mac 向连接的设备发送声音，Mac 自己也会继续播放。手机声音还需在下方开启测试并重新连接；本机静音只影响这台手机。");
         };
         refreshInlineHostSettings.run();
         addSettingsHeading(rows, "此设备");
@@ -2114,6 +2157,7 @@ public final class MainActivity extends Activity {
             return null;
         };
         LinearLayout clipboardGroup = null;
+        TextView[] capabilityNotes = new TextView[2];
         for (int index : order) {
             if (index == holdIndex) { addThumbnailHoldRow(rows); continue; }
             String label = index == pipIndex ? (pip == null || !pip.supported() ? items[index] : "画中画")
@@ -2151,7 +2195,24 @@ public final class MainActivity extends Activity {
                     || (offerLarge && index == 6 && (android.os.Build.VERSION.SDK_INT < 30 || portraitImeHeight <= 0))) {
                 row.setAlpha(.5f);
             }
+            if (index == pipIndex) addSettingsNote(rows, pip == null || !pip.supported()
+                    ? "此设备不支持画中画。" : "离开 Sill 时，Mac 画面可在其他应用上方继续播放；点小窗可返回 Sill。是否允许画中画也取决于系统设置。");
+            if (offerLarge && index == 6) addSettingsNote(rows, android.os.Build.VERSION.SDK_INT < 30
+                    ? "需要 Android 11 或更新版本读取键盘高度。" : portraitImeHeight <= 0
+                    ? "请先打开并关闭键盘，让 Sill 测量键盘高度。"
+                    : "竖屏时扩大窗口画面并收起缩略图；桌面保留缩略图。可从“应用”切换窗口，并用 Aa 调整窗口大小。关闭设置后生效。");
+            if (index == 2) capabilityNotes[0] = addSettingsNote(rows, HostSettingsOptions.clipboardNote(hostClipboardAvailable, clipboardEnabled, pasteRightAway));
+            if (index == 4) addSettingsNote(rows, "反转画面上的单指拖动和触控板双指滚动方向，包括惯性滚动。");
+            if (index == 5) capabilityNotes[1] = addSettingsNote(rows, HostSettingsOptions.gesturesNote(gestures, hostGestures));
+            if (index == 3) addSettingsNote(rows, !AudioPlayer.supported()
+                    ? "此设备未报告支持 AAC-ELD 解码，无法开启声音测试。" : "手机声音测试设置在下次连接后生效；Mac 发送声音也需开启。");
+            if (index == muteIndex) addSettingsNote(rows, "仅静音此手机；不改变 Mac 的声音设置。");
         }
+        refreshSettingsCapabilities = () -> {
+            if (settingsOverlay != overlay) return;
+            if (capabilityNotes[0] != null) capabilityNotes[0].setText(HostSettingsOptions.clipboardNote(hostClipboardAvailable, clipboardEnabled, pasteRightAway));
+            if (capabilityNotes[1] != null) capabilityNotes[1].setText(HostSettingsOptions.gesturesNote(getPreferences(0).getBoolean("macGestures", true), hostGestures));
+        };
         Button disconnectButton = button(panel, "⊗  断开连接", v -> choose.accept(items.length - 1));
         disconnectButton.setTextColor(0xff9bb7ff); disconnectButton.setTextSize(15);
         disconnectButton.setGravity(android.view.Gravity.START | android.view.Gravity.CENTER_VERTICAL);
@@ -2183,9 +2244,9 @@ public final class MainActivity extends Activity {
         heading.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
         heading.setPadding(dp(14), dp(6), dp(14), dp(6)); heading.setAccessibilityHeading(true); rows.addView(heading);
     }
-    private void addSettingsNote(LinearLayout rows, String text) {
-        TextView note = new TextView(this); note.setText(text); note.setTextSize(12); note.setTextColor(0xffa4abb5);
-        note.setPadding(dp(14), dp(2), dp(14), dp(8)); rows.addView(note);
+    private TextView addSettingsNote(LinearLayout rows, String text) {
+        TextView note = new TextView(this); note.setText(text); note.setTextSize(13); note.setTextColor(0xffa4abb5);
+        note.setPadding(dp(14), dp(2), dp(14), dp(8)); rows.addView(note); return note;
     }
     private void addThumbnailHoldRow(LinearLayout rows) {
         ThumbnailHoldRow row = new ThumbnailHoldRow();
@@ -2422,7 +2483,7 @@ public final class MainActivity extends Activity {
             getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(settingsBack); settingsBack = null;
         }
         android.widget.FrameLayout overlay = settingsOverlay; settingsOverlay = null;
-        settingsScroll = null; refreshInlineHostSettings = null;
+        settingsScroll = null; refreshInlineHostSettings = null; refreshSettingsCapabilities = null;
         if (overlay != null && overlay.getParent() instanceof android.view.ViewGroup parent) parent.removeView(overlay);
         android.app.AlertDialog child = settingsChild; settingsChild = null;
         if (child != null) child.dismiss();
@@ -2439,7 +2500,7 @@ public final class MainActivity extends Activity {
         try {
             if (qualityMenu != null) { qualityMenu.dismiss(); qualityMenu = null; }
             if (settingsScroll != null) settingsScrollY = settingsScroll.getScrollY();
-            settingsScroll = null; refreshInlineHostSettings = null;
+            settingsScroll = null; refreshInlineHostSettings = null; refreshSettingsCapabilities = null;
             if (android.os.Build.VERSION.SDK_INT >= 33 && settingsBack != null) {
                 getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(settingsBack); settingsBack = null;
             }
@@ -2453,7 +2514,7 @@ public final class MainActivity extends Activity {
     private void finishSettings() {
         if (!settingsOpen) return;
         refreshSettingsMute = null;
-        settingsScroll = null; settingsScrollY = 0; refreshInlineHostSettings = null;
+        settingsScroll = null; settingsScrollY = 0; refreshInlineHostSettings = null; refreshSettingsCapabilities = null;
         android.util.Log.i("SillAndroid", "Settings: finished");
         settingsOpen = false;
         if (updateSessionLayout != null) updateSessionLayout.run();
@@ -3301,6 +3362,7 @@ public final class MainActivity extends Activity {
                     if (clipboardEnabled && !clipboardSubscribed && hostClipboardAvailable) updateClipboard();
                     int count = list.optInt("desktopDisplays", 0), current = list.optInt("desktopDisplay", 0);
                     hostGestures = list.optInt("gestures", 0);
+                    if (refreshSettingsCapabilities != null) refreshSettingsCapabilities.run();
                     hostKeyRepeat = list.optInt("keyRepeat", 0) >= 1;
                     hostKeyRepeatKnown = true;
                     trackpad.setMacGesturesEnabled(hostGestures >= 1 && getPreferences(0).getBoolean("macGestures", true));

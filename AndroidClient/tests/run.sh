@@ -42,6 +42,8 @@ javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/ClipboardCha
 java -ea -cp "$test_dir" io.github.n2ray.sill.ClipboardChangeTrackerTest
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/ClipboardPastePolicy.java "$root"/tests/ClipboardPastePolicyTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sill.ClipboardPastePolicyTest
+javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/ClipboardDefaultPolicy.java "$root"/tests/ClipboardDefaultPolicyTest.java
+java -ea -cp "$test_dir" io.github.n2ray.sill.ClipboardDefaultPolicyTest
 javac -cp "$test_dir" -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/TourPolicy.java "$root"/app/src/main/java/io/github/n2ray/sill/TourContent.java "$root"/app/src/main/java/io/github/n2ray/sill/TourPlacement.java "$root"/tests/TourPolicyTest.java "$root"/tests/TourContentTest.java "$root"/tests/TourPlacementTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sill.TourPolicyTest
 java -ea -cp "$test_dir" io.github.n2ray.sill.TourContentTest
