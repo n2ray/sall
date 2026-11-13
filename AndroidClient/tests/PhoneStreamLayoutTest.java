@@ -35,6 +35,20 @@ public final class PhoneStreamLayoutTest {
         assert !PhoneStreamLayout.forSource(440, 894, null, false, true, PhoneStreamLayout.Streaming.WINDOW).largerPicture;
         assert !PhoneStreamLayout.forSource(440, 894, 320.0, true, true, PhoneStreamLayout.Streaming.WINDOW).largerPicture;
         assert !PhoneStreamLayout.forSource(440, 894, 320.0, false, false, PhoneStreamLayout.Streaming.WINDOW).largerPicture;
+        assert normal.row1.equals(new PhoneStreamLayout.Rect(14, 297, 412, 50));
+        assert normal.strip.equals(new PhoneStreamLayout.Rect(6, 363, 428, 62));
+        assert normal.keys.equals(new PhoneStreamLayout.Rect(14, 435, 412, 44));
+        assert normal.trackpad.equals(new PhoneStreamLayout.Rect(14, 489, 412, 389));
+        PhoneStreamLayout shorterIme = new PhoneStreamLayout(440, 894, 280.0);
+        assert shorterIme.picture.equals(new PhoneStreamLayout.Rect(8, 8, 424, 462));
+        assert shorterIme.row1.equals(new PhoneStreamLayout.Rect(14, 494, 412, 50));
+        assert shorterIme.keys.equals(new PhoneStreamLayout.Rect(14, 560, 412, 44));
+        assert shorterIme.trackpad.equals(new PhoneStreamLayout.Rect(14, 614, 412, 264));
+        // Android reports IME from the physical bottom; a retained navigation inset
+        // is already excluded from our content height and must not be counted twice.
+        double bottomInset = 24, screenHeight = 918, measuredIme = 344;
+        PhoneStreamLayout insetLayout = new PhoneStreamLayout(440, screenHeight - bottomInset, measuredIme - bottomInset);
+        assert screenHeight - measuredIme - insetLayout.keys.bottom() == 10;
         System.out.println("Phone stream layout checks passed");
     }
 }

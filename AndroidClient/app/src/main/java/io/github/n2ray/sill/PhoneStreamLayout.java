@@ -6,6 +6,9 @@ final class PhoneStreamLayout {
         double right() { return x + width; }
         double bottom() { return y + height; }
     }
+    /** Complete physical row parameters: equal values must not request another layout. */
+    record RowParams(int width, int height, float weight, int gravity,
+                     int left, int top, int right, int bottom) {}
     enum Streaming { NOTHING, DESKTOP, WINDOW }
     record Ruler(Rect frame, double step) {}
 

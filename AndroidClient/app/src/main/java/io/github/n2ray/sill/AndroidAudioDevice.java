@@ -23,7 +23,7 @@ final class AndroidAudioDevice implements AudioRuntime.Device {
         close();
         format = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, 48000, 2);
         format.setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectELD);
-        format.setByteBuffer("csd-0", ByteBuffer.wrap(cookie));
+        format.setByteBuffer("csd-0", ByteBuffer.wrap(AacEldConfig.parse(cookie).asc()));
         startDecoder();
         int minimum = AudioTrack.getMinBufferSize(48000, AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_PCM_FLOAT);
         if (minimum <= 0) throw new IllegalStateException("Float stereo output unavailable");

@@ -127,6 +127,7 @@ final class AudioPlayer implements AutoCloseable {
             throw new IllegalArgumentException("Invalid audio format");
         byte[] cookie = Base64.decode(f.optString("cookie", ""), Base64.DEFAULT);
         if (cookie.length == 0 || cookie.length > 1024) throw new IllegalArgumentException("Invalid audio configuration");
+        if (AacEldConfig.parse(cookie).frames() != frames) throw new IllegalArgumentException("AAC frame count disagrees with stream format");
         runtime.format(epoch, frames, priming, cookie); blocked = false;
     }
     @Override public synchronized void close() {

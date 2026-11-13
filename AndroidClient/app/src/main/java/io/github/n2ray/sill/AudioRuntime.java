@@ -23,6 +23,7 @@ final class AudioRuntime implements AutoCloseable {
         @Override void close();
     }
     private final Device device;
+    private final java.util.function.LongSupplier monotonic;
     private final AudioPlayout model = new AudioPlayout();
     private final AudioDecodeMapping mapping = new AudioDecodeMapping();
     private final AudioScheduleJoin join = new AudioScheduleJoin(100, .5);
@@ -35,7 +36,10 @@ final class AudioRuntime implements AutoCloseable {
     private double lastPacket;
     private double refresh = 1.0 / 60, streamFPS = 60;
 
-    AudioRuntime(Device device) { this.device = device; model.away(true); }
+    AudioRuntime(Device device) { this(device, System::nanoTime); }
+    AudioRuntime(Device device, java.util.function.LongSupplier monotonic) {
+        this.device = device; this.monotonic = monotonic; model.away(true);
+    }
     static double streamFPS(double reported, int requestedCap) {
         return Double.isFinite(reported) && reported > 0 ? reported : requestedCap > 0 ? requestedCap : 60;
     }
@@ -67,6 +71,7 @@ final class AudioRuntime implements AutoCloseable {
         lastPacket = now / 1e9;
         if (enabled && !opened) {
             device.open(cookie); opened = true;
+            now = monotonic.getAsLong();
             clock = new AudioPresentationClock(now);
             // Buffer capacity is conservative write-ahead, not a claim of measured hardware IO latency.
             model.latency(0, Math.max(240, device.bufferFrames()) / 48000.0, refresh, streamFPS);
@@ -92,6 +97,7 @@ final class AudioRuntime implements AutoCloseable {
         if (device.routeChanged() || now / 1e9 - lastPacket >= 10) { resetPlayback(); return; }
         decode();
         var stamp = device.timestamp();
+        now = monotonic.getAsLong();
         if (stamp != null) clock.observe(clock.generation(), stamp.frame, stamp.nanos, now, timeline.writtenFrames());
         require(clock.check(now) != AudioPresentationClock.State.FAILED, "presentation timestamp unavailable or discontinuous");
         var reading = clock.reading();
@@ -99,12 +105,17 @@ final class AudioRuntime implements AutoCloseable {
         apply(model.tick(now / 1e9), now / 1e9);
         require(join.pump(join.generation(), timeline, now / 1e9) != AudioScheduleJoin.State.FAILED, join.failure());
         if (clock.state() == AudioPresentationClock.State.STARTING) {
-            int count = clock.startupSilence(clock.generation(), now);
+            int count = clock.startupSilence(clock.generation(), now, Math.max(960, device.bufferFrames()));
             if (count > 0) silence(count);
         } else if (!model.holding() && join.pendingSchedules() == 0) {
             // Keep the hardware clock advancing in gaps, but never commit over an editable tail.
-            long target = reading.frame() + Math.max(0, Math.round((now - reading.nanos()) / 1e9 * 48000)) + 480;
-            if (target > timeline.endFrame()) silence((int) Math.min(480, target - timeline.endFrame()));
+            long target = reading.frame() + Math.max(0, Math.round((now - reading.nanos()) / 1e9 * 48000))
+                    + Math.max(960, device.bufferFrames());
+            long gap = target - timeline.endFrame();
+            // Fill elapsed demand in one bounded allocation, not a fixed number of frames per
+            // invocation. A stalled writer must fail rather than accumulate unbounded silence.
+            require(gap <= AudioPresentationClock.STARTUP_FRAMES, "idle audio replenishment exceeds bound");
+            if (gap > 0) silence((int) gap);
         }
         var result = timeline.drain(timeline.generation(), device::write, () -> false, 8);
         require(result != AudioOutputTimeline.Drain.ERROR, "AudioTrack write failed");

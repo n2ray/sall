@@ -32,6 +32,8 @@ public final class MainActivity extends Activity {
     private final Object outputLock = new Object();
     private final Object reconnectLock = new Object();
     private volatile SillConnection connection;
+    private SessionAuthorization activeAuthorization;
+    private PairingAuthorization pendingPairing;
     private volatile RemoteDial.Attempt pendingDial;
     // Accessed only under outputLock: serializes an automatic first pick with user picks.
     private InitialSourcePolicy initialSource;
@@ -86,6 +88,7 @@ public final class MainActivity extends Activity {
     private final Runnable viewportUpdate = this::sendViewport;
     private Runnable updateSessionLayout;
     private float portraitImeHeight;
+    private int insetLeft, insetTop, insetRight, insetBottom;
     private boolean largerPicture, largerPictureApplied, settingsOpen, settingsHeldLargerPicture, settingsReanchoring, settingsReanchorPending;
     private android.widget.FrameLayout settingsOverlay;
     private android.window.OnBackInvokedCallback settingsBack;
@@ -185,7 +188,8 @@ public final class MainActivity extends Activity {
         root.setOnApplyWindowInsetsListener((view, insets) -> {
             if (android.os.Build.VERSION.SDK_INT >= 30) {
                 android.graphics.Insets bars = insets.getInsets(android.view.WindowInsets.Type.systemBars());
-                view.setPadding(pad + bars.left, pad + bars.top, pad + bars.right, pad + bars.bottom);
+                insetLeft = bars.left; insetTop = bars.top; insetRight = bars.right; insetBottom = bars.bottom;
+                applyContentInsets();
                 if (insets.isVisible(android.view.WindowInsets.Type.ime()) && view.getWidth() < view.getHeight()) {
                     float height = insets.getInsets(android.view.WindowInsets.Type.ime()).bottom / getResources().getDisplayMetrics().density;
                     if (height > 0 && Math.abs(height - portraitImeHeight) > 1) {
@@ -195,8 +199,9 @@ public final class MainActivity extends Activity {
                     }
                 }
             } else {
-                view.setPadding(pad + insets.getSystemWindowInsetLeft(), pad + insets.getSystemWindowInsetTop(),
-                        pad + insets.getSystemWindowInsetRight(), pad + insets.getSystemWindowInsetBottom());
+                insetLeft = insets.getSystemWindowInsetLeft(); insetTop = insets.getSystemWindowInsetTop();
+                insetRight = insets.getSystemWindowInsetRight(); insetBottom = insets.getSystemWindowInsetBottom();
+                applyContentInsets();
             }
             return insets;
         });
@@ -347,7 +352,21 @@ public final class MainActivity extends Activity {
                 new android.app.AlertDialog.Builder(this).setTitle("移除本机记录？")
                     .setMessage("这只移除手机上的记录；如需撤销 Mac 的信任，请在 Mac 的 Sill 设置中移除设备。")
                     .setNegativeButton("取消", null).setPositiveButton("移除", (d, which) -> {
-                        savedMacStore.forget(mac.identity()); refreshSavedMacs();
+                        java.io.Closeable cancelled = null;
+                        synchronized (savedMacStore) {
+                            savedMacStore.forget(mac.identity());
+                            if (activeAuthorization != null && activeAuthorization.matches(mac.identity().pin())) {
+                                closing = true;
+                                cancelled = activeAuthorization.revoke();
+                            }
+                            if (pendingPairing != null) {
+                                java.io.Closeable pairingResource = pendingPairing.forget(mac.identity().pin());
+                                if (pairingResource != null) { closing = true; cancelled = pairingResource; }
+                            }
+                        }
+                        if (cancelled != null) try { cancelled.close(); } catch (java.io.IOException ignored) { }
+                        synchronized (reconnectLock) { reconnectLock.notifyAll(); }
+                        refreshSavedMacs();
                     }).show(); return true;
             });
         }
@@ -512,6 +531,7 @@ public final class MainActivity extends Activity {
         sessionPanel.addView(trackpad, new LinearLayout.LayoutParams(-1, 0, 1));
         updateSessionLayout = () -> {
             if (pip != null && pip.active()) { layoutPip(); return; }
+            applyContentInsets();
             int r = root.getWidth(), b = root.getHeight();
             if (r <= 0 || b <= 0) return;
             boolean landscape = r > b;
@@ -522,7 +542,7 @@ public final class MainActivity extends Activity {
                     : desktopActive ? PhoneStreamLayout.Streaming.DESKTOP : PhoneStreamLayout.Streaming.NOTHING;
             if (settingsOpen) streaming = settingsHeldLargerPicture ? PhoneStreamLayout.Streaming.WINDOW : PhoneStreamLayout.Streaming.NOTHING;
             PhoneStreamLayout geometry = PhoneStreamLayout.forSource(width / density, height / density,
-                    portraitImeHeight > 0 ? (double) portraitImeHeight : null, false,
+                    portraitImeHeight > 0 ? Math.max(0, (double) portraitImeHeight - root.getPaddingBottom() / density) : null, false,
                     settingsOpen ? settingsHeldLargerPicture : largerPicture, streaming);
             boolean large = geometry.largerPicture;
             if (large != largerPictureApplied) { dismissWindowControls(); cancelWindowDrag(); }
@@ -530,9 +550,10 @@ public final class MainActivity extends Activity {
             zoom.setTopAligned(large);
             trackpad.setVerticalRatio(large && videoWidth > 0 && videoHeight > 0 ? (float) videoHeight / videoWidth : 1 / 1.6f);
             int visible = landscape ? android.view.View.GONE : android.view.View.VISIBLE;
-            sessionStatus.setVisibility(visible); keys.setVisibility(visible); trackpad.setVisibility(visible);
-            pictureStatus.setMaxWidth(Math.max(0, width - dp(32)));
-            pictureStatus.setVisibility(landscape && pictureStatusActive ? android.view.View.VISIBLE : android.view.View.GONE);
+            sessionStatus.setVisibility(android.view.View.GONE); keys.setVisibility(visible); trackpad.setVisibility(visible);
+            int statusWidth = Math.max(0, width - dp(32));
+            if (pictureStatus.getMaxWidth() != statusWidth) pictureStatus.setMaxWidth(statusWidth);
+            pictureStatus.setVisibility(pictureStatusActive ? android.view.View.VISIBLE : android.view.View.GONE);
             stripRow.setVisibility(landscape || large ? android.view.View.GONE : android.view.View.VISIBLE);
             if (landscape && strip.getParent() != bar) {
                 stripRow.removeView(strip); if (menuButton.getParent() == stripRow) stripRow.removeView(menuButton); sessionPanel.removeView(bar);
@@ -554,20 +575,32 @@ public final class MainActivity extends Activity {
                 stripRow.addView(menuButton, new LinearLayout.LayoutParams(dp(50), dp(50)));
             }
             refreshMenuButton();
-            for (Button button : new Button[]{appsButton, scaleButton, keyboardButton, desktopButton, settingsButton}) {
-                LinearLayout.LayoutParams bp = (LinearLayout.LayoutParams) button.getLayoutParams();
-                int bw = landscape ? dp(48) : 0; float weight = landscape ? 0 : 1;
-                if (bp.width != bw || bp.weight != weight || bp.height != dp(50)) {
-                    bp.width = bw; bp.weight = weight; bp.height = dp(50); button.setLayoutParams(bp);
+            if (!landscape) {
+                // Keep the picture's full room as the host viewport. The aspect-fit video and
+                // cursor share its top-aligned pane in Larger Picture, without cropping.
+                placePortraitRow(picture, geometry.picture, 0);
+                placePortraitRow(bar, geometry.row1, geometry.picture.bottom());
+                boolean menus = menuButton.getVisibility() == android.view.View.VISIBLE;
+                portraitButtons(bar, 50);
+                if (!large) {
+                    placePortraitRow(stripRow, geometry.strip, geometry.row1.bottom());
+                    PhoneStreamLayout.Rect stripFrame = menus ? geometry.stripBesideMenus : geometry.strip;
+                    LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(dp((float) stripFrame.width()), dp(62));
+                    applyRowParams(strip, sp);
+                    LinearLayout.LayoutParams mp = new LinearLayout.LayoutParams(dp((float) geometry.menus.width()), dp(50));
+                    mp.leftMargin = dp(8); applyRowParams(menuButton, mp);
                 }
-            }
-            int wanted = landscape ? 0 : large ? Math.max(0, Math.min(dp((int) geometry.picture.height()),
-                    height - dp((int) portraitImeHeight) - sessionStatus.getMeasuredHeight() - dp(110)))
-                    : PhoneStreamLayout.pictureHeight(width, height, dp(200), dp(120));
-            LinearLayout.LayoutParams params = (LinearLayout.LayoutParams) picture.getLayoutParams();
-            int wantedWidth = -1; float weight = landscape ? 1 : 0;
-            if (params.height != wanted || params.width != wantedWidth || params.weight != weight) {
-                params.height = wanted; params.width = wantedWidth; params.weight = weight; picture.setLayoutParams(params);
+                placePortraitRow(keys, geometry.keys, large ? geometry.row1.bottom() : geometry.strip.bottom());
+                portraitButtons(keys, 44);
+                placePortraitRow(trackpad, geometry.trackpad, geometry.keys.bottom());
+            } else {
+                applyRowParams(bar, new LinearLayout.LayoutParams(-1, -2));
+                LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, 0, 1);
+                applyRowParams(picture, params);
+                for (Button button : new Button[]{appsButton, scaleButton, keyboardButton, desktopButton, settingsButton}) {
+                    LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(dp(48), dp(50));
+                    bp.setMargins(dp(2), dp(3), dp(2), dp(3)); applyRowParams(button, bp);
+                }
             }
             layoutVideo(); cursor.invalidate();
         };
@@ -599,6 +632,41 @@ public final class MainActivity extends Activity {
         });
         sessionPanel.addView(keyboard, new LinearLayout.LayoutParams(1, 1));
     }
+    private void applyContentInsets() {
+        if (pip != null && pip.active()) { applyRootPadding(0, 0, 0, 0); return; }
+        int padding = sessionPanel != null && sessionPanel.getVisibility() == android.view.View.VISIBLE ? 0 : dp(12);
+        applyRootPadding(padding + insetLeft, padding + insetTop, padding + insetRight, padding + insetBottom);
+    }
+    private void applyRootPadding(int left, int top, int right, int bottom) {
+        if (root.getPaddingLeft() != left || root.getPaddingTop() != top
+                || root.getPaddingRight() != right || root.getPaddingBottom() != bottom)
+            root.setPadding(left, top, right, bottom);
+    }
+    private static PhoneStreamLayout.RowParams rowParams(LinearLayout.LayoutParams p) {
+        return new PhoneStreamLayout.RowParams(p.width, p.height, p.weight, p.gravity,
+                p.leftMargin, p.topMargin, p.rightMargin, p.bottomMargin);
+    }
+    private void applyRowParams(android.view.View row, LinearLayout.LayoutParams desired) {
+        if (!(row.getLayoutParams() instanceof LinearLayout.LayoutParams current)
+                || !rowParams(current).equals(rowParams(desired))) row.setLayoutParams(desired);
+    }
+    private void placePortraitRow(android.view.View row, PhoneStreamLayout.Rect frame, double previousBottom) {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(dp((float) frame.width()),
+                dp((float) frame.bottom()) - dp((float) frame.y()));
+        params.leftMargin = dp((float) frame.x());
+        params.topMargin = dp((float) frame.y()) - dp((float) previousBottom);
+        applyRowParams(row, params);
+    }
+    private void portraitButtons(LinearLayout row, int height) {
+        boolean first = true;
+        for (int i = 0; i < row.getChildCount(); i++) {
+            android.view.View child = row.getChildAt(i);
+            if (child.getVisibility() == android.view.View.GONE) continue;
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(height), 1);
+            params.leftMargin = first ? 0 : dp(8);
+            applyRowParams(child, params); first = false;
+        }
+    }
     private Button barButton(LinearLayout row, String label, android.view.View.OnClickListener action) {
         Button b = button(row, label, action); LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, dp(46), 1);
         p.setMargins(dp(2), dp(3), dp(2), dp(3)); b.setLayoutParams(p); b.setPadding(0, 0, 0, 0);
@@ -619,7 +687,10 @@ public final class MainActivity extends Activity {
         int width = root.getWidth() - root.getPaddingLeft() - root.getPaddingRight();
         boolean landscape = root.getWidth() > root.getHeight();
         boolean fits = width >= dp(landscape ? 6 * 48 + 100 : 320);
-        menuButton.setVisibility(fits && macMenus.length() > 0 ? android.view.View.VISIBLE : android.view.View.GONE);
+        int visibility = fits && macMenus.length() > 0 ? android.view.View.VISIBLE : android.view.View.GONE;
+        boolean changed = visibility != menuButton.getVisibility();
+        menuButton.setVisibility(visibility);
+        if (changed && updateSessionLayout != null) root.post(updateSessionLayout);
     }
     private void modifier(LinearLayout row, String label, long flag) {
         Button button = barButton(row, label, v -> {
@@ -1005,7 +1076,7 @@ public final class MainActivity extends Activity {
         float density = getResources().getDisplayMetrics().density;
         boolean offerLarge = portraitImeHeight <= 0 || PhoneStreamLayout.offersLargerPicture(
                 (root.getWidth() - root.getPaddingLeft() - root.getPaddingRight()) / density,
-                (root.getHeight() - root.getPaddingTop() - root.getPaddingBottom()) / density, portraitImeHeight, false);
+                (root.getHeight() - root.getPaddingTop() - root.getPaddingBottom()) / density, Math.max(0, portraitImeHeight - root.getPaddingBottom() / density), false);
         java.util.ArrayList<String> labels = new java.util.ArrayList<>(java.util.Arrays.asList("Mac 画质和帧率", clipboardEnabled ? "关闭剪贴板共享" : "开启剪贴板共享", "将手机剪贴板粘贴到 Mac", audioEnabled ? "关闭声音（重新连接后生效）" : "开启声音测试（重新连接后生效）", reverse ? "滚动方向：反向" : "滚动方向：自然", gestures ? "关闭多指 Mac 手势" : "开启多指 Mac 手势"));
         if (offerLarge) labels.add(android.os.Build.VERSION.SDK_INT < 30 ? "大画面：此 Android 版本暂不支持" : portraitImeHeight <= 0 ? "大画面：请先打开键盘以测量高度" : largerPicture ? "关闭大画面" : "开启大画面");
         int pipIndex = labels.size();
@@ -1276,7 +1347,7 @@ public final class MainActivity extends Activity {
         status.setText(text); sessionStatus.setText(text); pictureStatus.setText(text);
         int generation = ++pictureStatusGeneration;
         pictureStatusActive = !text.isEmpty();
-        pictureStatus.setVisibility(pictureStatusActive && (pip == null || !pip.active()) && root.getWidth() > root.getHeight()
+        pictureStatus.setVisibility(pictureStatusActive && (pip == null || !pip.active())
                 ? android.view.View.VISIBLE : android.view.View.GONE);
         if (!text.startsWith("连接中断")) ui.postDelayed(() -> {
             if (pictureStatusGeneration != generation) return;
@@ -1295,47 +1366,71 @@ public final class MainActivity extends Activity {
         try { number = Integer.parseInt(port.getText().toString()); if (address.isEmpty() || number < 1 || number > 65535) throw new IllegalArgumentException(); }
         catch (Exception e) { show("请填写有效地址和端口。"); return; }
         if (running) { show("已有连接，请退出后重试。"); return; }
+        PairingAuthorization pairingGuard;
+        synchronized (savedMacStore) {
+            activeAuthorization = null;
+            pairingGuard = pairing ? new PairingAuthorization(savedMacStore.pin(new SavedMacs.Endpoint(address, number))) : null;
+            pendingPairing = pairingGuard;
+        }
         running = true; closing = false; getPreferences(0).edit().putString("host", address).putString("port", String.valueOf(number)).apply();
         network.execute(() -> {
             try {
                 SavedMacs.Endpoint endpoint = new SavedMacs.Endpoint(address, number);
                 byte[] pin;
+                SessionAuthorization authorization;
                 if (pairing) {
                     show("正在配对…");
                     SavedMacs.Identity identity;
                     RemoteDial.Attempt pairingAttempt = new RemoteDial.Attempt();
-                    pendingDial = pairingAttempt;
+                    synchronized (savedMacStore) {
+                        pairingGuard.track(pairingAttempt);
+                        pendingDial = pairingAttempt;
+                    }
                     try {
                         if (!running || closing) pairingAttempt.close();
                         try (SillConnection pair = SillConnection.connect(address, number, "sill-pair/1", null, 10000, 15000, pairingAttempt)) {
+                            synchronized (savedMacStore) { pairingGuard.identify(pair.peerFingerprint()); }
                             identity = pair.pairIdentity(password, android.os.Build.MODEL, android.os.Build.DEVICE);
                             pairingAttempt.check();
                         }
                     } finally { pairingAttempt.close(); pendingDial = null; }
-                    savedMacStore.paired(identity, endpoint); pin = identity.pin();
+                    synchronized (savedMacStore) {
+                        pairingGuard.identify(identity.pin());
+                        if (closing || !running) throw new java.util.concurrent.CancellationException();
+                        savedMacStore.paired(identity, endpoint); pin = identity.pin();
+                        pendingPairing = null;
+                        authorization = new SessionAuthorization(pin); activeAuthorization = authorization;
+                    }
                     ui.post(() -> { code.setText(""); refreshSavedMacs(); });
                 } else {
+                    synchronized (savedMacStore) {
                     pin = selectedIdentity == null ? savedMacStore.pin(endpoint)
                             : recognitionTag == null ? savedMacStore.pin(selectedIdentity, endpoint)
                             : savedMacStore.recognizedPin(selectedIdentity, recognitionTag);
                     if (pin == null) throw new IllegalStateException("请先配对这台 Mac。");
+                        authorization = new SessionAuthorization(pin); activeAuthorization = authorization;
+                    }
                 }
                 boolean established = false;
+                SavedMacs.Endpoint verifiedThisRun = null;
                 int retries = 0;
                 while (running && !closing) {
                     long connectedAt = 0;
                     try {
                         if (!established) show("正在连接…");
                         RemoteDial.Attempt dial = new RemoteDial.Attempt();
-                        pendingDial = dial;
+                        synchronized (savedMacStore) {
+                            authorization.track(dial);
+                            pendingDial = dial;
+                        }
                         boolean wantsAudio = audioEnabled && AudioPlayer.supported();
                         JSONObject greeting = new JSONObject().put("protocol", 1).put("appVersion", "0.1.0").put("device", android.os.Build.MODEL);
                         if (wantsAudio) greeting.put("audio", new JSONArray().put("aac-eld"));
                         RemoteDial.Connected<ReadyStream> route;
                         try {
                             if (!running || closing) dial.close();
-                            route = RemoteDial.connect(RemoteDial.order(savedMacStore.all(), pin, endpoint,
-                                    !established && (selectedIdentity == null || recognitionTag != null)), pin, dial,
+                            route = RemoteDial.connect(RemoteDial.reconnectOrder(savedMacStore.all(), pin, endpoint,
+                                    !established && (selectedIdentity == null || recognitionTag != null), verifiedThisRun), pin, dial,
                                     (candidate, identityPin, attempt) -> {
                                         SillConnection candidateSession = SillConnection.connect(candidate.host(), candidate.port(),
                                                 "sill/1", identityPin, RemoteDial.CONNECT_MS, RemoteDial.HANDSHAKE_MS, attempt);
@@ -1364,13 +1459,20 @@ public final class MainActivity extends Activity {
                         } finally { pendingDial = null; }
                         try (SillConnection session = route.value().session()) {
                             if (!running || closing) break;
-                            savedMacStore.connected(pin, route.endpoint(), selectedIdentity == null && route.endpoint().equals(endpoint));
+                            synchronized (savedMacStore) {
+                                authorization.track(session);
+                                verifiedThisRun = route.endpoint();
+                                savedMacStore.connected(pin, route.endpoint(), selectedIdentity == null && route.endpoint().equals(endpoint));
+                            }
                             HostLockState sessionLock = new HostLockState(false); sessionLock.requireFreshFrame();
                             picturePresented = false; hostLock = sessionLock; keyframeRecovery = new KeyframeRecovery(); keyframeStreaming = false; keyframeWorstRtt = 0; keyframeRttWindow = 0; recoveryFrame.set(null); lastParameters = null; revealFrame.set(null); recoveryGeneration = -1;
                             pointerSync = new PointerSync();
-                            synchronized (outputLock) { initialSource = new InitialSourcePolicy(); connection = session; }
+                            synchronized (savedMacStore) {
+                                authorization.check();
+                                synchronized (outputLock) { initialSource = new InitialSourcePolicy(); connection = session; }
+                            }
                             session.sessionTimeout();
-                            ui.post(() -> { if (connection == session) { renderLockOverlay(sessionLock, session); connectionContainer.setVisibility(android.view.View.GONE); sessionPanel.setVisibility(android.view.View.VISIBLE); picture.post(this::sendViewport); } });
+                            ui.post(() -> { if (connection == session) { renderLockOverlay(sessionLock, session); connectionContainer.setVisibility(android.view.View.GONE); sessionPanel.setVisibility(android.view.View.VISIBLE); updateSessionLayout.run(); picture.post(this::sendViewport); } });
                             if (wantsAudio) { audioEndpointHost = route.endpoint().host(); audio = new AudioPlayer(text -> showFor(session, text)); localAudio.setWatched(pictureWatched()); localAudio.setPlayer(audio); ui.post(this::updateAudioTiming); }
                             for (StreamWire.Message initial : route.value().initial()) handle(initial, session);
                             KeyframeRecovery sessionRecovery = keyframeRecovery;
@@ -1413,10 +1515,11 @@ public final class MainActivity extends Activity {
                 else { android.util.Log.e("SillAndroid", "Connection failed", e); ui.post(() -> displayStatus("连接结束: " + e.getMessage())); }
             } }
             finally {
+                synchronized (savedMacStore) { if (pendingPairing == pairingGuard) pendingPairing = null; }
                 if (pip != null && pip.active()) ui.post(pip::stop);
                 connection = null; hostLock = null; keyframeRecovery = null; keyframeStreaming = false; recoveryFrame.set(null); lastParameters = null; revealFrame.set(null); recoveryGeneration = -1; pointerSync = null; clipboardSubscribed = false; hostClipboardAvailable = false; clipboardSource = ""; clipboardReceipt.cancel(); releaseDecoder();
                 if (audio != null) { localAudio.setPlayer(null); audio.close(); audio = null; }
-                ui.post(() -> { dismissSettings(false); dismissStaleMenu(); dismissWindowControls(); cancelWindowDrag(); hostSettings = null; pendingSettingsToken = 0; desktopDisplays = -1; desktopDisplay = 0; desktopActive = false; hostGestures = 0; hostKeyRepeat = false; hostKeyRepeatKnown = false; trackpad.setMacGesturesEnabled(false); desktopButton.setText("桌面"); thumbnailImages.clear(); appIcons.clear(); iconBadges.clear(); activeWindowId = -1; if (appDrawer != null) appDrawer.dismiss(); drawerWindows = new JSONArray(); appList = new JSONArray(); zoom.reset(); screenAwake.setStreaming(false); pictureInput.cancel(); trackpad.cancelGestures(); keyboard.discard(); resetCursorShape(); modifiers = heldModifiers = 0; for (android.view.View button : modifierViews.values()) button.setBackground(shape(0xff272a30, 12)); sessionPanel.setVisibility(android.view.View.GONE); connectionContainer.setVisibility(android.view.View.VISIBLE); running = false; });
+                ui.post(() -> { dismissSettings(false); dismissStaleMenu(); dismissWindowControls(); cancelWindowDrag(); hostSettings = null; pendingSettingsToken = 0; desktopDisplays = -1; desktopDisplay = 0; desktopActive = false; hostGestures = 0; hostKeyRepeat = false; hostKeyRepeatKnown = false; trackpad.setMacGesturesEnabled(false); desktopButton.setText("桌面"); thumbnailImages.clear(); appIcons.clear(); iconBadges.clear(); activeWindowId = -1; if (appDrawer != null) appDrawer.dismiss(); drawerWindows = new JSONArray(); appList = new JSONArray(); zoom.reset(); screenAwake.setStreaming(false); pictureInput.cancel(); trackpad.cancelGestures(); keyboard.discard(); resetCursorShape(); modifiers = heldModifiers = 0; for (android.view.View button : modifierViews.values()) button.setBackground(shape(0xff272a30, 12)); sessionPanel.setVisibility(android.view.View.GONE); connectionContainer.setVisibility(android.view.View.VISIBLE); applyContentInsets(); running = false; });
             }
         });
     }
@@ -2189,7 +2292,7 @@ public final class MainActivity extends Activity {
         } else if (!active && pipUi) {
             pipUi = false; pipOwner = null;
             for (var entry : pipVisibility.entrySet()) entry.getKey().setVisibility(entry.getValue());
-            pipVisibility.clear(); root.setPadding(dp(12), dp(12), dp(12), dp(12));
+            pipVisibility.clear(); applyContentInsets();
             if (updateSessionLayout != null) updateSessionLayout.run();
             picture.post(this::sendViewport);
         }
@@ -2198,7 +2301,7 @@ public final class MainActivity extends Activity {
     }
     private void layoutPip() {
         LinearLayout.LayoutParams params = (LinearLayout.LayoutParams) picture.getLayoutParams();
-        if (params.height != 0 || params.weight != 1) { params.width = -1; params.height = 0; params.weight = 1; picture.setLayoutParams(params); }
+        if (params.height != 0 || params.weight != 1 || params.leftMargin != 0 || params.topMargin != 0) { params.width = -1; params.height = 0; params.weight = 1; params.setMargins(0, 0, 0, 0); picture.setLayoutParams(params); }
         layoutVideo();
     }
     @Override protected void onStart() { super.onStart(); if (discovery != null) discovery.start(); startFpsObservers(); }

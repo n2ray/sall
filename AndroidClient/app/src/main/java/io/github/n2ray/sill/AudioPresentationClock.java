@@ -8,9 +8,12 @@ package io.github.n2ray.sill;
 final class AudioPresentationClock {
     static final int RATE = 48000, STARTUP_FRAMES = 12000, CHUNK_FRAMES = 240;
     static final long STARTUP_TIMEOUT_NS = 1_000_000_000L, STALE_NS = 250_000_000L;
+    static final long STABLE_SPAN_NS = 100_000_000L;
     enum State { STARTING, READY, FAILED, STALE }
     record Reading(long frame, long nanos) {}
     private long generation, started, priorFrame, priorNanos, lastProgress;
+    private long anchorFrame, anchorNanos;
+    private int observations;
     private int startupFrames;
     private boolean havePrior;
     private State state = State.STARTING;
@@ -24,14 +27,21 @@ final class AudioPresentationClock {
         generation = Math.incrementExact(generation);
         started = lastProgress = now; startupFrames = 0; havePrior = false;
         priorFrame = priorNanos = 0; reading = null; state = State.STARTING;
+        anchorFrame = anchorNanos = 0; observations = 0;
         return generation;
     }
-    /** Returns one bounded bootstrap chunk. No invented mapping when hardware gives no timestamp.
+    /** Returns bounded bootstrap replenishment. No invented mapping without a hardware timestamp.
      * Repeated calls cannot allocate beyond 250 ms. Zero may mean wait, READY, or FAILED.
      */
     int startupSilence(long token, long now) {
+        return startupSilence(token, now, 960);
+    }
+    int startupSilence(long token, long now, int leadFrames) {
         if (token != generation || check(now) != State.STARTING) return 0;
-        int frames = Math.min(CHUNK_FRAMES, STARTUP_FRAMES - startupFrames);
+        // Catch up elapsed time, not timer invocation count: a delayed 5 ms task must feed
+        // more than 5 ms. Already queued silence counts toward the absolute budget.
+        long target = (now - started) * RATE / 1_000_000_000L + Math.max(CHUNK_FRAMES, leadFrames);
+        int frames = (int) Math.max(0, Math.min(STARTUP_FRAMES, target) - startupFrames);
         startupFrames += frames;
         return frames;
     }
@@ -50,15 +60,30 @@ final class AudioPresentationClock {
         if (frame < 0 || stampNanos < started || stampNanos > now
                 || now - stampNanos > STALE_NS || frame > writtenFrames) return state;
         if (havePrior) {
-            if (frame < priorFrame || stampNanos < priorNanos) return fail();
+            if (frame < priorFrame || stampNanos < priorNanos) return discontinuity(frame, stampNanos);
             if (frame == priorFrame || stampNanos == priorNanos) return state;
             double elapsedFrames = (stampNanos - priorNanos) / 1e9 * RATE;
-            // Timestamp progression must fit its sample clock; allow 5 ms observation jitter.
-            if (Math.abs((frame - priorFrame) - elapsedFrames) > CHUNK_FRAMES) return fail();
-            state = State.READY;
+            double anchorElapsedFrames = (stampNanos - anchorNanos) / 1e9 * RATE;
+            if (Math.abs((frame - priorFrame) - elapsedFrames) > CHUNK_FRAMES
+                    || Math.abs((frame - anchorFrame) - anchorElapsedFrames) > CHUNK_FRAMES)
+                return discontinuity(frame, stampNanos);
+            observations = Math.min(3, observations + 1);
+            if (observations >= 3 && stampNanos - anchorNanos >= STABLE_SPAN_NS) {
+                state = State.READY;
+                anchorFrame = frame; anchorNanos = stampNanos;
+            }
+        } else {
+            anchorFrame = frame; anchorNanos = stampNanos; observations = 1;
         }
         havePrior = true; priorFrame = frame; priorNanos = stampNanos;
         lastProgress = now; reading = new Reading(frame, stampNanos);
+        return state;
+    }
+    private State discontinuity(long frame, long nanos) {
+        if (state == State.READY) return fail();
+        // An untrusted startup candidate may settle; neither deadline nor silence budget resets.
+        anchorFrame = priorFrame = frame; anchorNanos = priorNanos = nanos;
+        observations = 1; reading = null;
         return state;
     }
     private State fail() { reading = null; return state = State.FAILED; }

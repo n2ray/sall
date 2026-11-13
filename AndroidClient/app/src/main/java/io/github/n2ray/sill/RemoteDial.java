@@ -56,6 +56,19 @@ final class RemoteDial {
         return addresses.stream().filter(e -> seen.add(e.host().toLowerCase(Locale.ROOT) + "|" + e.port())).toList();
     }
 
+    /** The active session's TLS + first-list proof survives address-list refreshes, only for this run. */
+    static List<SavedMacs.Endpoint> reconnectOrder(List<SavedMacs.Mac> records, byte[] pin,
+                                                   SavedMacs.Endpoint requested, boolean preferRequested,
+                                                   SavedMacs.Endpoint verifiedThisRun) {
+        List<SavedMacs.Endpoint> candidates = new ArrayList<>(order(records, pin, requested, preferRequested));
+        if (verifiedThisRun != null) {
+            candidates.removeIf(endpoint -> endpoint.port() == verifiedThisRun.port()
+                    && endpoint.host().equalsIgnoreCase(verifiedThisRun.host()));
+            candidates.add(0, verifiedThisRun);
+        }
+        return List.copyOf(candidates);
+    }
+
     private static int rank(SavedMacs.Endpoint endpoint) {
         String host = endpoint.host().toLowerCase(Locale.ROOT);
         if (host.equals("::1") || host.startsWith("127.")) return 0;
@@ -80,7 +93,8 @@ final class RemoteDial {
 
     static <T extends Closeable> Connected<T> connect(List<SavedMacs.Endpoint> addresses, byte[] pin, Attempt attempt,
                                                       Connector<T> connector, long timeoutMs) throws Exception {
-        if (pin == null || pin.length != 32 || addresses.isEmpty() || timeoutMs <= 0) throw new IllegalArgumentException("Invalid dial");
+        if (pin == null || pin.length != 32 || timeoutMs <= 0) throw new IllegalArgumentException("Invalid dial");
+        if (addresses.isEmpty()) throw new IOException("No current addresses for this Mac; select a discovered Mac or enter an address");
         byte[] identity = pin.clone();
         List<SavedMacs.Endpoint> candidates = List.copyOf(addresses);
         Future<Connected<T>> future;
