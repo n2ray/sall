@@ -23,13 +23,14 @@ final class TextScaleControl extends Button {
         void begin();
         boolean canCommit();
         void commit(Double scale);
+        void rulerChanged(boolean open);
     }
     private final Delegate delegate;
     private PopupWindow popup;
     private Ruler ruler;
     private float downX;
     private double start, live;
-    private boolean off, tracking;
+    private boolean off, tracking, rulerVisible;
     private float stepPixels;
     private final float density;
 
@@ -62,10 +63,17 @@ final class TextScaleControl extends Button {
                 int rulerHeight = ruler.heightFor(getHeight());
                 popup = new PopupWindow(ruler, rulerWidth, rulerHeight, false);
                 popup.setTouchable(false); popup.setClippingEnabled(true);
+                popup.setOnDismissListener(() -> cancel("popup dismissed"));
                 int[] location = new int[2]; getLocationOnScreen(location);
-                popup.showAtLocation(this, Gravity.TOP | Gravity.LEFT,
-                        location[0] + getWidth() / 2 - rulerWidth / 2,
-                        location[1] + (getHeight() - rulerHeight) / 2);
+                try {
+                    popup.showAtLocation(this, Gravity.TOP | Gravity.LEFT,
+                            location[0] + getWidth() / 2 - rulerWidth / 2,
+                            location[1] + (getHeight() - rulerHeight) / 2);
+                    if (!tracking || popup == null) return false;
+                    rulerVisible = true; delegate.rulerChanged(true);
+                } catch (android.view.WindowManager.BadTokenException e) {
+                    cancel("window unavailable"); return false;
+                }
                 return true;
             case MotionEvent.ACTION_MOVE:
                 if (!tracking) return false;
@@ -92,8 +100,9 @@ final class TextScaleControl extends Button {
         if (tracking && !reason.equals("released")) android.util.Log.i("SillAndroid", "Aa: cancelled (" + reason + ")");
         tracking = false;
         if (getParent() != null) getParent().requestDisallowInterceptTouchEvent(false);
-        if (popup != null) popup.dismiss();
-        popup = null; ruler = null;
+        PopupWindow shown = popup; popup = null; ruler = null;
+        if (shown != null) shown.dismiss();
+        if (rulerVisible) { rulerVisible = false; delegate.rulerChanged(false); }
     }
     @Override public void onInitializeAccessibilityNodeInfo(AccessibilityNodeInfo info) {
         super.onInitializeAccessibilityNodeInfo(info);

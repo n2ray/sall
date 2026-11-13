@@ -2,6 +2,10 @@ package io.github.n2ray.sill;
 
 final class TextScale {
     private TextScale() {}
+    record Overlay(boolean appsHidden, boolean menuHidden, boolean followingHidden, boolean stripDimmed) {}
+    static Overlay overlay(boolean open, boolean landscape, boolean menuInBar) {
+        return new Overlay(open && !landscape, open && menuInBar, open, open && landscape);
+    }
     static boolean offersOff(Boolean setting, Boolean running) {
         return running != null ? !running : !Boolean.TRUE.equals(setting);
     }

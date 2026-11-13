@@ -124,6 +124,9 @@ public final class MainActivity extends Activity {
     private volatile boolean clipboardSubscribed;
     private Double textScale;
     private TextScaleControl scaleControl;
+    private boolean scaleRulerOpen;
+    private record ScaleViewState(boolean enabled, float alpha, int accessibility) {}
+    private final java.util.Map<android.view.View, ScaleViewState> scaleViewStates = new java.util.IdentityHashMap<>();
     private final Runnable viewportUpdate = this::sendViewport;
     private Runnable updateSessionLayout;
     private float portraitImeHeight;
@@ -654,8 +657,18 @@ public final class MainActivity extends Activity {
     }
     private void refreshSavedMacs() {
         savedMacs.removeAllViews();
+        java.util.List<SavedMacs.Mac> saved = savedMacStore.all();
+        java.util.Map<String, java.util.List<SavedMacs.Mac>> sections = ConnectionGroups.sections(saved,
+                mac -> storedGroup(mac.identity()));
+        for (var section : sections.entrySet()) {
+        if (!section.getKey().isEmpty()) {
+            TextView header = new TextView(this); header.setText(section.getKey().equals("Other") ? "其他" : section.getKey());
+            header.setTextColor(0xffa4abb5); header.setTextSize(12);
+            header.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
+            header.setPadding(0, dp(12), 0, dp(6)); savedMacs.addView(header);
+        }
         LinearLayout tileRow = null; int inRow = 0;
-        for (SavedMacs.Mac mac : savedMacStore.all()) {
+        for (SavedMacs.Mac mac : section.getValue()) {
             android.view.View row;
             boolean connecting = running && mac.identity().macId().equals(connectingMacId);
             if (connectionTiles) {
@@ -707,30 +720,96 @@ public final class MainActivity extends Activity {
                 list.setOnClickListener(v -> connectSavedMac(mac.identity(), mac.preferred()));
                 savedMacs.addView(list, new LinearLayout.LayoutParams(-1, -2)); row = list;
             }
-            row.setOnLongClickListener(v -> {
-                if (running) { show("请先取消当前连接。"); return true; }
-                new android.app.AlertDialog.Builder(this).setTitle("移除本机记录？")
-                    .setMessage("这只移除手机上的记录；如需撤销 Mac 的信任，请在 Mac 的 Sill 设置中移除设备。")
-                    .setNegativeButton("取消", null).setPositiveButton("移除", (d, which) -> {
-                        if (running) { show("请先取消当前连接。"); return; }
-                        java.io.Closeable cancelled = null;
-                        synchronized (savedMacStore) {
-                            savedMacStore.forget(mac.identity());
-                            if (activeAuthorization != null && activeAuthorization.matches(mac.identity().pin())) {
-                                closing = true;
-                                cancelled = activeAuthorization.revoke();
-                            }
-                            if (pendingPairing != null) {
-                                java.io.Closeable pairingResource = pendingPairing.forget(mac.identity().pin());
-                                if (pairingResource != null) { closing = true; cancelled = pairingResource; }
-                            }
-                        }
-                        if (cancelled != null) try { cancelled.close(); } catch (java.io.IOException ignored) { }
-                        synchronized (reconnectLock) { reconnectLock.notifyAll(); }
-                        refreshSavedMacs();
-                    }).show(); return true;
-            });
+            row.setOnLongClickListener(v -> { showSavedMacMenu(mac); return true; });
         }
+        }
+    }
+    private static String groupKey(SavedMacs.Identity identity) { return "connGroup:" + identity.fingerprint(); }
+    private String storedGroup(SavedMacs.Identity identity) {
+        Object value = getPreferences(0).getAll().get(groupKey(identity));
+        return value instanceof String text ? ConnectionGroups.clean(text) : null;
+    }
+    private boolean isSavedIdentity(SavedMacs.Identity identity) {
+        return savedMacStore.all().stream().anyMatch(mac -> mac.identity().macId().equals(identity.macId())
+                && mac.identity().fingerprint().equals(identity.fingerprint()));
+    }
+    private java.util.List<String> connectionGroupNames() {
+        java.util.List<String> values = new java.util.ArrayList<>();
+        for (SavedMacs.Mac mac : savedMacStore.all()) {
+            String group = storedGroup(mac.identity()); if (group != null) values.add(group);
+        }
+        return ConnectionGroups.ordered(values, true);
+    }
+    private void setConnectionGroup(SavedMacs.Identity identity, String raw) {
+        synchronized (savedMacStore) {
+            if (!ConnectionGroups.canEdit(running, isSavedIdentity(identity))) { show("Mac 记录已变化，请重试。"); return; }
+            String group = ConnectionGroups.canonical(raw, connectionGroupNames());
+            android.content.SharedPreferences.Editor edit = getPreferences(0).edit();
+            if (group == null) edit.remove(groupKey(identity)); else edit.putString(groupKey(identity), group);
+            edit.apply();
+        }
+        refreshSavedMacs();
+    }
+    private void showSavedMacMenu(SavedMacs.Mac mac) {
+        if (running || !isSavedIdentity(mac.identity())) { show("请先取消当前连接。"); return; }
+        String group = storedGroup(mac.identity());
+        String[] choices = {"连接", group == null ? "分组" : "分组：" + group,
+                connectionTiles ? "显示为列表" : "显示为卡片", "移除本机记录"};
+        new android.app.AlertDialog.Builder(this).setTitle(mac.displayName()).setItems(choices, (dialog, which) -> {
+            if (!ConnectionGroups.canEdit(running, isSavedIdentity(mac.identity()))) { show("Mac 记录已变化，请重试。"); return; }
+            if (which == 0) connectSavedMac(mac.identity(), mac.preferred());
+            else if (which == 1) showConnectionGroups(mac.identity());
+            else if (which == 2) {
+                connectionTiles = !connectionTiles; getPreferences(0).edit().putBoolean("connectionTiles", connectionTiles).apply();
+                updateConnectionStyle(); refreshSavedMacs();
+            } else if (which == 3) confirmForgetMac(mac);
+        }).setNegativeButton("取消", null).show();
+    }
+    private void showConnectionGroups(SavedMacs.Identity identity) {
+        java.util.List<String> groups = connectionGroupNames();
+        java.util.List<String> labels = new java.util.ArrayList<>(); labels.add("无分组"); labels.addAll(groups); labels.add("新建分组…");
+        String selected = storedGroup(identity);
+        int checked = selected == null ? 0 : groups.indexOf(selected) + 1;
+        if (selected != null && checked == 0) checked = -1;
+        new android.app.AlertDialog.Builder(this).setTitle("分组")
+                .setSingleChoiceItems(labels.toArray(new String[0]), checked, (dialog, which) -> {
+                    dialog.dismiss();
+                    if (!ConnectionGroups.canEdit(running, isSavedIdentity(identity))) { show("Mac 记录已变化，请重试。"); return; }
+                    if (which == labels.size() - 1) createConnectionGroup(identity);
+                    else setConnectionGroup(identity, which == 0 ? null : groups.get(which - 1));
+                }).setNegativeButton("取消", null).show();
+    }
+    private void createConnectionGroup(SavedMacs.Identity identity) {
+        EditText name = new EditText(this); name.setSingleLine(true); name.setHint("分组名称");
+        android.app.AlertDialog dialog = new android.app.AlertDialog.Builder(this).setTitle("新建分组")
+                .setView(name).setNegativeButton("取消", null).setPositiveButton("创建", null).create();
+        dialog.setOnShowListener(ignored -> dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            if (ConnectionGroups.clean(name.getText().toString()) == null) { name.setError("请输入有效名称，不能使用 Other。"); return; }
+            if (!ConnectionGroups.canEdit(running, isSavedIdentity(identity))) { dialog.dismiss(); show("Mac 记录已变化，请重试。"); return; }
+            setConnectionGroup(identity, name.getText().toString()); dialog.dismiss();
+        }));
+        dialog.show();
+    }
+    private void confirmForgetMac(SavedMacs.Mac mac) {
+        new android.app.AlertDialog.Builder(this).setTitle("移除本机记录？")
+                .setMessage("这只移除手机上的记录；如需撤销 Mac 的信任，请在 Mac 的 Sill 设置中移除设备。")
+                .setNegativeButton("取消", null).setPositiveButton("移除", (dialog, which) -> {
+                    java.io.Closeable cancelled = null;
+                    synchronized (savedMacStore) {
+                        if (!ConnectionGroups.canEdit(running, isSavedIdentity(mac.identity()))) { show("Mac 记录已变化，请重试。"); return; }
+                        savedMacStore.forget(mac.identity());
+                        if (activeAuthorization != null && activeAuthorization.matches(mac.identity().pin())) {
+                            closing = true; cancelled = activeAuthorization.revoke();
+                        }
+                        if (pendingPairing != null) {
+                            java.io.Closeable pairingResource = pendingPairing.forget(mac.identity().pin());
+                            if (pairingResource != null) { closing = true; cancelled = pairingResource; }
+                        }
+                    }
+                    if (cancelled != null) try { cancelled.close(); } catch (java.io.IOException ignored) { }
+                    synchronized (reconnectLock) { reconnectLock.notifyAll(); }
+                    refreshSavedMacs();
+                }).show();
     }
     private void connectSavedMac(SavedMacs.Identity identity, SavedMacs.Endpoint endpoint) {
         if (running) { show("请先取消当前连接。"); return; }
@@ -859,9 +938,10 @@ public final class MainActivity extends Activity {
                 return TextScale.offersOff(configured, running);
             }
             public Double scale() { return textScale; }
-            public void begin() { dismissSettings(false); dismissMenu(); if (appDrawer != null) appDrawer.dismiss(); owner = connection; window = activeWindowId; offered = offersOff(); }
+            public void begin() { dismissSettings(false); dismissMenu(); dismissWindowControls(); cancelWindowDrag(); if (appDrawer != null) appDrawer.dismiss(); owner = connection; window = activeWindowId; offered = offersOff(); }
             public boolean canCommit() { return available() && connection == owner && activeWindowId == window && offered == offersOff(); }
             public void commit(Double scale) { textScale = scale; android.util.Log.i("SillAndroid", "Aa: committed scale=" + scale); scheduleViewport(); }
+            public void rulerChanged(boolean open) { applyScaleRuler(open); }
         });
         scaleControl = scaleButton; scaleButton.setTextColor(-1); scaleButton.setTextSize(12); scaleButton.setBackground(shape(0xff272a30, 12));
         LinearLayout.LayoutParams scaleParams = new LinearLayout.LayoutParams(0, dp(46), 1);
@@ -886,7 +966,14 @@ public final class MainActivity extends Activity {
         });
         scaleButton.refresh();
         root.getViewTreeObserver().addOnGlobalLayoutListener(this::refreshToolbarAppearance);
-        android.widget.HorizontalScrollView strip = new android.widget.HorizontalScrollView(this); tourStrip = strip;
+        android.widget.HorizontalScrollView strip = new android.widget.HorizontalScrollView(this) {
+            @Override public boolean onInterceptTouchEvent(android.view.MotionEvent event) {
+                return scaleRulerOpen && root.getWidth() > root.getHeight() || super.onInterceptTouchEvent(event);
+            }
+            @Override public boolean onTouchEvent(android.view.MotionEvent event) {
+                return scaleRulerOpen && root.getWidth() > root.getHeight() || super.onTouchEvent(event);
+            }
+        }; tourStrip = strip;
         strip.setHorizontalScrollBarEnabled(false); choices = new LinearLayout(this); choices.setOrientation(LinearLayout.HORIZONTAL);
         choices.setGravity(android.view.Gravity.CENTER_VERTICAL); choices.setPadding(dp(2), 0, dp(2), 0);
         strip.addView(choices);
@@ -992,6 +1079,7 @@ public final class MainActivity extends Activity {
             }
             updateWindowChoiceGeometry(landscape);
             refreshToolbarAppearance();
+            if (scaleRulerOpen) applyScaleRuler(true);
             layoutVideo(); cursor.invalidate();
             tourLayoutChanged();
         };
@@ -1062,6 +1150,34 @@ public final class MainActivity extends Activity {
         Button b = button(row, label, action); LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, dp(46), 1);
         p.setMargins(dp(2), dp(3), dp(2), dp(3)); b.setLayoutParams(p); b.setPadding(0, 0, 0, 0);
         return b;
+    }
+    private void applyScaleRuler(boolean open) {
+        scaleRulerOpen = open;
+        if (root == null) return;
+        TextScale.Overlay overlay = TextScale.overlay(open, root.getWidth() > root.getHeight(),
+                menuButton != null && menuButton.getParent() == sessionBar);
+        scaleView(tourAppsButton, overlay.appsHidden(), 0, true);
+        scaleView(menuButton, overlay.menuHidden(), 0, true);
+        scaleView(tourKeyboardButton, overlay.followingHidden(), 0, true);
+        scaleView(desktopButton, overlay.followingHidden(), 0, true);
+        scaleView(tourSettingsButton, overlay.followingHidden(), 0, true);
+        scaleView(tourStrip, overlay.stripDimmed(), .2f, false);
+    }
+    private void scaleView(android.view.View view, boolean altered, float alpha, boolean disable) {
+        if (view == null) return;
+        if (altered) {
+            if (!scaleViewStates.containsKey(view)) scaleViewStates.put(view,
+                    new ScaleViewState(view.isEnabled(), view.getAlpha(), view.getImportantForAccessibility()));
+            view.setAlpha(alpha);
+            if (disable) view.setEnabled(false);
+            view.setImportantForAccessibility(android.view.View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+        } else {
+            ScaleViewState previous = scaleViewStates.remove(view);
+            if (previous != null) {
+                view.setEnabled(previous.enabled()); view.setAlpha(previous.alpha());
+                view.setImportantForAccessibility(previous.accessibility());
+            }
+        }
     }
     private void configureToolbarButton(Button button, String symbol) {
         button.setTag(symbol); button.setTextSize(11); button.setGravity(android.view.Gravity.CENTER);
@@ -1261,6 +1377,7 @@ public final class MainActivity extends Activity {
     }
     @Override public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
+        if (!hasFocus && scaleControl != null) scaleControl.cancel();
         if (!hasFocus) clipboardReceipt.cancel();
         if (!hasFocus) releaseHardwareKeys();
         if (!hasFocus && pictureInput != null) pictureInput.cancel();
@@ -2351,6 +2468,7 @@ public final class MainActivity extends Activity {
         tourOverlay.showStep(tourRun, copy, targets, room);
     }
     private void disconnect() {
+        if (scaleControl != null) scaleControl.cancel();
         status.setText("已断开连接。");
         dismissSettings(false);
         if (appDrawer != null) appDrawer.dismiss();
@@ -2532,6 +2650,7 @@ public final class MainActivity extends Activity {
                 connection = null; hostLock = null; keyframeRecovery = null; keyframeStreaming = false; recoveryFrame.set(null); lastParameters = null; revealFrame.set(null); recoveryGeneration = -1; pointerSync = null; clipboardSubscribed = false; hostClipboardAvailable = false; clipboardSource = ""; clipboardReceipt.cancel(); releaseDecoder();
                         if (audio != null) { localAudio.setPlayer(null); audio.close(); audio = null; }
                         ui.post(() -> {
+                            if (scaleControl != null) scaleControl.cancel();
                             suspendTourForReconnect(); dismissSettings(false); dismissStaleMenu(); dismissWindowControls(); cancelWindowDrag();
                             hostSettings = null; pendingSettingsToken = 0; desktopDisplays = -1; desktopDisplay = 0; desktopActive = false; hostGestures = 0; hostKeyRepeat = false; hostKeyRepeatKnown = false; trackpad.setMacGesturesEnabled(false);
                             desktopButton.setText("桌面"); choices.removeAllViews(); thumbnails.clear(); thumbnailImages.clear(); appIcons.clear(); iconBadges.clear(); activeWindowId = -1;
@@ -2552,7 +2671,7 @@ public final class MainActivity extends Activity {
                 if (pip != null && pip.active()) ui.post(pip::stop);
                 connection = null; hostLock = null; keyframeRecovery = null; keyframeStreaming = false; recoveryFrame.set(null); lastParameters = null; revealFrame.set(null); recoveryGeneration = -1; pointerSync = null; clipboardSubscribed = false; hostClipboardAvailable = false; clipboardSource = ""; clipboardReceipt.cancel(); releaseDecoder();
                 if (audio != null) { localAudio.setPlayer(null); audio.close(); audio = null; }
-                ui.post(() -> { endTour(false); dismissSettings(false); dismissStaleMenu(); dismissWindowControls(); cancelWindowDrag(); hostSettings = null; pendingSettingsToken = 0; desktopDisplays = -1; desktopDisplay = 0; desktopActive = false; hostGestures = 0; hostKeyRepeat = false; hostKeyRepeatKnown = false; trackpad.setMacGesturesEnabled(false); desktopButton.setText("桌面"); thumbnailImages.clear(); appIcons.clear(); iconBadges.clear(); activeWindowId = -1; if (appDrawer != null) appDrawer.dismiss(); drawerWindows = new JSONArray(); appList = new JSONArray(); zoom.reset(); screenAwake.setStreaming(false); pictureInput.cancel(); trackpad.cancelGestures(); keyboard.discard(); resetCursorShape(); modifiers = heldModifiers = 0; for (android.view.View button : modifierViews.values()) button.setBackground(shape(0xff272a30, 12)); sessionPanel.setVisibility(android.view.View.GONE); connectionContainer.setVisibility(android.view.View.VISIBLE); applyContentInsets(); running = false; updateConnectionCancel(); });
+                ui.post(() -> { if (scaleControl != null) scaleControl.cancel(); endTour(false); dismissSettings(false); dismissStaleMenu(); dismissWindowControls(); cancelWindowDrag(); hostSettings = null; pendingSettingsToken = 0; desktopDisplays = -1; desktopDisplay = 0; desktopActive = false; hostGestures = 0; hostKeyRepeat = false; hostKeyRepeatKnown = false; trackpad.setMacGesturesEnabled(false); desktopButton.setText("桌面"); thumbnailImages.clear(); appIcons.clear(); iconBadges.clear(); activeWindowId = -1; if (appDrawer != null) appDrawer.dismiss(); drawerWindows = new JSONArray(); appList = new JSONArray(); zoom.reset(); screenAwake.setStreaming(false); pictureInput.cancel(); trackpad.cancelGestures(); keyboard.discard(); resetCursorShape(); modifiers = heldModifiers = 0; for (android.view.View button : modifierViews.values()) button.setBackground(shape(0xff272a30, 12)); sessionPanel.setVisibility(android.view.View.GONE); connectionContainer.setVisibility(android.view.View.VISIBLE); applyContentInsets(); running = false; updateConnectionCancel(); });
             }
         });
     }

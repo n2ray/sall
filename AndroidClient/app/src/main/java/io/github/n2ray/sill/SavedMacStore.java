@@ -157,6 +157,7 @@ final class SavedMacStore {
 
     synchronized void forget(SavedMacs.Identity identity) {
         SharedPreferences.Editor edit = preferences.edit();
+        edit.remove("connGroup:" + identity.fingerprint());
         String prefix = SavedMacs.PREFIX + identity.macId() + ":";
         for (Map.Entry<String, ?> entry : preferences.getAll().entrySet()) {
             if (entry.getKey().startsWith(prefix)) edit.remove(entry.getKey());

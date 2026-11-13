@@ -49,6 +49,8 @@ javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/MultiFingerG
 java -ea -cp "$test_dir" io.github.n2ray.sill.MultiFingerGestureTest
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/AppDrawerModel.java "$root"/tests/AppDrawerModelTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sill.AppDrawerModelTest
+javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/ConnectionGroups.java "$root"/tests/ConnectionGroupsTest.java
+java -ea -cp "$test_dir" io.github.n2ray.sill.ConnectionGroupsTest
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/HostLockState.java "$root"/tests/HostLockStateTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sill.HostLockStateTest
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/SessionIdlePolicy.java "$root"/tests/SessionIdlePolicyTest.java

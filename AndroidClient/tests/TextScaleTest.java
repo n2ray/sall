@@ -15,6 +15,11 @@ public final class TextScaleTest {
         assert !TextScale.singlePointer(2);
         assert TextScale.title(1).equals("1×");
         assert TextScale.title(.75).equals("0.75×");
+        assert TextScale.overlay(false, false, false).equals(new TextScale.Overlay(false, false, false, false));
+        assert TextScale.overlay(true, false, false).equals(new TextScale.Overlay(true, false, true, false));
+        assert TextScale.overlay(true, false, true).equals(new TextScale.Overlay(true, true, true, false));
+        assert TextScale.overlay(true, true, true).equals(new TextScale.Overlay(false, true, true, true));
+        assert TextScale.overlay(false, true, true).equals(new TextScale.Overlay(false, false, false, false));
         System.out.println("Text scale checks passed");
     }
 }
