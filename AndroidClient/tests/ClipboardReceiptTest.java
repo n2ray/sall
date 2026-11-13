@@ -20,6 +20,14 @@ public final class ClipboardReceiptTest {
         assert !r.receive(n, 102, d) && !r.take(d);
         r.cancel(d); assert r.pending(e);
         assert r.receive(new byte[]{4}, 102, e) && r.take(e);
+        long chip = r.begin(n, 200);
+        assert r.receive(n, 201, chip);
+        r.cancel(chip); // a panel opened after ack and before the delayed paste
+        assert !r.take(chip);
+        long settings = r.begin(n, 300);
+        assert r.receive(n, 301, settings);
+        r.cancel(chip); // stale chip cancellation cannot revoke a newer settings action
+        assert r.take(settings);
         System.out.println("Clipboard receipt checks passed");
     }
 }

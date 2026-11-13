@@ -94,7 +94,11 @@ public final class MainActivity extends Activity {
     private android.widget.FrameLayout picture;
     private SessionScreenAwake screenAwake;
     private SurfaceView video;
-    private TextView lockOverlay;
+    private android.widget.FrameLayout lockOverlay;
+    private LinearLayout lockContent;
+    private TextView lockTitle, lockDetail, lockViewNotice;
+    private android.widget.ProgressBar lockSpinner;
+    private android.view.View lockIcon;
     private android.view.View cursor;
     private PictureInput pictureInput;
     private android.graphics.Bitmap cursorBitmap;
@@ -109,6 +113,17 @@ public final class MainActivity extends Activity {
     private volatile boolean clipboardEnabled, pasteRightAway;
     private volatile boolean hostClipboardAvailable;
     private final ClipboardReceipt clipboardReceipt = new ClipboardReceipt();
+    private final ClipboardChipState clipboardChipState = new ClipboardChipState();
+    private final ClipboardChangeTracker clipboardChangeTracker = new ClipboardChangeTracker();
+    private ClipboardChipView clipboardChip;
+    private SillConnection clipboardChipOwner;
+    private long clipboardChipSession, clipboardChipChange, clipboardChipPending;
+    private volatile long clipboardChipAcknowledged;
+    private long clipboardChipAcknowledgedChange;
+    private boolean clipboardChipListening;
+    private String clipboardChipRender = "";
+    private final Runnable clipboardChipTick = this::refreshClipboardChip;
+    private final android.content.ClipboardManager.OnPrimaryClipChangedListener clipboardChipListener = this::observeClipboardMetadata;
     private long clipboardToken;
     private volatile String clipboardSource = "";
     private boolean audioEnabled;
@@ -869,9 +884,39 @@ public final class MainActivity extends Activity {
             }
         };
         picture.addView(cursor, new android.widget.FrameLayout.LayoutParams(-1, -1));
-        lockOverlay = new TextView(this); lockOverlay.setGravity(android.view.Gravity.CENTER);
-        lockOverlay.setTextColor(0xffd6d9de); lockOverlay.setTextSize(16); lockOverlay.setPadding(dp(20), dp(20), dp(20), dp(20));
-        lockOverlay.setBackgroundColor(0xff111216); lockOverlay.setText("正在等待 Mac 画面…");
+        lockOverlay = new android.widget.FrameLayout(this); lockOverlay.setBackgroundColor(0xff1f2126);
+        lockContent = new LinearLayout(this); lockContent.setOrientation(LinearLayout.VERTICAL);
+        lockContent.setGravity(android.view.Gravity.CENTER); lockContent.setPadding(dp(24), dp(24), dp(24), dp(24));
+        lockContent.setImportantForAccessibility(android.view.View.IMPORTANT_FOR_ACCESSIBILITY_YES);
+        lockContent.setAccessibilityLiveRegion(android.view.View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        lockIcon = new android.view.View(this) {
+            private final android.graphics.Paint paint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+            @Override protected void onDraw(android.graphics.Canvas canvas) {
+                float scale = Math.min(getWidth(), getHeight()) / 28f;
+                int save = canvas.save(); canvas.scale(scale, scale); paint.setColor(0xffa4abb5);
+                canvas.drawCircle(10, 8, 4, paint); canvas.drawCircle(19, 9, 3.5f, paint);
+                canvas.drawRoundRect(2, 14, 17, 24, 6, 6, paint); canvas.drawRoundRect(15, 15, 26, 23, 5, 5, paint);
+                canvas.restoreToCount(save);
+            }
+        };
+        lockIcon.setImportantForAccessibility(android.view.View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        lockContent.addView(lockIcon, new LinearLayout.LayoutParams(dp(28), dp(28)));
+        lockSpinner = new android.widget.ProgressBar(this, null, android.R.attr.progressBarStyleSmall);
+        lockSpinner.setIndeterminateTintList(android.content.res.ColorStateList.valueOf(0xffa4abb5));
+        lockSpinner.setImportantForAccessibility(android.view.View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        lockContent.addView(lockSpinner, new LinearLayout.LayoutParams(dp(28), dp(28)));
+        lockTitle = new TextView(this); lockTitle.setTextColor(0xffeef0f3); lockTitle.setTextSize(17);
+        lockTitle.setTypeface(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD); lockTitle.setGravity(android.view.Gravity.CENTER);
+        lockTitle.setImportantForAccessibility(android.view.View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        LinearLayout.LayoutParams lockTitleParams = new LinearLayout.LayoutParams(-1, -2); lockTitleParams.topMargin = dp(10); lockContent.addView(lockTitle, lockTitleParams);
+        lockDetail = new TextView(this); lockDetail.setTextColor(0xffa4abb5); lockDetail.setTextSize(15); lockDetail.setGravity(android.view.Gravity.CENTER);
+        lockDetail.setImportantForAccessibility(android.view.View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        LinearLayout.LayoutParams lockDetailParams = new LinearLayout.LayoutParams(-1, -2); lockDetailParams.topMargin = dp(10); lockContent.addView(lockDetail, lockDetailParams);
+        lockOverlay.addView(lockContent, new android.widget.FrameLayout.LayoutParams(-1, -2, android.view.Gravity.CENTER));
+        lockOverlay.addOnLayoutChangeListener((view, l, t, r, b, ol, ot, oright, ob) -> {
+            android.widget.FrameLayout.LayoutParams p = (android.widget.FrameLayout.LayoutParams) lockContent.getLayoutParams();
+            int width = Math.min(dp(440), r - l); if (width > 0 && p.width != width) { p.width = width; lockContent.setLayoutParams(p); }
+        });
         picture.addView(lockOverlay, new android.widget.FrameLayout.LayoutParams(-1, -1));
         pictureStatus = new TextView(this);
         pictureStatus.setTextColor(0xfff2f2f4); pictureStatus.setTextSize(12);
@@ -884,6 +929,25 @@ public final class MainActivity extends Activity {
                 android.view.Gravity.TOP | android.view.Gravity.CENTER_HORIZONTAL);
         statusParams.setMargins(dp(16), dp(8), dp(16), 0);
         picture.addView(pictureStatus, statusParams);
+        lockViewNotice = new TextView(this); lockViewNotice.setTextColor(0xffeef0f3); lockViewNotice.setTextSize(13);
+        lockViewNotice.setGravity(android.view.Gravity.CENTER); lockViewNotice.setMaxLines(3);
+        lockViewNotice.setPadding(dp(14), dp(7), dp(14), dp(7)); lockViewNotice.setBackground(shape(0xeb16181c, 30));
+        lockViewNotice.setText("当前显示的是你账户自己的桌面，而非 Mac 屏幕；切回你的账户后即可操作。");
+        lockViewNotice.setAccessibilityLiveRegion(android.view.View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        lockViewNotice.setVisibility(android.view.View.GONE);
+        android.widget.FrameLayout.LayoutParams lockNoticeParams = new android.widget.FrameLayout.LayoutParams(-2, -2,
+                android.view.Gravity.TOP | android.view.Gravity.CENTER_HORIZONTAL);
+        lockNoticeParams.setMargins(dp(16), dp(8), dp(16), 0); picture.addView(lockViewNotice, lockNoticeParams);
+        clipboardChip = new ClipboardChipView(this, new ClipboardChipView.Actions() {
+            public void paste() {
+                Long offered = clipboardChipState.offered();
+                if (offered != null && clipboardChipAllowed()) pasteClipboard(offered);
+            }
+            public void dismiss() { clipboardChipState.dismiss(clipboardChipSession, android.os.SystemClock.uptimeMillis()); refreshClipboardChip(); }
+        });
+        android.widget.FrameLayout.LayoutParams chipParams = new android.widget.FrameLayout.LayoutParams(-2, -2,
+                android.view.Gravity.TOP | android.view.Gravity.END);
+        chipParams.setMargins(dp(8), dp(8), dp(8), 0); picture.addView(clipboardChip, chipParams);
         pictureInput = new PictureInput(cursor, zoom, new PictureInput.Listener() {
             public boolean beginPicture() {
                 if (trackpad == null) return false;
@@ -965,7 +1029,7 @@ public final class MainActivity extends Activity {
             }
         });
         scaleButton.refresh();
-        root.getViewTreeObserver().addOnGlobalLayoutListener(this::refreshToolbarAppearance);
+        root.getViewTreeObserver().addOnGlobalLayoutListener(() -> { refreshToolbarAppearance(); refreshClipboardChip(); });
         android.widget.HorizontalScrollView strip = new android.widget.HorizontalScrollView(this) {
             @Override public boolean onInterceptTouchEvent(android.view.MotionEvent event) {
                 return scaleRulerOpen && root.getWidth() > root.getHeight() || super.onInterceptTouchEvent(event);
@@ -1020,7 +1084,8 @@ public final class MainActivity extends Activity {
             sessionStatus.setVisibility(android.view.View.GONE); keys.setVisibility(visible); trackpad.setVisibility(visible);
             int statusWidth = Math.max(0, width - dp(32));
             if (pictureStatus.getMaxWidth() != statusWidth) pictureStatus.setMaxWidth(statusWidth);
-            pictureStatus.setVisibility(pictureStatusActive ? android.view.View.VISIBLE : android.view.View.GONE);
+            if (lockViewNotice.getMaxWidth() != statusWidth) lockViewNotice.setMaxWidth(statusWidth);
+            pictureStatus.setVisibility(pictureStatusActive && !lockViewActive() ? android.view.View.VISIBLE : android.view.View.GONE);
             stripRow.setVisibility(landscape || large ? android.view.View.GONE : android.view.View.VISIBLE);
             if (landscape && strip.getParent() != bar) {
                 stripRow.removeView(strip); if (menuButton.getParent() == stripRow) stripRow.removeView(menuButton); sessionPanel.removeView(bar);
@@ -1152,7 +1217,9 @@ public final class MainActivity extends Activity {
         return b;
     }
     private void applyScaleRuler(boolean open) {
+        if (open) invalidateChipAcknowledged();
         scaleRulerOpen = open;
+        refreshClipboardChip();
         if (root == null) return;
         TextScale.Overlay overlay = TextScale.overlay(open, root.getWidth() > root.getHeight(),
                 menuButton != null && menuButton.getParent() == sessionBar);
@@ -1377,6 +1444,7 @@ public final class MainActivity extends Activity {
     }
     @Override public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
+        if (!hasFocus) invalidateChipAcknowledged();
         if (!hasFocus && scaleControl != null) scaleControl.cancel();
         if (!hasFocus) clipboardReceipt.cancel();
         if (!hasFocus) releaseHardwareKeys();
@@ -1384,6 +1452,7 @@ public final class MainActivity extends Activity {
         if (!hasFocus && trackpad != null) trackpad.cancelGestures();
         if (!hasFocus) { dismissWindowControls(); cancelWindowDrag(); }
         else if (picture != null) picture.post(this::considerTourPicture);
+        if (hasFocus) observeClipboardMetadata(); else refreshClipboardChip();
     }
     private void tapKey(int usage) { pressModifiers(); sendKey(usage, true); sendKey(usage, false); releaseModifiers(); }
     private void sendText(String text) {
@@ -1428,6 +1497,7 @@ public final class MainActivity extends Activity {
         else select(new JSONObject(), true);
     }
     private void showWindows() {
+        invalidateChipAcknowledged();
         dismissSettings(false);
         dismissMenu();
         if (connection == null) return;
@@ -1469,6 +1539,7 @@ public final class MainActivity extends Activity {
     }
     private void showMenu(JSONArray items, String title, int version) { dismissMenu(); showMenu(items, title, version, null, menuOwner); }
     private void showMenu(JSONArray items, String title, int version, Runnable back, SillConnection owner) {
+        invalidateChipAcknowledged();
         if (owner == null || connection != owner || menuOwner != owner) return;
         dismissSettings(false);
         if (appDrawer != null) appDrawer.dismiss();
@@ -1653,6 +1724,7 @@ public final class MainActivity extends Activity {
     }
     private void settings() { settings(false); }
     private void settings(boolean reanchor) {
+        if (!reanchor) invalidateChipAcknowledged();
         if (!reanchor && settingsOverlay != null) { dismissSettings(); return; }
         if (!reanchor) {
             dismissMenu();
@@ -2199,14 +2271,124 @@ public final class MainActivity extends Activity {
             ui.postDelayed(() -> { if (pendingSettingsToken == waiting) { pendingSettingsToken = 0; if (refreshInlineHostSettings != null) refreshInlineHostSettings.run(); show("Mac 未确认设置，请重试"); } }, 10000);
         } catch (Exception e) { pendingSettingsToken = 0; if (refreshInlineHostSettings != null) refreshInlineHostSettings.run(); show("设置发送失败"); }
     }
+    private boolean clipboardChipEligible() {
+        return clipboardChipOwner != null && clipboardChipOwner == connection && clipboardEnabled && hostClipboardAvailable
+                && keyframeStreaming && !clipboardSource.isEmpty() && !clipboardSource.contains("\"none\"");
+    }
+    private void invalidateChipAcknowledged() {
+        synchronized (outputLock) {
+            long token = clipboardChipAcknowledged;
+            if (token != 0) { clipboardChipAcknowledged = 0; clipboardReceipt.cancel(token); }
+        }
+    }
+    private void invalidateChipAcknowledged(long expected) {
+        synchronized (outputLock) {
+            if (ClipboardPastePolicy.sameChipAcknowledgement(clipboardChipAcknowledged, expected)) {
+                clipboardChipAcknowledged = 0; clipboardReceipt.cancel(expected);
+            }
+        }
+    }
+    private boolean clipboardChipUncovered() {
+        HostLockState lock = hostLock;
+        return keyframeForeground && hasWindowFocus() && sessionPanel != null && sessionPanel.getVisibility() == android.view.View.VISIBLE
+                && (pip == null || !pip.active()) && !settingsOpen && !tourInputBlocked
+                && (appDrawer == null || !appDrawer.isShowing()) && (menuDialog == null || !menuDialog.isShowing())
+                && (windowControls == null || !windowControls.isShowing()) && draggedWindow == null && activeWindowHold == null
+                && !scaleRulerOpen && lock != null && lock.reason() == HostLockState.Reason.NONE;
+    }
+    private boolean clipboardChipAllowed() { return clipboardChipEligible() && clipboardChipUncovered(); }
+    private void syncClipboardChipSession() {
+        if (clipboardChipOwner == connection) return;
+        invalidateChipAcknowledged();
+        clipboardChipOwner = connection; clipboardChipSession++; clipboardChipPending = 0;
+        clipboardChipState.newSession(clipboardChipSession, android.os.SystemClock.uptimeMillis());
+    }
+    private void observeClipboardMetadata() { observeClipboardMetadata(false); }
+    private void observeClipboardMetadata(boolean macWriteCompleted) {
+        if (clipboardChip == null || !keyframeForeground || !hasWindowFocus() || (pip != null && pip.active())) {
+            if (macWriteCompleted) clipboardChangeTracker.macWriteUnidentified(System.currentTimeMillis());
+            return;
+        }
+        syncClipboardChipSession();
+        if (!clipboardEnabled || !hostClipboardAvailable || clipboardChipOwner == null) {
+            if (macWriteCompleted) clipboardChangeTracker.macWriteUnidentified(System.currentTimeMillis());
+            refreshClipboardChip(); return;
+        }
+        android.content.ClipDescription description;
+        try {
+            android.content.ClipboardManager manager = (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            description = manager == null ? null : manager.getPrimaryClipDescription();
+        } catch (RuntimeException error) { description = null; }
+        long timestamp = description == null ? 0 : description.getTimestamp();
+        boolean text = timestamp > 0 && description.hasMimeType(android.content.ClipDescription.MIMETYPE_TEXT_PLAIN);
+        long wallTime = System.currentTimeMillis();
+        ClipboardChangeTracker.Observation observed = macWriteCompleted
+                ? clipboardChangeTracker.macWriteCompleted(timestamp, text, wallTime)
+                : clipboardChangeTracker.observe(timestamp, text, wallTime);
+        if (clipboardChipAcknowledged != 0 && observed.id() != clipboardChipAcknowledgedChange) invalidateChipAcknowledged();
+        clipboardChipChange = observed.id();
+        long now = android.os.SystemClock.uptimeMillis();
+        clipboardChipState.observe(clipboardChipSession, clipboardChipChange, observed.text(), clipboardChipEligible(), now);
+        if (observed.fromMac()) clipboardChipState.markHandled(clipboardChipSession, clipboardChipChange, now);
+        refreshClipboardChip();
+    }
+    private void refreshClipboardChip() {
+        if (clipboardChip == null) return;
+        syncClipboardChipSession();
+        long now = android.os.SystemClock.uptimeMillis();
+        boolean foreground = keyframeForeground && hasWindowFocus() && (pip == null || !pip.active());
+        boolean allowed = clipboardChipAllowed();
+        if (!allowed && clipboardChipPending != 0) {
+            long token = clipboardChipPending;
+            clipboardReceipt.cancel(token);
+            clipboardChipState.receiptFailed(clipboardChipSession, token, now); clipboardChipPending = 0;
+        }
+        android.view.accessibility.AccessibilityManager accessibility = (android.view.accessibility.AccessibilityManager) getSystemService(ACCESSIBILITY_SERVICE);
+        clipboardChipState.context(foreground, !allowed, accessibility != null && accessibility.isTouchExplorationEnabled(), now);
+        if (clipboardChipChange != 0) clipboardChipState.observe(clipboardChipSession, clipboardChipChange, true, clipboardChipEligible(), now);
+        ClipboardChipState.Note note = clipboardChipState.visibleNote();
+        String render = note != null ? "note:" + note : clipboardChipState.visible() ? "offer:" + pasteRightAway + ":" + windowOrderMac : "hidden";
+        if (!render.equals(clipboardChipRender)) {
+            clipboardChipRender = render;
+            if (note != null) clipboardChip.note(note, windowOrderMac);
+            else if (clipboardChipState.visible()) clipboardChip.offer(windowOrderMac, pasteRightAway, true);
+            else clipboardChip.hide();
+        }
+        if (pictureStatus != null) pictureStatus.setVisibility(pictureStatusActive && !lockViewActive()
+                && !clipboardChipState.visible() && clipboardChipState.visibleNote() == null && (pip == null || !pip.active())
+                ? android.view.View.VISIBLE : android.view.View.GONE);
+        ui.removeCallbacks(clipboardChipTick);
+        long wake = clipboardChipState.nextWake(now);
+        if (wake != Long.MAX_VALUE) ui.postDelayed(clipboardChipTick, Math.max(1, wake - now));
+    }
+    private void clipboardChipFailed(long session, long token, ClipboardChipState.Note note) {
+        if (clipboardChipOwner != connection || clipboardChipSession != session || clipboardChipPending != token) return;
+        long now = android.os.SystemClock.uptimeMillis();
+        if (clipboardChipState.receiptFailed(session, token, now)) {
+            clipboardChipState.noteForReceipt(session, token, note, now); clipboardChipPending = 0; refreshClipboardChip();
+        }
+    }
+    private void clipboardChipReceiptNote(SillConnection owner, long session, long token, ClipboardChipState.Note note) {
+        ui.post(() -> {
+            if (connection != owner || clipboardChipOwner != owner || clipboardChipSession != session) return;
+            if (clipboardChipState.noteForReceipt(session, token, note, android.os.SystemClock.uptimeMillis())) refreshClipboardChip();
+        });
+    }
     private void updateClipboard() {
         if (!clipboardEnabled) clipboardReceipt.cancel();
-        if (connection == null) { clipboardSubscribed = false; return; }
-        if (clipboardEnabled && !hostClipboardAvailable) { clipboardSubscribed = false; return; }
+        if (connection == null) { clipboardSubscribed = false; refreshClipboardChip(); return; }
+        if (clipboardEnabled && !hostClipboardAvailable) { clipboardSubscribed = false; refreshClipboardChip(); return; }
         try { sendAsync(32, clipboardEnabled ? new JSONObject() : new JSONObject().put("stop", true)); clipboardSubscribed = clipboardEnabled; }
         catch (Exception e) { show("剪贴板设置失败"); }
+        if (clipboardEnabled) observeClipboardMetadata(); else refreshClipboardChip();
     }
-    private void pasteClipboard() {
+    private void pasteClipboard() { pasteClipboard(null); }
+    private void pasteClipboard(Long requestedChange) {
+        if (requestedChange != null) {
+            if (!clipboardChipAllowed()) return;
+            observeClipboardMetadata();
+            if (!requestedChange.equals(clipboardChipState.offered())) return;
+        }
         if (!clipboardEnabled) { show("请先开启剪贴板共享"); return; }
         SillConnection expected = connection;
         if (expected == null || !hostClipboardAvailable || clipboardSource.isEmpty() || clipboardSource.contains("\"none\"")) { show("Mac 未开启剪贴板共享或没有正在显示的窗口"); return; }
@@ -2215,28 +2397,55 @@ public final class MainActivity extends Activity {
         try {
             android.content.ClipboardManager clipboard = (android.content.ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
             android.content.ClipData clip = clipboard.getPrimaryClip();
-            CharSequence text = clip == null || clip.getItemCount() == 0 ? null : clip.getItemAt(0).coerceToText(this);
+            if (requestedChange != null) {
+                android.content.ClipDescription after = clipboard.getPrimaryClipDescription();
+                android.content.ClipDescription actual = clip == null ? null : clip.getDescription();
+                if (after == null || actual == null || after.getTimestamp() != clipboardChangeTracker.timestamp()
+                        || actual.getTimestamp() != clipboardChangeTracker.timestamp()) { observeClipboardMetadata(); return; }
+            }
+            CharSequence text = clip == null || clip.getItemCount() == 0 ? null : clip.getItemAt(0).getText();
             String value = text == null ? null : text.toString();
             ClipboardPastePolicy.Text preflight = ClipboardPastePolicy.text(value, 0);
             if (preflight == ClipboardPastePolicy.Text.EMPTY) { show("剪贴板没有文本"); return; }
-            if (preflight == ClipboardPastePolicy.Text.TOO_LONG) { show("剪贴板文字过长"); return; }
+            if (preflight == ClipboardPastePolicy.Text.TOO_LONG) {
+                if (requestedChange != null) { clipboardChipState.note(clipboardChipSession, ClipboardChipState.Note.TOO_LONG, android.os.SystemClock.uptimeMillis()); refreshClipboardChip(); }
+                else show("剪贴板文字过长");
+                return;
+            }
             keyboard.finishAndForget();
             byte[] payload = new JSONObject().put("text", value).toString().getBytes(StandardCharsets.UTF_8);
-            if (ClipboardPastePolicy.text(value, payload.length) != ClipboardPastePolicy.Text.READY) { show("剪贴板文字过长"); return; }
+            if (ClipboardPastePolicy.text(value, payload.length) != ClipboardPastePolicy.Text.READY) {
+                if (requestedChange != null) { clipboardChipState.note(clipboardChipSession, ClipboardChipState.Note.TOO_LONG, android.os.SystemClock.uptimeMillis()); refreshClipboardChip(); }
+                else show("剪贴板文字过长");
+                return;
+            }
             byte[] nonce = new byte[16]; new java.security.SecureRandom().nextBytes(nonce);
             long token = clipboardReceipt.begin(nonce, android.os.SystemClock.uptimeMillis()); clipboardToken = token;
+            long chipSession = clipboardChipSession;
+            if (requestedChange != null) {
+                if (!clipboardChipAllowed() || !clipboardChipState.beginReceipt(chipSession, token, requestedChange, android.os.SystemClock.uptimeMillis())) {
+                    clipboardReceipt.cancel(token); refreshClipboardChip(); return;
+                }
+                clipboardChipPending = token; clipboardChipAcknowledgedChange = requestedChange; refreshClipboardChip();
+            }
             input.execute(() -> {
                 try {
                     synchronized (outputLock) {
+                        HostLockState lock = hostLock;
                         if (connection != expected || tourInputBlocked || !keyframeForeground || !clipboardEnabled || !hostClipboardAvailable ||
+                                !hasWindowFocus() || (pip != null && pip.active()) || lock == null || lock.reason() != HostLockState.Reason.NONE ||
                                 !source.equals(clipboardSource) || !clipboardReceipt.pending(token)) return;
                         expected.send(32, payload); expected.send(10, nonce);
                     }
                 } catch (Exception e) {
-                    if (clipboardReceipt.pending(token)) { clipboardReceipt.cancel(token); showFor(expected, "剪贴板发送失败"); }
+                    if (clipboardReceipt.pending(token)) { clipboardReceipt.cancel(token); showFor(expected, "剪贴板发送失败");
+                        ui.post(() -> clipboardChipFailed(chipSession, token, ClipboardChipState.Note.FAILED)); }
                 }
             });
-            ui.postDelayed(() -> { if (clipboardReceipt.expire(token, android.os.SystemClock.uptimeMillis())) showFor(expected, "Mac 未确认剪贴板，请重试"); }, 4000);
+            ui.postDelayed(() -> {
+                if (clipboardReceipt.expire(token, android.os.SystemClock.uptimeMillis())) showFor(expected, "Mac 未确认剪贴板，请重试");
+                if (clipboardChipPending == token) clipboardChipFailed(chipSession, token, ClipboardChipState.Note.FAILED);
+            }, 4000);
         }
         catch (Exception e) { show("剪贴板发送失败"); }
     }
@@ -2493,7 +2702,8 @@ public final class MainActivity extends Activity {
         status.setText(text); sessionStatus.setText(text); pictureStatus.setText(text);
         int generation = ++pictureStatusGeneration;
         pictureStatusActive = !text.isEmpty();
-        pictureStatus.setVisibility(pictureStatusActive && (pip == null || !pip.active())
+        pictureStatus.setVisibility(pictureStatusActive && !lockViewActive() && !clipboardChipState.visible()
+                && clipboardChipState.visibleNote() == null && (pip == null || !pip.active())
                 ? android.view.View.VISIBLE : android.view.View.GONE);
         if (!text.startsWith("连接中断")) ui.postDelayed(() -> {
             if (pictureStatusGeneration != generation) return;
@@ -2888,6 +3098,7 @@ public final class MainActivity extends Activity {
                         }
                         refreshDrawer();
                     });
+                    if (clipboardEnabled && hostClipboardAvailable) observeClipboardMetadata(); else refreshClipboardChip();
                     considerTourPicture();
                     if (tourOverlay != null) updateTourStep();
                 });
@@ -2910,20 +3121,39 @@ public final class MainActivity extends Activity {
                     long token = clipboardToken;
                     if (connection != expected || !clipboardEnabled || !hostClipboardAvailable ||
                             !clipboardReceipt.receive(pong, android.os.SystemClock.uptimeMillis(), token)) return;
+                    long chipSession = clipboardChipSession;
+                    boolean chipReceipt = clipboardChipOwner == expected && clipboardChipPending == token
+                            && clipboardChipState.receipt(chipSession, token, android.os.SystemClock.uptimeMillis()) != ClipboardChipState.Receipt.STALE;
+                    if (chipReceipt) { clipboardChipPending = 0; refreshClipboardChip(); }
                     String source = clipboardSource;
                     if (!clipboardMayPaste(expected, source)) {
-                        if (clipboardReceipt.take(token)) showFor(expected, "已发送到 Mac 剪贴板");
+                        if (clipboardReceipt.take(token)) {
+                            showFor(expected, "已发送到 Mac 剪贴板");
+                            if (chipReceipt) clipboardChipReceiptNote(expected, chipSession, token, ClipboardChipState.Note.SENT);
+                        }
                         return;
                     }
+                    if (chipReceipt) clipboardChipAcknowledged = token;
                     ui.postDelayed(() -> {
+                        if (chipReceipt && (clipboardChipAcknowledged != token || clipboardChipSession != chipSession
+                                || clipboardChipOwner != expected || !clipboardChipAllowed())) {
+                            invalidateChipAcknowledged(token);
+                            clipboardChipReceiptNote(expected, chipSession, token, ClipboardChipState.Note.SENT);
+                            return;
+                        }
                         input.execute(() -> {
                             try {
                                 synchronized (outputLock) {
                                     if (!clipboardReceipt.take(token)) return;
-                                    if (!clipboardMayPaste(expected, source)) {
-                                        if (connection == expected) showFor(expected, "已发送到 Mac 剪贴板");
+                                    if (!clipboardMayPaste(expected, source) || (chipReceipt && clipboardChipAcknowledged != token)) {
+                                        if (chipReceipt && clipboardChipAcknowledged == token) clipboardChipAcknowledged = 0;
+                                        if (connection == expected) {
+                                            showFor(expected, "已发送到 Mac 剪贴板");
+                                            if (chipReceipt) clipboardChipReceiptNote(expected, chipSession, token, ClipboardChipState.Note.SENT);
+                                        }
                                         return;
                                     }
+                                    if (chipReceipt) clipboardChipAcknowledged = 0;
                                     JSONObject key = new JSONObject().put("hidUsage", 25).put("modifiers", 1L << 20);
                                     byte[] down = new JSONObject().put("key", new JSONObject(key.toString()).put("down", true)).toString().getBytes(StandardCharsets.UTF_8);
                                     byte[] up = new JSONObject().put("key", key.put("down", false)).toString().getBytes(StandardCharsets.UTF_8);
@@ -2931,7 +3161,9 @@ public final class MainActivity extends Activity {
                                     expected.send(8, down); expected.send(8, up);
                                 }
                                 showFor(expected, "已向 Mac 发送粘贴");
-                            } catch (Exception e) { showFor(expected, "粘贴失败"); }
+                                if (chipReceipt) clipboardChipReceiptNote(expected, chipSession, token, ClipboardChipState.Note.PASTE_REQUESTED);
+                            } catch (Exception e) { showFor(expected, "粘贴失败");
+                                if (chipReceipt) clipboardChipReceiptNote(expected, chipSession, token, ClipboardChipState.Note.FAILED); }
                         });
                     }, 50);
                 });
@@ -3033,13 +3265,17 @@ public final class MainActivity extends Activity {
             }
             case 32 -> {
                 if (clipboardEnabled) {
-                    SillConnection expected = connection;
+                    SillConnection expected = messageSession;
                     JSONObject clip = new JSONObject(new String(message.payload(), StandardCharsets.UTF_8));
                     String text = clip.optString("text", "");
                     if (!text.isEmpty() && text.getBytes(StandardCharsets.UTF_8).length <= 256 * 1024) ui.post(() -> {
                         if (connection != expected || expected == null || !clipboardEnabled || !keyframeForeground || (pip != null && pip.active()) || !hasWindowFocus() || sessionPanel.getVisibility() != android.view.View.VISIBLE) return;
                         android.content.ClipboardManager manager = (android.content.ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
-                        manager.setPrimaryClip(android.content.ClipData.newPlainText("Mac", text));
+                        clipboardChangeTracker.macWriteStarting();
+                        try {
+                            manager.setPrimaryClip(android.content.ClipData.newPlainText("Mac", text));
+                            observeClipboardMetadata(true);
+                        } catch (RuntimeException error) { clipboardChangeTracker.macWriteUnidentified(System.currentTimeMillis()); }
                     });
                 }
             }
@@ -3184,11 +3420,25 @@ public final class MainActivity extends Activity {
         if (connection != expected || hostLock != lock) return;
         if (scaleControl != null) scaleControl.refresh();
         if (pip != null) pip.validate();
+        refreshClipboardChip();
+        boolean viewOnly = lock.viewOnly();
+        lockViewNotice.setVisibility(viewOnly && !pipUi ? android.view.View.VISIBLE : android.view.View.GONE);
+        pictureStatus.setVisibility(!viewOnly && pictureStatusActive && (pip == null || !pip.active())
+                ? android.view.View.VISIBLE : android.view.View.GONE);
         if (!lock.isCovered() && !lock.needsFreshFrame()) { lockOverlay.setVisibility(android.view.View.GONE); considerTourPicture(); return; }
         hideTour();
-        lockOverlay.setText(lock.isCovered() ? "另一位用户正在使用这台 Mac。请切回你的账号以继续。" : "正在等待 Mac 画面…");
+        boolean covered = lock.isCovered();
+        boolean unlocking = !covered && lock.shade() == HostLockState.Shade.UNLOCKING;
+        String title = covered ? "另一位用户开始控制这台 Mac。" : unlocking ? "正在解锁…" : "正在等待 Mac 画面…";
+        String detail = covered ? "登录你的账户以重新启用 Sill 屏幕共享。" : "";
+        lockIcon.setVisibility(covered ? android.view.View.VISIBLE : android.view.View.GONE);
+        lockSpinner.setVisibility(covered ? android.view.View.GONE : android.view.View.VISIBLE);
+        lockTitle.setText(title); lockDetail.setText(detail);
+        lockDetail.setVisibility(detail.isEmpty() ? android.view.View.GONE : android.view.View.VISIBLE);
+        lockContent.setContentDescription(detail.isEmpty() ? title : title + " " + detail);
         lockOverlay.setVisibility(android.view.View.VISIBLE);
     }
+    private boolean lockViewActive() { HostLockState lock = hostLock; return lock != null && lock.viewOnly(); }
     private void interruptPicture() {
         KeyframeRecovery recovery = keyframeRecovery;
         if (recovery != null) recovery.interrupted(android.os.SystemClock.uptimeMillis());
@@ -3262,10 +3512,11 @@ public final class MainActivity extends Activity {
             activeWindowHoldView.removeCallbacks(activeWindowHoldRunnable);
         if (activeWindowHold != null) activeWindowHold.cancel();
         activeWindowHold = null; activeWindowHoldView = null; activeWindowHoldRunnable = null;
-        if (draggedWindow == null) return;
+        if (draggedWindow == null) { refreshClipboardChip(); return; }
         draggedWindow.setTranslationZ(draggedWindowOriginalZ);
         for (int i = 0; i < choices.getChildCount(); i++) { choices.getChildAt(i).setTranslationX(0); choices.getChildAt(i).setScaleX(1); choices.getChildAt(i).setScaleY(1); }
         draggedWindow = null; dragPreview = null; choices.requestDisallowInterceptTouchEvent(false);
+        refreshClipboardChip();
     }
     private void dropWindowDrag() {
         android.view.View tile = draggedWindow; int target = dragTo;
@@ -3383,9 +3634,11 @@ public final class MainActivity extends Activity {
             public boolean onTouch(android.view.View view, android.view.MotionEvent event) {
                 switch (event.getActionMasked()) {
                     case android.view.MotionEvent.ACTION_DOWN -> {
+                        invalidateChipAcknowledged();
                         cancelWindowDrag();
                         gesture.begin(event.getX(), event.getY());
                         activeWindowHold = gesture; activeWindowHoldView = view; activeWindowHoldRunnable = hold;
+                        refreshClipboardChip();
                         gestureSession = connection;
                         lastRawX = event.getRawX(); lastRawY = event.getRawY();
                         int tenths = Math.max(2, Math.min(20, getPreferences(0).getInt("thumbnailHoldTenths", 5)));
@@ -3441,6 +3694,7 @@ public final class MainActivity extends Activity {
         catch (Exception e) { show("窗口操作失败"); }
     }
     private void showWindowControls(android.view.View anchor, JSONObject source) {
+        invalidateChipAcknowledged();
         dismissWindowControls();
         SillConnection expected = connection;
         LinearLayout row = new LinearLayout(this); row.setGravity(android.view.Gravity.CENTER);
@@ -3467,6 +3721,11 @@ public final class MainActivity extends Activity {
             if (i > 0) itemParams.leftMargin = dp(6); row.addView(item, itemParams);
         }
         windowControls = new android.widget.PopupWindow(row, dp(214), dp(62), false);
+        android.widget.PopupWindow currentWindowControls = windowControls;
+        currentWindowControls.setOnDismissListener(() -> {
+            if (windowControls == currentWindowControls) windowControls = null;
+            refreshClipboardChip();
+        });
         windowControls.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT));
         windowControls.setOutsideTouchable(true); windowControls.setElevation(dp(8));
         int[] location = new int[2]; anchor.getLocationInWindow(location);
@@ -3475,6 +3734,7 @@ public final class MainActivity extends Activity {
         boolean below = height > width || location[1] + anchor.getHeight() / 2 < height / 2;
         int y = below ? location[1] + anchor.getHeight() + dp(8) : location[1] - dp(70);
         windowControls.showAtLocation(root, android.view.Gravity.TOP | android.view.Gravity.START, x, Math.max(0, y));
+        refreshClipboardChip();
     }
     private void releaseDecoder() { decoderEpoch = -1; recoveryFrame.set(null); revealFrame.set(null); recoveryGeneration = -1; if (decoder != null) { try { decoder.stop(); } catch (Exception ignored) { } decoder.release(); decoder = null; decoderSurface = null; } }
     private void resetCursorShape() { cursorBitmap = null; cursorShape = null; cursor.invalidate(); }
@@ -3519,6 +3779,7 @@ public final class MainActivity extends Activity {
             pipUi = false; pipOwner = null;
             for (var entry : pipVisibility.entrySet()) entry.getKey().setVisibility(entry.getValue());
             pipVisibility.clear(); applyContentInsets();
+            if (hostLock != null && connection != null) renderLockOverlay(hostLock, connection);
             if (updateSessionLayout != null) updateSessionLayout.run();
             picture.post(this::sendViewport);
             picture.post(this::considerTourPicture);
@@ -3534,6 +3795,11 @@ public final class MainActivity extends Activity {
     @Override protected void onStart() { super.onStart(); if (discovery != null) discovery.start(); startFpsObservers(); }
     @Override protected void onResume() {
         super.onResume(); keyframeForeground = true;
+        android.content.ClipboardManager clipboard = (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        if (clipboard != null && !clipboardChipListening) {
+            clipboard.addPrimaryClipChangedListener(clipboardChipListener); clipboardChipListening = true;
+        }
+        observeClipboardMetadata();
         if (inlineScanner != null) inlineScanner.setForeground(true);
         android.util.Log.i("SillAndroid", "Recovery: foreground");
         if (localAudio != null) localAudio.setWatched(pictureWatched());
@@ -3541,10 +3807,16 @@ public final class MainActivity extends Activity {
         if (picture != null) { picture.post(this::sendViewport); picture.post(this::considerTourPicture); }
     }
     @Override protected void onPause() {
+        invalidateChipAcknowledged();
+        android.content.ClipboardManager clipboard = (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        if (clipboard != null && clipboardChipListening) {
+            clipboard.removePrimaryClipChangedListener(clipboardChipListener); clipboardChipListening = false;
+        }
         if (inlineScanner != null) inlineScanner.setForeground(false);
         if (scaleControl != null) scaleControl.cancel();
         hideTour();
         android.util.Log.i("SillAndroid", "Recovery: background"); keyframeForeground = false;
+        refreshClipboardChip();
         if (!pictureWatched()) {
             synchronized (surfaceLock) { surfaceEpoch++; }
             recoveryFrame.set(null); interruptPicture();
@@ -3585,6 +3857,7 @@ public final class MainActivity extends Activity {
     }
     @Override protected void onStop() { if (pip != null && pip.active()) pip.stop(); dismissSettings(false); dismissMenu(); if (appDrawer != null) appDrawer.dismiss(); dismissWindowControls(); cancelWindowDrag(); stopFpsObservers(); clipboardReceipt.cancel(); if (pictureInput != null) pictureInput.cancel(); if (trackpad != null) trackpad.cancelGestures(); if (discovery != null) discovery.stop(); nearby.clear(); nearbyMacs.removeAllViews(); super.onStop(); }
     @Override protected void onDestroy() {
+        ui.removeCallbacks(clipboardChipTick);
         clearPairConfirmation();
         android.view.accessibility.AccessibilityManager accessibility = (android.view.accessibility.AccessibilityManager) getSystemService(ACCESSIBILITY_SERVICE);
         if (accessibility != null && tourAccessibilityListener != null) accessibility.removeTouchExplorationStateChangeListener(tourAccessibilityListener);

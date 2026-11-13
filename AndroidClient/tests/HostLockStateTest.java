@@ -6,7 +6,7 @@ public final class HostLockStateTest {
         assert !state.onWindowList(false, true, true, 0); // old/inconsistent host: no locked field
         assert state.reason() == HostLockState.Reason.NONE && state.maySendControl();
         assert !state.onWindowList(true, false, false, 1);
-        assert state.reason() == HostLockState.Reason.SCREEN_LOCKED && state.shade() == HostLockState.Shade.NONE;
+        assert state.reason() == HostLockState.Reason.SCREEN_LOCKED && state.shade() == HostLockState.Shade.NONE && !state.isCovered();
         assert state.maySendControl() && state.shouldDecode(false);
 
         assert state.onWindowList(true, true, false, 2);
@@ -28,7 +28,8 @@ public final class HostLockStateTest {
         assert state.onWindowList(true, true, true, 5000); // never trust unadvertised view
         assert state.isCovered() && !state.viewOnly();
         assert !state.onWindowList(true, false, false, 6000);
-        assert state.reason() == HostLockState.Reason.SCREEN_LOCKED && state.shade() == HostLockState.Shade.UNLOCKING;
+        assert state.reason() == HostLockState.Reason.SCREEN_LOCKED && state.shade() == HostLockState.Shade.UNLOCKING
+                && !state.isCovered() && state.needsFreshFrame();
         state.onKeyframePresented(state.generation());
         assert state.shade() == HostLockState.Shade.NONE && state.maySendControl();
 

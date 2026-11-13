@@ -20,4 +20,5 @@ final class ClipboardPastePolicy {
                          boolean hostAccepts, boolean streaming, boolean foreground, boolean inputAllowed) {
         return rightAway && timely && connected && sharing && hostAccepts && streaming && foreground && inputAllowed;
     }
+    static boolean sameChipAcknowledgement(long current, long expected) { return expected != 0 && current == expected; }
 }
