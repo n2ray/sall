@@ -2,8 +2,12 @@ package io.github.n2ray.sill;
 
 import android.content.Context;
 import android.graphics.Canvas;
-import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.Path;
+import android.graphics.RectF;
+import android.text.Layout;
+import android.text.StaticLayout;
+import android.text.TextPaint;
 import android.view.MotionEvent;
 import android.view.VelocityTracker;
 import android.view.View;
@@ -17,6 +21,12 @@ final class TrackpadView extends View {
     }
     private final Listener listener;
     private final Paint paint = new Paint(3);
+    private final Path outline = new Path();
+    private final TextPaint hintPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+    private static final String HINT = "拖动以移动指针，轻点以点击，双指滚动。";
+    private StaticLayout hint;
+    private int cachedWidth = -1, cachedHeight = -1;
+    private float cachedDensity = -1, cachedHintSize = -1;
     private float x = .5f, y = .5f, lastX, lastY, startX, startY;
     private long downAt, lastScrollAt, momentumAt;
     private boolean moved, twoFinger, scrolling, dragging, touchActive, touchOwner, silenced, reversed, coasting, pictureBusy;
@@ -93,11 +103,34 @@ final class TrackpadView extends View {
     private float midX(MotionEvent e) { return (e.getX(0) + e.getX(1)) / 2; }
     private float midY(MotionEvent e) { return (e.getY(0) + e.getY(1)) / 2; }
     @Override protected void onDraw(Canvas canvas) {
-        canvas.drawColor(Color.rgb(30, 32, 36));
-        paint.setColor(0x18ffffff);
-        float step = getResources().getDisplayMetrics().density * 18;
+        float density = getResources().getDisplayMetrics().density;
+        float hintSize = android.util.TypedValue.applyDimension(android.util.TypedValue.COMPLEX_UNIT_SP, 13,
+                getResources().getDisplayMetrics());
+        float radius = density * 22;
+        int margin = Math.round(18 * density);
+        if (cachedWidth != getWidth() || cachedHeight != getHeight()
+                || cachedDensity != density || cachedHintSize != hintSize) {
+            cachedWidth = getWidth(); cachedHeight = getHeight();
+            cachedDensity = density; cachedHintSize = hintSize;
+            outline.reset(); outline.addRoundRect(new RectF(0, 0, cachedWidth, cachedHeight), radius, radius, Path.Direction.CW);
+            hintPaint.setColor(0xffa4abb5); hintPaint.setTextSize(hintSize);
+            hint = StaticLayout.Builder.obtain(HINT, 0, HINT.length(), hintPaint, Math.max(1, cachedWidth - 2 * margin))
+                    .setAlignment(Layout.Alignment.ALIGN_CENTER).setIncludePad(false).build();
+        }
+        int save = canvas.save();
+        canvas.clipPath(outline);
+        canvas.drawColor(0xff101215);
+        paint.setStyle(Paint.Style.FILL); paint.setColor(0x12ffffff);
+        float step = density * 18;
         for (float px = step / 2; px < getWidth(); px += step)
-            for (float py = step / 2; py < getHeight(); py += step) canvas.drawCircle(px, py, step / 24, paint);
+            for (float py = step / 2; py < getHeight(); py += step) canvas.drawCircle(px, py, density, paint);
+        canvas.save(); canvas.translate(margin, Math.max(0, getHeight() - margin - hint.getHeight()));
+        hint.draw(canvas); canvas.restore();
+        canvas.restoreToCount(save);
+        paint.setStyle(Paint.Style.STROKE); paint.setStrokeWidth(density); paint.setColor(0x14ffffff);
+        float half = density / 2;
+        canvas.drawRoundRect(half, half, getWidth() - half, getHeight() - half, radius, radius, paint);
+        paint.setStyle(Paint.Style.FILL);
     }
     @Override public boolean onTouchEvent(MotionEvent event) {
         if (event.isFromSource(android.view.InputDevice.SOURCE_MOUSE)) return true;

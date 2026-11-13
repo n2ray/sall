@@ -50,16 +50,28 @@ final class AppDrawerDialog {
         if (isShowing()) { dismiss(); return; }
         presentationVersion++;
         LinearLayout root = new LinearLayout(activity); root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(14), dp(14), dp(14), dp(14)); root.setBackground(background(0xff181a1f, 20));
+        root.setPadding(dp(14), dp(14), dp(14), dp(14));
+        GradientDrawable panelBackground = background(0xff16181c, 20);
+        panelBackground.setStroke(dp(1), 0x1affffff);
+        root.setBackground(panelBackground);
+        root.setElevation(dp(24));
         root.setFocusableInTouchMode(true);
         search = new EditText(activity); search.setSingleLine(true); search.setHint("搜索应用");
-        search.setTextColor(Color.WHITE); search.setHintTextColor(0xffadb3bd);
+        search.setTextColor(0xffeef0f3); search.setHintTextColor(0xffa4abb5); search.setTextSize(15);
+        search.setPadding(dp(14), 0, dp(14), 0);
+        search.setBackground(background(0xff23262c, 12));
+        android.graphics.drawable.Drawable magnifier = activity.getDrawable(android.R.drawable.ic_menu_search).mutate();
+        magnifier.setTint(0xffa4abb5); magnifier.setBounds(0, 0, dp(18), dp(18));
+        search.setCompoundDrawables(magnifier, null, null, null); search.setCompoundDrawablePadding(dp(10));
         search.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        search.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH);
         search.setContentDescription("搜索 Mac 上的应用");
-        root.addView(search, new LinearLayout.LayoutParams(-1, dp(52)));
+        root.addView(search, new LinearLayout.LayoutParams(-1, dp(48)));
         scroll = new ScrollView(activity); scroll.setFillViewport(false);
         rows = new LinearLayout(activity); rows.setOrientation(LinearLayout.VERTICAL); scroll.addView(rows);
-        root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        scroll.setVerticalScrollBarEnabled(false);
+        LinearLayout.LayoutParams scrollParams = new LinearLayout.LayoutParams(-1, 0, 1);
+        scrollParams.topMargin = dp(6); root.addView(scroll, scrollParams);
         search.addTextChangedListener(new TextWatcher() {
             public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
             public void onTextChanged(CharSequence s, int start, int before, int count) { render(false); }
@@ -146,10 +158,12 @@ final class AppDrawerDialog {
                 nextApps.add(new AppDrawerModel.App(item.optString("name", ""), item.optString("bundleID", "")));
         }
         Map<String, Bitmap> nextIcons = appIcons == null ? java.util.Collections.emptyMap() : new HashMap<>(appIcons);
-        boolean changed = !windows.equals(nextWindows) || !apps.equals(nextApps) || activeWindow != active;
+        boolean changed = !windows.equals(nextWindows) || !apps.equals(nextApps) || activeWindow != active || activeDesktop != desktop;
         if (!changed && rows != null) for (var entry : badgeViews.entrySet()) {
             Bitmap before = icons.get(entry.getKey()), after = nextIcons.get(entry.getKey());
-            if (before != after) for (ImageView badge : entry.getValue()) badge.setImageBitmap(after);
+            if (before != after) for (ImageView badge : entry.getValue()) {
+                badge.setImageBitmap(after); badge.setVisibility(after == null ? View.GONE : View.VISIBLE);
+            }
         }
         windows = java.util.Collections.unmodifiableList(nextWindows); apps = java.util.Collections.unmodifiableList(nextApps);
         icons = nextIcons; activeWindow = active; activeDesktop = desktop;
@@ -225,12 +239,13 @@ final class AppDrawerDialog {
         if (!result.open().isEmpty()) {
             header("正在运行");
             for (AppDrawerModel.Group group : result.open()) {
-                boolean selected = group.windows().stream().anyMatch(window -> window.id() == activeWindow);
+                boolean selected = !activeDesktop && group.windows().stream().anyMatch(window -> window.id() == activeWindow);
                 LinearLayout label = row(group.name(), group.bundleId(), true);
-                label.setBackground(background(selected ? 0xff39485e : 0xff24262c));
-                TextView count = text(group.windows().size() + " 个窗口", 12, 0xffadb3bd); label.addView(count);
+                label.setBackground(background(selected ? 0xff23262c : Color.TRANSPARENT, 10));
+                TextView count = text(group.windows().size() + " 个窗口", 13, 0xffa4abb5);
+                count.setSingleLine(true); label.addView(count);
                 label.setContentDescription(group.name() + "，" + group.windows().size() + " 个窗口" + (selected ? "，当前显示" : ""));
-                rows.addView(label);
+                addRow(label, 50);
                 label.setOnClickListener(v -> {
                     AppDrawerModel.Group current = AppDrawerModel.filter(windows, apps, "").open().stream()
                             .filter(g -> g.bundleId().equals(group.bundleId()) && g.name().equals(group.name())).findFirst().orElse(null);
@@ -244,7 +259,7 @@ final class AppDrawerDialog {
         if (!result.closed().isEmpty()) {
             header("所有应用");
             for (AppDrawerModel.App app : result.closed()) {
-                LinearLayout entry = row(app.name(), app.bundleId(), true); rows.addView(entry);
+                LinearLayout entry = row(app.name(), app.bundleId(), true); addRow(entry, 46);
                 entry.setContentDescription("打开 " + app.name());
                 entry.setOnClickListener(v -> {
                     if (apps.stream().noneMatch(a -> a.bundleId().equals(app.bundleId()))) { render(true); return; }
@@ -252,26 +267,39 @@ final class AppDrawerDialog {
                 });
             }
         }
-        if (result.open().isEmpty() && result.closed().isEmpty()) {
-            TextView empty = text(search.getText().toString().trim().isEmpty() ? "Mac 暂无可用应用" : "没有匹配的应用", 14, 0xffadb3bd);
-            empty.setPadding(dp(10), dp(24), dp(10), dp(24)); rows.addView(empty);
-        }
         scroll.post(() -> scroll.scrollTo(0, y));
     }
 
     private void header(String value) {
-        TextView label = text(value, 13, 0xffadb3bd); label.setPadding(dp(10), dp(12), dp(10), dp(4)); rows.addView(label);
+        TextView label = text(value, 13, 0xffa4abb5);
+        label.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
+        label.setPadding(dp(10), dp(10), dp(10), dp(2));
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-1, -2);
+        if (rows.getChildCount() > 0) p.topMargin = dp(8);
+        rows.addView(label, p);
+    }
+    private void addRow(View row, int height) {
+        row.setMinimumHeight(dp(height));
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-1, LinearLayout.LayoutParams.WRAP_CONTENT);
+        p.topMargin = dp(6); rows.addView(row, p);
     }
     private LinearLayout row(String name, String bundle, boolean clickable) {
         LinearLayout row = new LinearLayout(activity); row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(dp(10), dp(3), dp(10), dp(3)); row.setMinimumHeight(dp(48));
-        if (clickable) row.setBackground(background(0xff24262c));
-        ImageView icon = new ImageView(activity); icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        icon.setBackground(background(0xff353942)); icon.setImageBitmap(icons.get(bundle));
+        row.setPadding(dp(10), 0, dp(10), 0);
+        if (clickable) row.setBackground(background(Color.TRANSPARENT, 10));
+        FrameLayout badge = new FrameLayout(activity); badge.setBackground(background(0xff3a3d44, 9));
+        badge.setClipToOutline(true);
+        int initialEnd = name.offsetByCodePoints(0, Math.min(2, name.codePointCount(0, name.length())));
+        TextView initials = text(name.substring(0, initialEnd), 12, Color.WHITE);
+        initials.setGravity(Gravity.CENTER); initials.setTypeface(null, android.graphics.Typeface.BOLD);
+        badge.addView(initials, new FrameLayout.LayoutParams(-1, -1));
+        ImageView icon = new ImageView(activity); icon.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        Bitmap image = icons.get(bundle); icon.setImageBitmap(image); icon.setVisibility(image == null ? View.GONE : View.VISIBLE);
+        badge.addView(icon, new FrameLayout.LayoutParams(-1, -1));
         badgeViews.computeIfAbsent(bundle, ignored -> new ArrayList<>()).add(icon);
-        row.addView(icon, new LinearLayout.LayoutParams(dp(32), dp(32)));
-        TextView label = text(name, 15, Color.WHITE); label.setSingleLine(true); label.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, -2, 1); p.setMargins(dp(12), 0, dp(6), 0); row.addView(label, p);
+        row.addView(badge, new LinearLayout.LayoutParams(dp(32), dp(32)));
+        TextView label = text(name, 15, 0xffeef0f3); label.setSingleLine(true); label.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, -2, 1); p.setMargins(dp(12), 0, dp(12), 0); row.addView(label, p);
         return row;
     }
     private TextView text(String value, int size, int color) {

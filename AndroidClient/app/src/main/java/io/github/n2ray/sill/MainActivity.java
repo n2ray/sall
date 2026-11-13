@@ -26,6 +26,9 @@ import java.util.concurrent.Executors;
 /** Initial device client: manually addressed, paired connections to Sill's remote door. */
 public final class MainActivity extends Activity {
     private final ExecutorService network = Executors.newSingleThreadExecutor();
+    private final java.util.concurrent.ThreadPoolExecutor qrNetwork = new java.util.concurrent.ThreadPoolExecutor(
+            0, 2, 30, java.util.concurrent.TimeUnit.SECONDS, new java.util.concurrent.SynchronousQueue<>(),
+            task -> { Thread thread = new Thread(task, "sill-qr-pair"); thread.setDaemon(true); return thread; });
     private final ExecutorService input = Executors.newSingleThreadExecutor();
     private final java.util.concurrent.ScheduledExecutorService heartbeat = Executors.newSingleThreadScheduledExecutor();
     private final Handler ui = new Handler(Looper.getMainLooper());
@@ -34,6 +37,9 @@ public final class MainActivity extends Activity {
     private volatile SillConnection connection;
     private SessionAuthorization activeAuthorization;
     private PairingAuthorization pendingPairing;
+    private QrPairingAttempt qrAttempt;
+    private PairLink qrLink;
+    private Runnable qrBegin;
     private volatile RemoteDial.Attempt pendingDial;
     // Accessed only under outputLock: serializes an automatic first pick with user picks.
     private InitialSourcePolicy initialSource;
@@ -64,6 +70,12 @@ public final class MainActivity extends Activity {
     private android.window.OnBackInvokedCallback tourBack;
     private final Runnable tourWait = this::considerTour;
     private ScrollView connectionContainer;
+    private LinearLayout connectionHome, addMacCard, typedPairing;
+    private TextView connectionTitle;
+    private Button connectionStyle, pairingPath, cancelConnection;
+    private android.window.OnBackInvokedCallback addMacBack;
+    private boolean addingMac, typingPairing, connectionTiles;
+    private int savedMacColumns;
     private SavedMacStore savedMacStore;
     private TextView status, sessionStatus, pictureStatus;
     private boolean pictureStatusActive;
@@ -110,6 +122,8 @@ public final class MainActivity extends Activity {
     private int insetLeft, insetTop, insetRight, insetBottom;
     private boolean largerPicture, largerPictureApplied, settingsOpen, settingsHeldLargerPicture, settingsReanchoring, settingsReanchorPending;
     private android.widget.FrameLayout settingsOverlay;
+    private ScrollView settingsScroll;
+    private int settingsScrollY;
     private android.window.OnBackInvokedCallback settingsBack;
     private android.app.AlertDialog settingsChild;
     private android.app.AlertDialog settingsDialog;
@@ -135,6 +149,7 @@ public final class MainActivity extends Activity {
     private int desktopDisplays = -1, desktopDisplay, hostGestures;
     private boolean desktopActive;
     private Button desktopButton, menuButton;
+    private Boolean toolbarLandscape;
     private volatile boolean closing;
     private long modifiers;
     private long heldModifiers;
@@ -232,22 +247,7 @@ public final class MainActivity extends Activity {
             return insets;
         });
         root.setBackgroundColor(0xff08090b);
-        connectionPanel = new LinearLayout(this); connectionPanel.setOrientation(LinearLayout.VERTICAL);
-        connectionContainer = new ScrollView(this); connectionContainer.setFillViewport(true); connectionContainer.addView(connectionPanel);
-        root.addView(connectionContainer, new LinearLayout.LayoutParams(-1, -1));
-        TextView title = new TextView(this); title.setText("Sill"); title.setTextColor(-1); title.setTextSize(30);
-        connectionPanel.addView(title);
-        status = new TextView(this); status.setTextColor(0xffb5bac4);
-        status.setText("连接你的 Mac · 跨网络连接需启用 Remote Access"); connectionPanel.addView(status);
-        savedMacs = new LinearLayout(this); savedMacs.setOrientation(LinearLayout.VERTICAL); connectionPanel.addView(savedMacs);
-        nearbyMacs = new LinearLayout(this); nearbyMacs.setOrientation(LinearLayout.VERTICAL); connectionPanel.addView(nearbyMacs);
-        host = field("Mac IP 或 Tailscale 地址", getPreferences(0).getString("host", ""));
-        port = field("端口", getPreferences(0).getString("port", "7455")); port.setInputType(2);
-        code = field("Mac 上显示的 12 位配对码", ""); code.setInputType(2);
-        button(connectionPanel, "扫描配对码", v -> startActivityForResult(new android.content.Intent(this, PairScannerActivity.class), 102));
-        button(connectionPanel, "配对并连接", v -> connect());
-        button(connectionPanel, "连接已配对的 Mac", v -> start(false));
-        button(connectionPanel, "取消连接", v -> { if (running) { disconnect(); displayStatus("已取消连接。"); } });
+        buildConnectionScreen();
         clipboardEnabled = getPreferences(0).getBoolean("shareClipboard", false);
         pasteRightAway = getPreferences(0).getBoolean("pasteRightAway", true);
         audioEnabled = getPreferences(0).getBoolean("experimentalAudio", false);
@@ -268,11 +268,13 @@ public final class MainActivity extends Activity {
                 SavedMacs.Identity recognized = savedMacStore.recognized(tag);
                 String label = recognized != null && !recognized.name().isEmpty() ? recognized.name() : name;
                 Button row = button(nearbyMacs, "附近 · " + label, v -> {
+                    if (running) { show("请先取消当前连接。"); return; }
                     host.setText(address); port.setText(String.valueOf(number));
                     if (recognized != null) start(false, recognized, tag);
                     else if (savedMacStore.pin(new SavedMacs.Endpoint(address, number)) != null) start(false);
-                    else show("请在 Mac 的 Sill 中打开配对窗口并输入配对码。");
+                    else { setAddingMac(true, true); show("请在 Mac 的 Sill 中打开配对窗口并输入配对码。"); }
                 });
+                styleConnectionRow(row);
                 nearby.put(name, row);
             }
             public void lost(String name) { android.view.View row = nearby.remove(name); if (row != null) nearbyMacs.removeView(row); }
@@ -315,45 +317,62 @@ public final class MainActivity extends Activity {
 
     private void pairLink(PairLink link) {
         if (running) { link.clearSecret(); show("已有连接，请先断开后重新打开配对链接。"); return; }
-        running = true; closing = false; show("正在配对…");
+        QrPairingAttempt attempt = new QrPairingAttempt(); qrAttempt = attempt; qrLink = link;
+        running = true; closing = false; updateConnectionCancel(); show("正在配对…");
+        qrBegin = () -> beginPairLink(link, attempt);
         if (link.addresses.isEmpty() && discovery.pairingDoors().isEmpty()) {
             discovery.start();
-            ui.postDelayed(() -> beginPairLink(link), 4000);
-        } else beginPairLink(link);
+            ui.postDelayed(qrBegin, 4000);
+        } else qrBegin.run();
     }
 
-    private void beginPairLink(PairLink link) {
-        if (!running || closing || isFinishing() || isDestroyed()) { link.clearSecret(); return; }
+    private void beginPairLink(PairLink link, QrPairingAttempt run) {
+        if (qrAttempt != run || !run.active() || isFinishing() || isDestroyed()) { link.clearSecret(); return; }
+        qrBegin = null;
         java.util.List<PairLink.Address> local = link.localCandidates(discovery.pairingDoors());
         java.util.List<PairLink.Address> candidates = link.candidates(local);
-        network.execute(() -> {
+        try { qrNetwork.execute(() -> {
             PairLink.Address winner = null; SavedMacs.Identity identity = null;
             byte[] secret = link.secret(); byte[] expected = link.fingerprint();
             try {
                 for (int i = 0; i < candidates.size(); i++) {
                     PairLink.Address a = candidates.get(i);
-                    if (!running || closing || Thread.currentThread().isInterrupted()) break;
+                    if (!run.active() || Thread.currentThread().isInterrupted()) break;
                     int number = a.port() == 0 ? link.port : a.port();
-                    try (SillConnection pair = i < local.size()
-                            ? SillConnection.connect(a.host(), number, "sill-pair/1", expected, 1200, 1800)
-                            : SillConnection.connect(a.host(), number, "sill-pair/1", expected)) {
-                        identity = pair.pairQrIdentity(secret, android.os.Build.MODEL, android.os.Build.DEVICE);
-                        winner = a; break;
+                    RemoteDial.Attempt transport = new RemoteDial.Attempt();
+                    if (!run.track(transport)) break;
+                    try (SillConnection pair = SillConnection.connect(a.host(), number, "sill-pair/1", expected,
+                            i < local.size() ? 1200 : 10000, i < local.size() ? 1800 : 15000, transport)) {
+                        transport.check();
+                        SavedMacs.Identity result = pair.pairQrIdentity(secret, android.os.Build.MODEL, android.os.Build.DEVICE);
+                        transport.check();
+                        if (!java.security.MessageDigest.isEqual(expected, result.pin())) throw new SecurityException("Mac identity changed");
+                        identity = result; winner = a; break;
                     } catch (Exception ignored) { }
+                    finally { transport.close(); run.untrack(transport); }
                 }
             } finally { java.util.Arrays.fill(secret, (byte) 0); link.clearSecret(); }
             PairLink.Address selected = winner; SavedMacs.Identity authenticated = identity;
             ui.post(() -> {
-                if (!running || closing || isFinishing() || isDestroyed()) return;
-                running = false;
+                if (qrAttempt != run || isFinishing() || isDestroyed()) return;
+                boolean completed = run.complete(() -> {
+                    if (selected != null && authenticated != null) {
+                        int number = selected.port() == 0 ? link.port : selected.port();
+                        synchronized (savedMacStore) { savedMacStore.paired(authenticated, new SavedMacs.Endpoint(selected.host(), number)); }
+                    }
+                });
+                if (!completed) return;
+                qrAttempt = null; qrLink = null;
+                running = false; updateConnectionCancel();
                 if (selected == null || authenticated == null) { show("配对失败，请确认 Mac 的配对链接仍有效且网络可达。"); return; }
                 int number = selected.port() == 0 ? link.port : selected.port();
-                savedMacStore.paired(authenticated, new SavedMacs.Endpoint(selected.host(), number));
                 getPreferences(0).edit().putString("host", selected.host()).putString("port", String.valueOf(number)).apply();
                 host.setText(selected.host()); port.setText(String.valueOf(number)); code.setText(""); refreshSavedMacs();
                 start(false);
             });
-        });
+        }); } catch (java.util.concurrent.RejectedExecutionException busy) {
+            cancelQrPairing(); show("配对线程仍在结束，请稍后重试。");
+        }
     }
 
     private int dp(float n) { return Math.round(n * getResources().getDisplayMetrics().density); }
@@ -365,20 +384,209 @@ public final class MainActivity extends Activity {
         b.setBackground(shape(0xff272a30, 12)); b.setOnClickListener(click); parent.addView(b);
         return b;
     }
+    private void buildConnectionScreen() {
+        connectionTiles = getPreferences(0).getBoolean("connectionTiles", true);
+        connectionContainer = new ScrollView(this); connectionContainer.setFillViewport(true);
+        connectionContainer.setBackgroundColor(android.graphics.Color.BLACK);
+        connectionContainer.setVerticalScrollBarEnabled(false);
+        android.widget.FrameLayout space = new android.widget.FrameLayout(this);
+        connectionContainer.addView(space, new ScrollView.LayoutParams(-1, -1));
+        connectionPanel = new LinearLayout(this); connectionPanel.setOrientation(LinearLayout.VERTICAL);
+        android.widget.FrameLayout.LayoutParams column = new android.widget.FrameLayout.LayoutParams(dp(380), -2, android.view.Gravity.CENTER);
+        space.addView(connectionPanel, column); root.addView(connectionContainer, new LinearLayout.LayoutParams(-1, -1));
+        connectionContainer.addOnLayoutChangeListener((v, left, top, right, bottom, ol, ot, oright, ob) -> {
+            int width = Math.max(1, Math.min(dp(380), right - left - dp(8)));
+            android.widget.FrameLayout.LayoutParams p = (android.widget.FrameLayout.LayoutParams) connectionPanel.getLayoutParams();
+            if (p.width != width) { p.width = width; connectionPanel.setLayoutParams(p); }
+            int columns = width >= dp(340) && getResources().getConfiguration().fontScale < 1.3f ? 2 : 1;
+            if (columns != savedMacColumns) { savedMacColumns = columns; refreshSavedMacs(); }
+        });
+        connectionContainer.setOnApplyWindowInsetsListener((view, insets) -> {
+            if (android.os.Build.VERSION.SDK_INT >= 30) {
+                boolean imeVisible = insets.isVisible(android.view.WindowInsets.Type.ime());
+                int imeBottom = imeVisible ? Math.max(0, insets.getInsets(android.view.WindowInsets.Type.ime()).bottom - insetBottom) : 0;
+                if (connectionContainer.getPaddingBottom() != imeBottom) {
+                    connectionContainer.setPadding(0, 0, 0, imeBottom);
+                    if (imeVisible) connectionContainer.post(() -> {
+                        android.view.View focused = getCurrentFocus();
+                        if (focused != host && focused != port && focused != code) return;
+                        android.graphics.Rect bounds = new android.graphics.Rect();
+                        focused.getDrawingRect(bounds); connectionContainer.offsetDescendantRectToMyCoords(focused, bounds);
+                        connectionContainer.smoothScrollTo(0, Math.max(0, bounds.bottom - connectionContainer.getHeight() + connectionContainer.getPaddingBottom() + dp(16)));
+                    });
+                }
+                android.widget.FrameLayout.LayoutParams p = (android.widget.FrameLayout.LayoutParams) connectionPanel.getLayoutParams();
+                int gravity = imeVisible
+                        ? android.view.Gravity.TOP | android.view.Gravity.CENTER_HORIZONTAL : android.view.Gravity.CENTER;
+                if (p.gravity != gravity) { p.gravity = gravity; connectionPanel.setLayoutParams(p); }
+            }
+            return insets;
+        });
+        LinearLayout heading = new LinearLayout(this); heading.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        heading.setPadding(dp(10), 0, 0, 0); connectionPanel.addView(heading);
+        connectionTitle = new TextView(this); connectionTitle.setTextSize(17); connectionTitle.setTextColor(0xffeef0f3);
+        connectionTitle.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
+        heading.addView(connectionTitle, new LinearLayout.LayoutParams(0, -2, 1));
+        connectionStyle = button(heading, "", v -> {
+            connectionTiles = !connectionTiles; getPreferences(0).edit().putBoolean("connectionTiles", connectionTiles).apply();
+            updateConnectionStyle(); refreshSavedMacs();
+        });
+        connectionStyle.setTextSize(20); connectionStyle.setTextColor(0xff9bb7ff);
+        connectionStyle.setBackgroundColor(android.graphics.Color.TRANSPARENT);
+        connectionStyle.setPadding(0, 0, 0, 0); connectionStyle.setLayoutParams(new LinearLayout.LayoutParams(dp(44), dp(44)));
+        status = new TextView(this); status.setTextSize(13); status.setTextColor(0xffa4abb5);
+        status.setPadding(dp(10), 0, dp(10), dp(10));
+        status.setAccessibilityLiveRegion(android.view.View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        status.setText("正在查找 Mac。跨网络连接需在 Mac 上启用 Remote Access。"); connectionPanel.addView(status);
+        connectionHome = new LinearLayout(this); connectionHome.setOrientation(LinearLayout.VERTICAL); connectionPanel.addView(connectionHome);
+        savedMacs = new LinearLayout(this); savedMacs.setOrientation(LinearLayout.VERTICAL);
+        savedMacs.setPadding(dp(10), 0, dp(10), 0); connectionHome.addView(savedMacs);
+        nearbyMacs = new LinearLayout(this); nearbyMacs.setOrientation(LinearLayout.VERTICAL);
+        nearbyMacs.setPadding(dp(10), 0, dp(10), 0); connectionHome.addView(nearbyMacs);
+        Button add = connectionLink(connectionHome, "添加 Mac…", v -> { if (!running) setAddingMac(true, false); });
+        add.setContentDescription("添加 Mac，用配对码连接");
+        cancelConnection = connectionLink(connectionHome, "取消连接", v -> cancelConnectionAttempt());
+        updateConnectionCancel();
+        addMacCard = new LinearLayout(this); addMacCard.setOrientation(LinearLayout.VERTICAL);
+        addMacCard.setPadding(dp(10), 0, dp(10), 0); connectionPanel.addView(addMacCard);
+        TextView words = new TextView(this); words.setTextSize(13); words.setTextColor(0xffa4abb5);
+        words.setText("配对一次后，即可通过 VPN 或网络连接这台 Mac。\n在 Mac 的 Sill 菜单中打开配对窗口。");
+        addMacCard.addView(words);
+        Button scan = button(addMacCard, "扫描 Mac 上的配对码", v -> {
+            if (!running) startActivityForResult(new android.content.Intent(this, PairScannerActivity.class), 102);
+        });
+        scan.setTextSize(15); scan.setTextColor(0xffeef0f3); scan.setBackground(shape(0xff23262c, 12));
+        LinearLayout.LayoutParams scanParams = new LinearLayout.LayoutParams(-1, dp(72)); scanParams.topMargin = dp(10); scan.setLayoutParams(scanParams);
+        typedPairing = new LinearLayout(this); typedPairing.setOrientation(LinearLayout.VERTICAL); addMacCard.addView(typedPairing);
+        host = field("Mac IP 或 Tailscale 地址", getPreferences(0).getString("host", ""));
+        port = field("端口", getPreferences(0).getString("port", "7455")); port.setInputType(2);
+        code = field("Mac 上显示的 12 位配对码", ""); code.setInputType(2);
+        Button pair = button(typedPairing, "配对", v -> connect());
+        pair.setTextSize(15); pair.setTextColor(android.graphics.Color.BLACK); pair.setBackground(shape(0xff9bb7ff, 12));
+        LinearLayout.LayoutParams pairParams = new LinearLayout.LayoutParams(dp(88), dp(44)); pairParams.topMargin = dp(8); pair.setLayoutParams(pairParams);
+        connectionLink(typedPairing, "连接已配对的 Mac", v -> start(false));
+        LinearLayout actions = new LinearLayout(this); addMacCard.addView(actions);
+        pairingPath = connectionLink(actions, "", v -> setAddingMac(true, !typingPairing));
+        LinearLayout.LayoutParams pathParams = new LinearLayout.LayoutParams(-2, dp(44)); pathParams.rightMargin = dp(18); pairingPath.setLayoutParams(pathParams);
+        connectionLink(actions, "取消", v -> closeAddMac());
+        scan.setTag("scanner"); setAddingMac(false, false); updateConnectionStyle();
+    }
+    private Button connectionLink(LinearLayout parent, String label, android.view.View.OnClickListener action) {
+        Button b = button(parent, label, action); b.setTextSize(15); b.setTextColor(0xff9bb7ff);
+        b.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
+        b.setBackgroundColor(android.graphics.Color.TRANSPARENT); b.setGravity(android.view.Gravity.CENTER_VERTICAL | android.view.Gravity.START);
+        b.setPadding(dp(10), 0, dp(10), 0); b.setLayoutParams(new LinearLayout.LayoutParams(-1, dp(44))); return b;
+    }
+    private void updateConnectionStyle() {
+        connectionStyle.setText(connectionTiles ? "☰" : "▦");
+        connectionStyle.setContentDescription(connectionTiles ? "显示为列表" : "显示为卡片");
+    }
+    private void setAddingMac(boolean adding, boolean typed) {
+        if (addingMac && (!adding || typingPairing != typed)) {
+            android.view.View focused = getCurrentFocus();
+            if (focused == host || focused == port || focused == code) {
+                ((android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(focused.getWindowToken(), 0);
+                focused.clearFocus();
+            }
+        }
+        if (addingMac && !adding) code.setText("");
+        addingMac = adding; typingPairing = typed;
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            if (adding && addMacBack == null) {
+                addMacBack = this::closeAddMac;
+                getOnBackInvokedDispatcher().registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, addMacBack);
+            } else if (!adding && addMacBack != null) {
+                getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(addMacBack); addMacBack = null;
+            }
+        }
+        connectionTitle.setText(adding ? "添加 Mac" : "连接 Mac");
+        connectionStyle.setVisibility(adding ? android.view.View.GONE : android.view.View.VISIBLE);
+        connectionHome.setVisibility(adding ? android.view.View.GONE : android.view.View.VISIBLE);
+        addMacCard.setVisibility(adding ? android.view.View.VISIBLE : android.view.View.GONE);
+        typedPairing.setVisibility(typed ? android.view.View.VISIBLE : android.view.View.GONE);
+        android.view.View scanner = addMacCard.findViewWithTag("scanner");
+        if (scanner != null) scanner.setVisibility(typed ? android.view.View.GONE : android.view.View.VISIBLE);
+        pairingPath.setText(typed ? "改为扫码" : "手动输入配对码");
+    }
+    private void updateConnectionCancel() {
+        if (cancelConnection != null) cancelConnection.setVisibility(running ? android.view.View.VISIBLE : android.view.View.GONE);
+    }
+    private void cancelConnectionAttempt() {
+        if (running) {
+            if (qrAttempt != null) cancelQrPairing(); else disconnect();
+            displayStatus("已取消连接。");
+        }
+    }
+    private void cancelQrPairing() {
+        QrPairingAttempt attempt = qrAttempt; if (attempt == null) return;
+        qrAttempt = null;
+        if (qrBegin != null) { ui.removeCallbacks(qrBegin); qrBegin = null; }
+        if (qrLink != null) { qrLink.clearSecret(); qrLink = null; }
+        running = false; updateConnectionCancel(); attempt.cancel();
+    }
+    private void closeAddMac() { cancelConnectionAttempt(); setAddingMac(false, false); }
+    @Override public void onBackPressed() {
+        if (addingMac && connectionContainer.getVisibility() == android.view.View.VISIBLE) closeAddMac();
+        else super.onBackPressed();
+    }
+    private void styleConnectionRow(Button row) {
+        row.setTextSize(15); row.setTextColor(0xffeef0f3); row.setGravity(android.view.Gravity.CENTER_VERTICAL | android.view.Gravity.START);
+        row.setPadding(dp(10), 0, dp(10), 0); row.setBackgroundColor(android.graphics.Color.TRANSPARENT);
+        row.setMinHeight(dp(50)); row.setLayoutParams(new LinearLayout.LayoutParams(-1, -2));
+    }
     private EditText field(String hint, String value) {
         EditText e = new EditText(this); e.setSingleLine(true); e.setHint(hint); e.setText(value);
-        e.setTextColor(-1); e.setHintTextColor(0xff9297a0); connectionPanel.addView(e); return e;
+        e.setTextColor(0xffeef0f3); e.setHintTextColor(0xffa4abb5); e.setTextSize(15);
+        e.setPadding(dp(14), 0, dp(14), 0); e.setBackground(shape(0xff23262c, 12));
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-1, dp(48)); p.topMargin = dp(8);
+        typedPairing.addView(e, p); return e;
     }
     private void refreshSavedMacs() {
         savedMacs.removeAllViews();
+        LinearLayout tileRow = null; int inRow = 0;
         for (SavedMacs.Mac mac : savedMacStore.all()) {
-            String label = mac.displayName() + "  ·  " + mac.preferred().display();
-            if (mac.addresses().size() > 1) label += "  (" + mac.addresses().size() + " 个地址)";
-            Button row = button(savedMacs, label, v -> connectSavedMac(mac.identity(), mac.preferred()));
+            android.view.View row;
+            if (connectionTiles) {
+                if (tileRow == null || inRow == Math.max(1, savedMacColumns)) {
+                    tileRow = new LinearLayout(this); tileRow.setOrientation(LinearLayout.HORIZONTAL);
+                    LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(-1, -2);
+                    if (savedMacs.getChildCount() > 0) rowParams.topMargin = dp(10);
+                    savedMacs.addView(tileRow, rowParams); inRow = 0;
+                }
+                LinearLayout tile = new LinearLayout(this); tile.setOrientation(LinearLayout.VERTICAL);
+                tile.setBackground(shape(0xff23262c, 12)); tile.setClipToOutline(true);
+                android.widget.FrameLayout image = new android.widget.FrameLayout(this); image.setBackgroundColor(0xff2b2e33);
+                android.widget.ImageView icon = new android.widget.ImageView(this);
+                icon.setImageDrawable(new ToolbarSymbol("desktop", 0xd9ffffff));
+                image.addView(icon, new android.widget.FrameLayout.LayoutParams(dp(24), dp(24), android.view.Gravity.CENTER));
+                tile.addView(image, new LinearLayout.LayoutParams(-1, dp(92)));
+                LinearLayout description = new LinearLayout(this); description.setOrientation(LinearLayout.VERTICAL);
+                description.setPadding(dp(10), dp(8), dp(10), dp(8)); description.setMinimumHeight(dp(46));
+                TextView name = new TextView(this); name.setText(mac.displayName()); name.setTextSize(14); name.setTextColor(0xffeef0f3);
+                name.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
+                name.setSingleLine(true); name.setEllipsize(android.text.TextUtils.TruncateAt.END); description.addView(name);
+                TextView kind = new TextView(this); kind.setText("已配对"); kind.setTextSize(12); kind.setTextColor(0xffa4abb5); description.addView(kind);
+                tile.addView(description); tile.setContentDescription(mac.displayName() + "，已配对");
+                tile.setOnClickListener(v -> connectSavedMac(mac.identity(), mac.preferred()));
+                LinearLayout.LayoutParams tileParams = new LinearLayout.LayoutParams(0, -2, 1);
+                if (inRow > 0) tileParams.leftMargin = dp(10); tileRow.addView(tile, tileParams); inRow++;
+                if (Math.max(1, savedMacColumns) == 2 && inRow == 1) {
+                    // The final tile keeps one column's width even when the row has no second Mac.
+                    android.view.View spacer = new android.view.View(this);
+                    LinearLayout.LayoutParams spare = new LinearLayout.LayoutParams(0, 1, 1); spare.leftMargin = dp(10);
+                    tileRow.addView(spacer, spare);
+                } else if (inRow == 2) tileRow.removeViewAt(1);
+                row = tile;
+            } else {
+                Button list = button(savedMacs, mac.displayName() + "  ·  已配对", v -> connectSavedMac(mac.identity(), mac.preferred()));
+                styleConnectionRow(list); row = list;
+            }
             row.setOnLongClickListener(v -> {
+                if (running) { show("请先取消当前连接。"); return true; }
                 new android.app.AlertDialog.Builder(this).setTitle("移除本机记录？")
                     .setMessage("这只移除手机上的记录；如需撤销 Mac 的信任，请在 Mac 的 Sill 设置中移除设备。")
                     .setNegativeButton("取消", null).setPositiveButton("移除", (d, which) -> {
+                        if (running) { show("请先取消当前连接。"); return; }
                         java.io.Closeable cancelled = null;
                         synchronized (savedMacStore) {
                             savedMacStore.forget(mac.identity());
@@ -399,6 +607,7 @@ public final class MainActivity extends Activity {
         }
     }
     private void connectSavedMac(SavedMacs.Identity identity, SavedMacs.Endpoint endpoint) {
+        if (running) { show("请先取消当前连接。"); return; }
         host.setText(endpoint.host()); port.setText(String.valueOf(endpoint.port())); start(false, identity);
     }
     private void buildSession() {
@@ -496,7 +705,7 @@ public final class MainActivity extends Activity {
             public void onViewAttachedToWindow(android.view.View view) { }
             public void onViewDetachedFromWindow(android.view.View view) { pictureInput.cancel(); }
         });
-        LinearLayout bar = new LinearLayout(this); sessionBar = bar; sessionPanel.addView(bar);
+        LinearLayout bar = new LinearLayout(this); sessionBar = bar; bar.setGravity(android.view.Gravity.CENTER_VERTICAL); sessionPanel.addView(bar);
         bar.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, oright, ob) -> {
             if ((t != ot || b != ob) && root.getWidth() < root.getHeight() && appDrawer != null && appDrawer.isShowing()) {
                 AppDrawerDialog drawer = appDrawer;
@@ -534,6 +743,23 @@ public final class MainActivity extends Activity {
         Button keyboardButton = barButton(bar, "键盘", v -> toggleKeyboard()); tourKeyboardButton = keyboardButton;
         desktopButton = barButton(bar, "桌面", v -> tapDesktop());
         Button settingsButton = barButton(bar, "设置", v -> settings()); tourSettingsButton = settingsButton;
+        configureToolbarButton(appsButton, "apps"); configureToolbarButton(menuButton, "menus");
+        configureToolbarButton(keyboardButton, "keyboard"); configureToolbarButton(desktopButton, "desktop");
+        configureToolbarButton(settingsButton, "settings");
+        scaleButton.setTextColor(0xffeef0f3); scaleButton.setTextSize(11); scaleButton.setIncludeFontPadding(false);
+        scaleButton.setBackground(shape(0xff23262c, 14));
+        scaleButton.addTextChangedListener(new android.text.TextWatcher() {
+            public void beforeTextChanged(CharSequence text, int start, int count, int after) { }
+            public void onTextChanged(CharSequence text, int start, int before, int count) { }
+            public void afterTextChanged(android.text.Editable text) {
+                if (text.length() >= 2) {
+                    text.setSpan(new android.text.style.AbsoluteSizeSpan(17, true), 0, 2, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                    text.setSpan(new android.text.style.StyleSpan(android.graphics.Typeface.BOLD), 0, 2, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                }
+            }
+        });
+        scaleButton.refresh();
+        root.getViewTreeObserver().addOnGlobalLayoutListener(this::refreshToolbarAppearance);
         android.widget.HorizontalScrollView strip = new android.widget.HorizontalScrollView(this); tourStrip = strip;
         strip.setHorizontalScrollBarEnabled(false); choices = new LinearLayout(this); choices.setOrientation(LinearLayout.HORIZONTAL);
         strip.addView(choices);
@@ -584,9 +810,9 @@ public final class MainActivity extends Activity {
             stripRow.setVisibility(landscape || large ? android.view.View.GONE : android.view.View.VISIBLE);
             if (landscape && strip.getParent() != bar) {
                 stripRow.removeView(strip); if (menuButton.getParent() == stripRow) stripRow.removeView(menuButton); sessionPanel.removeView(bar);
-                bar.addView(strip, 1, new LinearLayout.LayoutParams(0, dp(52), 1));
+                bar.addView(strip, 1, new LinearLayout.LayoutParams(0, dp(58), 1));
                 if (menuButton.getParent() == bar) bar.removeView(menuButton);
-                bar.addView(menuButton, 2, new LinearLayout.LayoutParams(dp(48), dp(46)));
+                bar.addView(menuButton, 2, new LinearLayout.LayoutParams(dp(64), dp(58)));
                 sessionPanel.addView(bar, 1);
             } else if (!landscape && strip.getParent() != stripRow) {
                 bar.removeView(strip); if (menuButton.getParent() == bar) bar.removeView(menuButton); sessionPanel.removeView(bar);
@@ -603,6 +829,8 @@ public final class MainActivity extends Activity {
             }
             refreshMenuButton();
             if (!landscape) {
+                if (bar.getPaddingLeft() != 0) bar.setPadding(0, 0, 0, 0);
+                bar.setBackgroundColor(android.graphics.Color.TRANSPARENT);
                 // Keep the picture's full room as the host viewport. The aspect-fit video and
                 // cursor share its top-aligned pane in Larger Picture, without cropping.
                 placePortraitRow(picture, geometry.picture, 0);
@@ -621,14 +849,21 @@ public final class MainActivity extends Activity {
                 portraitButtons(keys, 44);
                 placePortraitRow(trackpad, geometry.trackpad, geometry.keys.bottom());
             } else {
-                applyRowParams(bar, new LinearLayout.LayoutParams(-1, -2));
+                if (bar.getPaddingLeft() != dp(14)) bar.setPadding(dp(14), dp(10), dp(14), dp(10));
+                bar.setBackgroundColor(0xff16181c);
+                applyRowParams(bar, new LinearLayout.LayoutParams(-1, dp(78)));
                 LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, 0, 1);
                 applyRowParams(picture, params);
                 for (Button button : new Button[]{appsButton, scaleButton, keyboardButton, desktopButton, settingsButton}) {
-                    LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(dp(48), dp(50));
-                    bp.setMargins(dp(2), dp(3), dp(2), dp(3)); applyRowParams(button, bp);
+                    LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(dp(64), dp(58));
+                    bp.setMargins(dp(6), 0, dp(6), 0); applyRowParams(button, bp);
+                }
+                if (menuButton.getParent() == bar) {
+                    LinearLayout.LayoutParams mp = new LinearLayout.LayoutParams(dp(64), dp(58));
+                    mp.setMargins(dp(6), 0, dp(6), 0); applyRowParams(menuButton, mp);
                 }
             }
+            refreshToolbarAppearance();
             layoutVideo(); cursor.invalidate();
             tourLayoutChanged();
         };
@@ -700,6 +935,70 @@ public final class MainActivity extends Activity {
         p.setMargins(dp(2), dp(3), dp(2), dp(3)); b.setLayoutParams(p); b.setPadding(0, 0, 0, 0);
         return b;
     }
+    private void configureToolbarButton(Button button, String symbol) {
+        button.setTag(symbol); button.setTextSize(11); button.setGravity(android.view.Gravity.CENTER);
+        button.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
+        button.setIncludeFontPadding(false); button.setSingleLine(true); button.setCompoundDrawablePadding(dp(3));
+        styleToolbarButton(button, false);
+    }
+    private void styleToolbarButton(Button button, boolean open) {
+        if (button == null) return;
+        button.setSelected(open); button.setTextColor(open ? 0xff9bb7ff : 0xffc4c9d1);
+        button.setBackground(shape(open ? 0xff2c3550 : 0xff23262c, root != null && root.getWidth() > root.getHeight() ? 16 : 14));
+        ToolbarSymbol icon = new ToolbarSymbol((String) button.getTag(), open ? 0xff9bb7ff : 0xffeef0f3);
+        icon.setBounds(0, 0, dp(22), dp(24)); button.setCompoundDrawables(null, icon, null, null);
+    }
+    private void refreshToolbarAppearance() {
+        if (tourAppsButton == null || root == null) return;
+        boolean landscape = root.getWidth() > root.getHeight();
+        if (toolbarLandscape == null || toolbarLandscape != landscape) {
+            toolbarLandscape = landscape;
+            for (Button button : new Button[]{tourAppsButton, menuButton, tourKeyboardButton, desktopButton, tourSettingsButton})
+                if (button != null) styleToolbarButton(button, button.isSelected());
+            if (scaleControl != null) scaleControl.setBackground(shape(0xff23262c, landscape ? 16 : 14));
+        }
+        android.view.WindowInsets insets = root.getRootWindowInsets();
+        boolean ime = android.os.Build.VERSION.SDK_INT >= 30 && insets != null
+                ? insets.isVisible(android.view.WindowInsets.Type.ime()) : keyboard != null && keyboard.hasFocus();
+        updateToolbarButton(tourAppsButton, appDrawer != null && appDrawer.isShowing());
+        updateToolbarButton(menuButton, menuDialog != null && menuDialog.isShowing());
+        updateToolbarButton(tourKeyboardButton, ime && keyboard != null && keyboard.hasFocus());
+        updateToolbarButton(desktopButton, desktopActive);
+        updateToolbarButton(tourSettingsButton, settingsOpen);
+    }
+    private void updateToolbarButton(Button button, boolean open) {
+        if (button != null && button.isSelected() != open) styleToolbarButton(button, open);
+    }
+    private static final class ToolbarSymbol extends android.graphics.drawable.Drawable {
+        private final String symbol;
+        private final android.graphics.Paint paint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        ToolbarSymbol(String symbol, int color) {
+            this.symbol = symbol; paint.setColor(color); paint.setStyle(android.graphics.Paint.Style.STROKE);
+            paint.setStrokeWidth(1.7f); paint.setStrokeCap(android.graphics.Paint.Cap.ROUND); paint.setStrokeJoin(android.graphics.Paint.Join.ROUND);
+        }
+        @Override public void draw(android.graphics.Canvas canvas) {
+            android.graphics.Rect b = getBounds(); int save = canvas.save();
+            canvas.translate(b.left, b.top); canvas.scale(b.width() / 24f, b.height() / 24f);
+            switch (symbol) {
+                case "apps" -> { canvas.drawCircle(10, 10, 6, paint); canvas.drawLine(14.5f, 14.5f, 20, 20, paint); }
+                case "desktop" -> { canvas.drawRoundRect(3, 4, 21, 16, 1.5f, 1.5f, paint); canvas.drawLine(12, 16, 12, 20, paint); canvas.drawLine(8, 20, 16, 20, paint); }
+                case "keyboard" -> {
+                    canvas.drawRoundRect(2, 6, 22, 18, 2, 2, paint);
+                    for (int x = 6; x <= 18; x += 4) { canvas.drawPoint(x, 10, paint); canvas.drawPoint(x, 13, paint); }
+                    canvas.drawLine(8, 16, 16, 16, paint);
+                }
+                case "menus" -> { for (int y = 7; y <= 17; y += 5) { canvas.drawPoint(4, y, paint); canvas.drawLine(8, y, 20, y, paint); } }
+                case "settings" -> {
+                    canvas.drawCircle(12, 12, 6.5f, paint); canvas.drawCircle(12, 12, 2.5f, paint);
+                    for (int i = 0; i < 8; i++) { double angle = i * Math.PI / 4; float x = (float) Math.cos(angle), y = (float) Math.sin(angle); canvas.drawLine(12 + 7*x, 12 + 7*y, 12 + 9.5f*x, 12 + 9.5f*y, paint); }
+                }
+            }
+            canvas.restoreToCount(save);
+        }
+        @Override public void setAlpha(int alpha) { paint.setAlpha(alpha); invalidateSelf(); }
+        @Override public void setColorFilter(android.graphics.ColorFilter filter) { paint.setColorFilter(filter); invalidateSelf(); }
+        @Override public int getOpacity() { return android.graphics.PixelFormat.TRANSLUCENT; }
+    }
     private void toggleKeyboard() {
         dismissSettings(false);
         if (appDrawer != null) appDrawer.dismiss();
@@ -714,7 +1013,7 @@ public final class MainActivity extends Activity {
         if (menuButton == null || root == null) return;
         int width = root.getWidth() - root.getPaddingLeft() - root.getPaddingRight();
         boolean landscape = root.getWidth() > root.getHeight();
-        boolean fits = width >= dp(landscape ? 6 * 48 + 100 : 320);
+        boolean fits = width >= dp(landscape ? 6 * 64 + 5 * 12 + 92 + 28 : 320);
         int visibility = fits && macMenus.length() > 0 ? android.view.View.VISIBLE : android.view.View.GONE;
         boolean changed = visibility != menuButton.getVisibility();
         menuButton.setVisibility(visibility);
@@ -1183,68 +1482,145 @@ public final class MainActivity extends Activity {
             }
             if (i == items.length - 1) disconnect();
         };
-        if (root.getWidth() > root.getHeight()) {
-            pictureInput.cancel();
-            android.widget.FrameLayout overlay = new android.widget.FrameLayout(this);
-            settingsOverlay = overlay;
-            overlay.setOnClickListener(v -> dismissSettings());
-            LinearLayout panel = new LinearLayout(this); panel.setOrientation(LinearLayout.VERTICAL);
-            panel.setPadding(dp(14), dp(14), dp(14), dp(14)); panel.setBackground(shape(0xff181a1f, 20));
-            panel.setOnClickListener(v -> {});
-            TextView title = new TextView(this); title.setText("设置"); title.setTextSize(19); title.setTextColor(-1); panel.addView(title);
-            ScrollView scroller = new ScrollView(this); LinearLayout rows = new LinearLayout(this); rows.setOrientation(LinearLayout.VERTICAL); scroller.addView(rows);
-            panel.addView(scroller, new LinearLayout.LayoutParams(-1, 0, 1));
-            for (int n = 0; n < items.length; n++) {
-                final int index = n;
-                TextView row = new TextView(this); row.setText(items[n]); row.setTextColor(-1); row.setTextSize(15);
-                if (n == holdIndex) row.setTag("thumbnailHold");
-                if (n == 2) row.setTag("clipboardAction");
-                if (n == muteIndex) {
-                    row.setTag("localAudioMute");
-                    refreshSettingsMute = () -> { muteShown[0] = localAudio.muted(); row.setText(muteShown[0] ? "取消本机静音" : "本机静音"); };
-                }
-                row.setGravity(android.view.Gravity.CENTER_VERTICAL); row.setPadding(dp(12), 0, dp(12), 0); row.setMinHeight(dp(48));
-                row.setOnClickListener(v -> {
-                    choose.accept(index);
-                    if (settingsOverlay == null) return;
-                    if (index == pipIndex && pip != null && pip.supported()) row.setText(pipEnabled ? "关闭画中画" : "开启画中画");
-                    if (index == 1) row.setText(clipboardEnabled ? "关闭剪贴板共享" : "开启剪贴板共享");
-                    if (index == pasteModeIndex) {
-                        row.setText(pasteRightAway ? "关闭确认后立即粘贴" : "开启确认后立即粘贴");
-                        TextView clipboardRow = settingsOverlay.findViewWithTag("clipboardAction");
-                        if (clipboardRow != null) clipboardRow.setText(pasteRightAway ? "将手机剪贴板粘贴到 Mac" : "发送手机剪贴板到 Mac");
-                    }
-                    if (index == 3) row.setText(audioEnabled ? "关闭声音（重新连接后生效）" : "开启声音测试（重新连接后生效）");
-                    if (index == 4) row.setText(getPreferences(0).getBoolean("reverseScrolling", false) ? "滚动方向：反向" : "滚动方向：自然");
-                    if (index == 5) row.setText(getPreferences(0).getBoolean("macGestures", true) ? "关闭多指 Mac 手势" : "开启多指 Mac 手势");
-                    if (offerLarge && index == 6 && portraitImeHeight > 0 && android.os.Build.VERSION.SDK_INT >= 30) row.setText(largerPicture ? "关闭大画面" : "开启大画面");
-                });
-                rows.addView(row, new LinearLayout.LayoutParams(-1, dp(48)));
-            }
-            android.widget.FrameLayout.LayoutParams panelParams = new android.widget.FrameLayout.LayoutParams(
-                    Math.min(dp(380), Math.max(dp(160), picture.getWidth() - dp(44))), -1,
-                    android.view.Gravity.TOP | android.view.Gravity.END);
-            panelParams.setMargins(dp(22), dp(8), dp(22), dp(14));
-            overlay.addView(panel, panelParams); picture.addView(overlay, new android.widget.FrameLayout.LayoutParams(-1, -1));
-            if (android.os.Build.VERSION.SDK_INT >= 33) {
-                settingsBack = this::dismissSettings;
-                getOnBackInvokedDispatcher().registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, settingsBack);
-            }
-        } else {
-            android.widget.ArrayAdapter<String> adapter = new android.widget.ArrayAdapter<>(this, android.R.layout.select_dialog_item, items);
-            android.app.AlertDialog dialog = new android.app.AlertDialog.Builder(this).setTitle("设置").setAdapter(adapter, (d, i) -> choose.accept(i)).create();
-            settingsDialog = dialog;
-            refreshSettingsMute = () -> {
-                muteShown[0] = localAudio.muted();
-                items[muteIndex] = muteShown[0] ? "取消本机静音" : "本机静音";
-                adapter.notifyDataSetChanged();
-            };
-            dialog.setOnDismissListener(d -> {
-                android.util.Log.i("SillAndroid", "Settings: dialog dismissed current=" + (settingsDialog == dialog) + " child=" + (settingsChild != null));
-                if (settingsDialog != dialog) return; settingsDialog = null; if (!settingsReanchoring && settingsChild == null) finishSettings();
-            });
-            dialog.show();
+        pictureInput.cancel(); trackpad.cancelGestures();
+        boolean landscape = root.getWidth() > root.getHeight();
+        android.widget.FrameLayout overlay = new android.widget.FrameLayout(this);
+        settingsOverlay = overlay;
+        if (landscape) overlay.setOnClickListener(v -> dismissSettings());
+        else {
+            AppDrawerModel.PortraitPlacement placement = AppDrawerModel.portraitPlacement(
+                    sessionLayer.getHeight(), sessionBar.getTop(), sessionBar.getBottom(), dp(8), false);
+            android.view.View above = new android.view.View(this), below = new android.view.View(this);
+            above.setOnClickListener(v -> dismissSettings()); below.setOnClickListener(v -> dismissSettings());
+            overlay.addView(above, new android.widget.FrameLayout.LayoutParams(-1, placement.topDim(), android.view.Gravity.TOP));
+            android.widget.FrameLayout.LayoutParams bottom = new android.widget.FrameLayout.LayoutParams(-1, placement.bottomDim(), android.view.Gravity.TOP);
+            bottom.topMargin = placement.bottomStart(); overlay.addView(below, bottom);
         }
+        LinearLayout panel = new LinearLayout(this); panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(14), dp(14), dp(14), dp(14));
+        android.graphics.drawable.GradientDrawable panelShape = shape(0xff16181c, 20);
+        panelShape.setStroke(dp(1), 0x1affffff); panel.setBackground(panelShape); panel.setElevation(dp(24));
+        panel.setOnClickListener(v -> { });
+        LinearLayout header = new LinearLayout(this); header.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        header.setPadding(dp(4), 0, dp(4), dp(12)); panel.addView(header);
+        TextView title = new TextView(this); title.setText(windowOrderMac.isEmpty() ? "Mac" : windowOrderMac);
+        title.setTextSize(17); title.setTextColor(0xffeef0f3); title.setSingleLine(true);
+        title.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+        title.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
+        title.setAccessibilityHeading(true); header.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
+        Button done = button(header, "完成", v -> dismissSettings());
+        done.setAllCaps(false); done.setTextColor(0xff9bb7ff); done.setTextSize(15);
+        done.setPadding(dp(4), 0, dp(4), 0); done.setBackgroundColor(android.graphics.Color.TRANSPARENT);
+        done.setLayoutParams(new LinearLayout.LayoutParams(-2, dp(44)));
+        ScrollView scroller = new ScrollView(this); settingsScroll = scroller;
+        scroller.setVerticalScrollBarEnabled(false); scroller.setFillViewport(false);
+        LinearLayout rows = new LinearLayout(this); rows.setOrientation(LinearLayout.VERTICAL); scroller.addView(rows);
+        panel.addView(scroller, new LinearLayout.LayoutParams(-1, 0, 1));
+        addSettingsHeading(rows, "Mac");
+        addSettingsRow(rows, "画质和帧率", null, false, () -> choose.accept(0));
+        addSettingsHeading(rows, "此设备");
+        java.util.ArrayList<Integer> order = new java.util.ArrayList<>();
+        order.add(pipIndex); if (offerLarge) order.add(6);
+        order.add(1); if (pasteModeIndex >= 0) order.add(pasteModeIndex); order.add(2);
+        order.add(4); order.add(holdIndex); order.add(5); order.add(3); order.add(muteIndex); order.add(tourIndex);
+        java.util.function.IntFunction<Boolean> checked = index -> {
+            if (index == 1) return clipboardEnabled;
+            if (index == 3) return audioEnabled;
+            if (index == 4) return getPreferences(0).getBoolean("reverseScrolling", false);
+            if (index == 5) return getPreferences(0).getBoolean("macGestures", true);
+            if (offerLarge && index == 6) return largerPicture;
+            if (index == pipIndex) return pipEnabled;
+            if (index == muteIndex) return localAudio.muted();
+            if (index == pasteModeIndex) return pasteRightAway;
+            return null;
+        };
+        LinearLayout clipboardGroup = null;
+        for (int index : order) {
+            String label = index == pipIndex ? (pip == null || !pip.supported() ? items[index] : "画中画")
+                    : offerLarge && index == 6 ? (android.os.Build.VERSION.SDK_INT < 30 || portraitImeHeight <= 0 ? items[index] : "大画面")
+                    : index == 1 ? "共享剪贴板" : index == pasteModeIndex ? "确认后立即粘贴"
+                    : index == 4 ? "反向滚动" : index == 5 ? "多指 Mac 手势"
+                    : index == 3 ? "声音测试（重新连接后生效）" : index == muteIndex ? "本机静音"
+                    : items[index];
+            Boolean value = checked.apply(index);
+            boolean clipboardRow = index == 1 || index == 2 || index == pasteModeIndex;
+            if (clipboardRow && clipboardGroup == null) {
+                clipboardGroup = new LinearLayout(this); clipboardGroup.setOrientation(LinearLayout.VERTICAL);
+                clipboardGroup.setBackground(shape(0xff23262c, 12));
+                LinearLayout.LayoutParams groupParams = new LinearLayout.LayoutParams(-1, -2); groupParams.bottomMargin = dp(6);
+                rows.addView(clipboardGroup, groupParams);
+            }
+            LinearLayout target = clipboardRow ? clipboardGroup : rows;
+            if (clipboardRow && target.getChildCount() > 0) {
+                android.view.View divider = new android.view.View(this); divider.setBackgroundColor(0xff3a3d44);
+                LinearLayout.LayoutParams line = new LinearLayout.LayoutParams(-1, dp(1)); line.leftMargin = dp(14); target.addView(divider, line);
+            }
+            LinearLayout row = addSettingsRow(target, label, value, clipboardRow, () -> {
+                choose.accept(index);
+                if (settingsOverlay == overlay && settingsChild == null && settingsOpen && checked.apply(index) != null) {
+                    settingsReanchorPending = true; reanchorSettings();
+                }
+            });
+            if (index == holdIndex) row.getChildAt(0).setTag("thumbnailHold");
+            if (index == 2) row.getChildAt(0).setTag("clipboardAction");
+            if (index == muteIndex) refreshSettingsMute = () -> {
+                if (settingsOverlay == overlay && localAudio.muted() != muteShown[0]) {
+                    muteShown[0] = localAudio.muted(); settingsReanchorPending = true; reanchorSettings();
+                }
+            };
+            if ((index == pipIndex && (pip == null || !pip.supported()))
+                    || (offerLarge && index == 6 && (android.os.Build.VERSION.SDK_INT < 30 || portraitImeHeight <= 0))) {
+                row.setAlpha(.5f);
+            }
+        }
+        Button disconnectButton = button(panel, "⊗  断开连接", v -> choose.accept(items.length - 1));
+        disconnectButton.setTextColor(0xff9bb7ff); disconnectButton.setTextSize(15);
+        disconnectButton.setGravity(android.view.Gravity.START | android.view.Gravity.CENTER_VERTICAL);
+        disconnectButton.setPadding(dp(14), 0, dp(14), 0); disconnectButton.setBackground(shape(0xff23262c, 12));
+        LinearLayout.LayoutParams foot = new LinearLayout.LayoutParams(-1, dp(44)); foot.topMargin = dp(10); disconnectButton.setLayoutParams(foot);
+        android.widget.FrameLayout.LayoutParams panelParams;
+        if (landscape) {
+            panelParams = new android.widget.FrameLayout.LayoutParams(
+                    Math.min(dp(340), Math.max(0, picture.getWidth() - dp(28))), -1,
+                    android.view.Gravity.TOP | android.view.Gravity.END);
+            panelParams.setMargins(dp(14), dp(8), dp(14), dp(14));
+        } else {
+            AppDrawerModel.PortraitPlacement placement = AppDrawerModel.portraitPlacement(
+                    sessionLayer.getHeight(), sessionBar.getTop(), sessionBar.getBottom(), dp(8), false);
+            panelParams = new android.widget.FrameLayout.LayoutParams(Math.max(0, sessionLayer.getWidth() - dp(28)), placement.panelHeight(),
+                    android.view.Gravity.TOP | android.view.Gravity.END);
+            panelParams.rightMargin = dp(14); panelParams.topMargin = placement.panelTop();
+        }
+        overlay.addView(panel, panelParams);
+        (landscape ? picture : sessionLayer).addView(overlay, new android.widget.FrameLayout.LayoutParams(-1, -1));
+        int scrollY = settingsScrollY; scroller.post(() -> { if (settingsScroll == scroller) scroller.scrollTo(0, scrollY); });
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            settingsBack = this::dismissSettings;
+            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, settingsBack);
+        }
+    }
+    private void addSettingsHeading(LinearLayout rows, String text) {
+        TextView heading = new TextView(this); heading.setText(text); heading.setTextSize(13); heading.setTextColor(0xffa4abb5);
+        heading.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
+        heading.setPadding(dp(14), dp(6), dp(14), dp(6)); heading.setAccessibilityHeading(true); rows.addView(heading);
+    }
+    private LinearLayout addSettingsRow(LinearLayout rows, String label, Boolean checked, boolean grouped, Runnable action) {
+        LinearLayout row = new LinearLayout(this); row.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(14), dp(6), dp(14), dp(6)); row.setMinimumHeight(dp(44));
+        if (!grouped) row.setBackground(shape(0xff23262c, 12));
+        TextView text = new TextView(this); text.setText(label); text.setTextColor(0xffeef0f3); text.setTextSize(15);
+        row.addView(text, new LinearLayout.LayoutParams(0, -2, 1));
+        if (checked != null) {
+            android.widget.Switch toggle = new android.widget.Switch(this); toggle.setChecked(checked); toggle.setContentDescription(label);
+            toggle.setThumbTintList(new android.content.res.ColorStateList(new int[][]{new int[]{android.R.attr.state_checked}, new int[]{}}, new int[]{0xff9bb7ff, 0xffc4c9d1}));
+            toggle.setTrackTintList(new android.content.res.ColorStateList(new int[][]{new int[]{android.R.attr.state_checked}, new int[]{}}, new int[]{0xff536b9f, 0xff50545c}));
+            toggle.setOnCheckedChangeListener((button, value) -> action.run());
+            row.addView(toggle); row.setOnClickListener(v -> toggle.toggle());
+            row.setImportantForAccessibility(android.view.View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            text.setImportantForAccessibility(android.view.View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        } else row.setOnClickListener(v -> action.run());
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2); if (!grouped) params.bottomMargin = dp(6); rows.addView(row, params);
+        return row;
     }
     private void showSettingsChild(android.app.AlertDialog dialog) {
         refreshHostSettings = null;
@@ -1272,6 +1648,7 @@ public final class MainActivity extends Activity {
             getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(settingsBack); settingsBack = null;
         }
         android.widget.FrameLayout overlay = settingsOverlay; settingsOverlay = null;
+        settingsScroll = null;
         if (overlay != null && overlay.getParent() instanceof android.view.ViewGroup parent) parent.removeView(overlay);
         android.app.AlertDialog child = settingsChild; settingsChild = null; refreshHostSettings = null;
         if (child != null) child.dismiss();
@@ -1286,6 +1663,8 @@ public final class MainActivity extends Activity {
         settingsReanchorPending = false;
         settingsReanchoring = true;
         try {
+            if (settingsScroll != null) settingsScrollY = settingsScroll.getScrollY();
+            settingsScroll = null;
             if (android.os.Build.VERSION.SDK_INT >= 33 && settingsBack != null) {
                 getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(settingsBack); settingsBack = null;
             }
@@ -1299,6 +1678,7 @@ public final class MainActivity extends Activity {
     private void finishSettings() {
         if (!settingsOpen) return;
         refreshSettingsMute = null;
+        settingsScroll = null; settingsScrollY = 0;
         android.util.Log.i("SillAndroid", "Settings: finished");
         settingsOpen = false;
         if (updateSessionLayout != null) updateSessionLayout.run();
@@ -1712,7 +2092,7 @@ public final class MainActivity extends Activity {
             pairingGuard = pairing ? new PairingAuthorization(savedMacStore.pin(new SavedMacs.Endpoint(address, number))) : null;
             pendingPairing = pairingGuard;
         }
-        running = true; closing = false; getPreferences(0).edit().putString("host", address).putString("port", String.valueOf(number)).apply();
+        running = true; closing = false; updateConnectionCancel(); getPreferences(0).edit().putString("host", address).putString("port", String.valueOf(number)).apply();
         network.execute(() -> {
             try {
                 SavedMacs.Endpoint endpoint = new SavedMacs.Endpoint(address, number);
@@ -1812,7 +2192,7 @@ public final class MainActivity extends Activity {
                                 synchronized (outputLock) { initialSource = new InitialSourcePolicy(); connection = session; }
                             }
                             session.sessionTimeout();
-                            ui.post(() -> { if (connection == session) { tourNewSession(session); renderLockOverlay(sessionLock, session); connectionContainer.setVisibility(android.view.View.GONE); sessionPanel.setVisibility(android.view.View.VISIBLE); updateSessionLayout.run(); picture.post(this::sendViewport); } });
+                            ui.post(() -> { if (connection == session) { tourNewSession(session); renderLockOverlay(sessionLock, session); setAddingMac(false, false); connectionContainer.setVisibility(android.view.View.GONE); sessionPanel.setVisibility(android.view.View.VISIBLE); updateSessionLayout.run(); picture.post(this::sendViewport); } });
                             if (wantsAudio) { audioEndpointHost = route.endpoint().host(); audio = new AudioPlayer(text -> showFor(session, text)); localAudio.setWatched(pictureWatched()); localAudio.setPlayer(audio); ui.post(this::updateAudioTiming); }
                             for (StreamWire.Message initial : route.value().initial()) handle(initial, session);
                             KeyframeRecovery sessionRecovery = keyframeRecovery;
@@ -1859,7 +2239,7 @@ public final class MainActivity extends Activity {
                 if (pip != null && pip.active()) ui.post(pip::stop);
                 connection = null; hostLock = null; keyframeRecovery = null; keyframeStreaming = false; recoveryFrame.set(null); lastParameters = null; revealFrame.set(null); recoveryGeneration = -1; pointerSync = null; clipboardSubscribed = false; hostClipboardAvailable = false; clipboardSource = ""; clipboardReceipt.cancel(); releaseDecoder();
                 if (audio != null) { localAudio.setPlayer(null); audio.close(); audio = null; }
-                ui.post(() -> { endTour(false); dismissSettings(false); dismissStaleMenu(); dismissWindowControls(); cancelWindowDrag(); hostSettings = null; pendingSettingsToken = 0; desktopDisplays = -1; desktopDisplay = 0; desktopActive = false; hostGestures = 0; hostKeyRepeat = false; hostKeyRepeatKnown = false; trackpad.setMacGesturesEnabled(false); desktopButton.setText("桌面"); thumbnailImages.clear(); appIcons.clear(); iconBadges.clear(); activeWindowId = -1; if (appDrawer != null) appDrawer.dismiss(); drawerWindows = new JSONArray(); appList = new JSONArray(); zoom.reset(); screenAwake.setStreaming(false); pictureInput.cancel(); trackpad.cancelGestures(); keyboard.discard(); resetCursorShape(); modifiers = heldModifiers = 0; for (android.view.View button : modifierViews.values()) button.setBackground(shape(0xff272a30, 12)); sessionPanel.setVisibility(android.view.View.GONE); connectionContainer.setVisibility(android.view.View.VISIBLE); applyContentInsets(); running = false; });
+                ui.post(() -> { endTour(false); dismissSettings(false); dismissStaleMenu(); dismissWindowControls(); cancelWindowDrag(); hostSettings = null; pendingSettingsToken = 0; desktopDisplays = -1; desktopDisplay = 0; desktopActive = false; hostGestures = 0; hostKeyRepeat = false; hostKeyRepeatKnown = false; trackpad.setMacGesturesEnabled(false); desktopButton.setText("桌面"); thumbnailImages.clear(); appIcons.clear(); iconBadges.clear(); activeWindowId = -1; if (appDrawer != null) appDrawer.dismiss(); drawerWindows = new JSONArray(); appList = new JSONArray(); zoom.reset(); screenAwake.setStreaming(false); pictureInput.cancel(); trackpad.cancelGestures(); keyboard.discard(); resetCursorShape(); modifiers = heldModifiers = 0; for (android.view.View button : modifierViews.values()) button.setBackground(shape(0xff272a30, 12)); sessionPanel.setVisibility(android.view.View.GONE); connectionContainer.setVisibility(android.view.View.VISIBLE); applyContentInsets(); running = false; updateConnectionCancel(); });
             }
         });
     }
@@ -2718,8 +3098,8 @@ public final class MainActivity extends Activity {
         if (localAudio != null) localAudio.close();
         stopFpsObservers();
         if (screenAwake != null) screenAwake.close();
-        running = false; RemoteDial.Attempt dial = pendingDial; if (dial != null) dial.close(); SillConnection c = connection; if (c != null) try { c.close(); } catch (Exception ignored) { }
+        cancelQrPairing(); running = false; RemoteDial.Attempt dial = pendingDial; if (dial != null) dial.close(); SillConnection c = connection; if (c != null) try { c.close(); } catch (Exception ignored) { }
         synchronized (reconnectLock) { reconnectLock.notifyAll(); }
-        network.shutdownNow(); input.shutdownNow(); heartbeat.shutdownNow(); super.onDestroy();
+        qrNetwork.shutdownNow(); network.shutdownNow(); input.shutdownNow(); heartbeat.shutdownNow(); super.onDestroy();
     }
 }

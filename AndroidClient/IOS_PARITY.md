@@ -4,6 +4,8 @@ Reference: the iOS source in this repository, including `StreamScreen.swift`, `P
 
 Product direction: follow the iOS client's layout and interaction by default. Earlier Android-specific picture-trackpad, side-control landscape layout, and automatic text-scale adjustment are being replaced by the original behavior.
 
+The source-based visual inventory is in `IOS_VISUAL_INVENTORY.md`. A first visual pass aligns parts of the toolbar, app drawer, trackpad, tour, connection screen and settings panel. The embedded scanner, connection previews and grouping, settings submenus, thumbnail details, symbols and other states still differ; the whole interface has not been visually verified against iOS. Portrait streaming controls and landscape toolbar placement were checked on the Xiaomi before the later connection and settings changes; wireless debugging disconnected before those changes could be installed or checked.
+
 ## Connection and security
 
 - [ ] Paired mutual TLS, certificate pinning, incorrect/expired codes, identity changes and revocation: core path works on the Xiaomi over Tailscale; remaining error cases need end-to-end checks.

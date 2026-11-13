@@ -25,12 +25,13 @@ import java.util.List;
 /** A session-local tour presentation. The owner supplies copy, anchors and lifecycle policy. */
 final class TourOverlay extends FrameLayout {
     interface Actions { void next(); void skip(); }
-    private static final int ACCENT = 0xff8eb9fb, CARD = 0xff24252a;
+    private static final int ACCENT = 0xff9bb7ff, CARD = 0xff16181c;
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path holes = new Path();
     private final List<RectF> anchors = new ArrayList<>();
     private final LinearLayout card, content, footer;
-    private final TextView heading, subtitle, progress;
+    private final TextView heading, subtitle;
+    private final ProgressDots progress;
     private final BoundedScroll scroll;
     private final Button next, skip;
     private boolean last, stream, stacked, coversTargets;
@@ -53,20 +54,25 @@ final class TourOverlay extends FrameLayout {
         addView(card, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
         scroll = new BoundedScroll(context); scroll.setFillViewport(false);
         content = new LinearLayout(context); content.setOrientation(LinearLayout.VERTICAL);
-        heading = label(context, 17, Color.WHITE); heading.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        heading = label(context, 17, 0xffeef0f3); heading.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         heading.setAccessibilityHeading(true); content.addView(heading);
-        subtitle = label(context, 13, 0xffb8bbc4); content.addView(subtitle);
+        subtitle = label(context, 13, 0xffa4abb5); content.addView(subtitle);
         scroll.addView(content); card.addView(scroll, new LinearLayout.LayoutParams(-1, -2));
         footer = new LinearLayout(context); footer.setGravity(Gravity.CENTER_VERTICAL);
         skip = new Button(context); skip.setAllCaps(false); skip.setText("跳过"); skip.setTextColor(ACCENT);
+        skip.setTextSize(17); skip.setBackgroundColor(Color.TRANSPARENT); skip.setPadding(0, 0, 0, 0);
+        skip.setMinWidth(dp(44)); skip.setMinimumWidth(dp(44)); skip.setMinHeight(dp(44)); skip.setMinimumHeight(dp(44));
         skip.setOnClickListener(v -> actions.skip()); footer.addView(skip);
-        progress = label(context, 14, ACCENT); progress.setGravity(Gravity.CENTER);
+        progress = new ProgressDots(context);
         footer.addView(progress);
         next = new Button(context); next.setAllCaps(false); next.setTextColor(Color.BLACK);
+        next.setTextSize(17); next.setTypeface(Typeface.DEFAULT, Typeface.BOLD); next.setPadding(dp(12), 0, dp(12), 0);
+        next.setMinWidth(dp(112)); next.setMinimumWidth(dp(112)); next.setMinHeight(dp(44)); next.setMinimumHeight(dp(44));
         GradientDrawable primary = new GradientDrawable(); primary.setColor(ACCENT); primary.setCornerRadius(dp(12));
         next.setBackground(primary);
         next.setOnClickListener(v -> actions.next()); footer.addView(next);
-        card.addView(footer, new LinearLayout.LayoutParams(-1, -2));
+        LinearLayout.LayoutParams footerLayout = new LinearLayout.LayoutParams(-1, -2);
+        footerLayout.topMargin = dp(14); card.addView(footer, footerLayout);
     }
 
     /** Rectangles are in this overlay's coordinates; callers recalculate after layout changes. */
@@ -79,9 +85,7 @@ final class TourOverlay extends FrameLayout {
             shownCopy = copy;
         }
         heading.setContentDescription(copy.title() + "，第 " + (run.index() + 1) + " 步，共 " + run.steps().size() + " 步。" + copy.hint());
-        StringBuilder dots = new StringBuilder();
-        for (int i = 0; i < run.steps().size(); i++) dots.append(i == run.index() ? "●" : "•").append(' ');
-        progress.setText(dots.toString()); progress.setContentDescription("第 " + (run.index() + 1) + " 步，共 " + run.steps().size() + " 步");
+        progress.setStep(run.index(), run.steps().size());
         last = run.isLast(); next.setText(last ? "完成" : "下一步");
         skip.setVisibility(last ? INVISIBLE : VISIBLE); skip.setEnabled(!last);
         stream = run.at() == TourPolicy.Topic.TOUCH;
@@ -97,10 +101,10 @@ final class TourOverlay extends FrameLayout {
         LinearLayout line = new LinearLayout(getContext()); line.setGravity(Gravity.TOP);
         boolean largeText = getResources().getConfiguration().fontScale >= 1.5f;
         line.setOrientation(largeText ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
-        line.setPadding(0, dp(10), 0, 0);
+        line.setPadding(0, dp(content.getChildCount() == 2 ? 12 : 10), 0, 0);
         TextView icon = label(getContext(), 15, ACCENT); icon.setGravity(Gravity.CENTER);
         icon.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-        icon.setText(row.symbol()); line.addView(icon, new LinearLayout.LayoutParams(largeText ? -2 : dp(25), -2));
+        icon.setText(row.symbol()); line.addView(icon, new LinearLayout.LayoutParams(largeText ? -2 : dp(22), -2));
         String prefix = row.added() ? "新增：" : "";
         SpannableString text = new SpannableString(prefix + row.emphasis() + row.text());
         if (!prefix.isEmpty()) {
@@ -108,7 +112,7 @@ final class TourOverlay extends FrameLayout {
             text.setSpan(new StyleSpan(Typeface.BOLD), 0, prefix.length(), 0);
         }
         text.setSpan(new StyleSpan(Typeface.BOLD), prefix.length(), prefix.length() + row.emphasis().length(), 0);
-        TextView words = label(getContext(), 15, 0xffe6e7eb); words.setText(text);
+        TextView words = label(getContext(), 15, 0xffeef0f3); words.setText(text);
         LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(largeText ? -1 : 0, -2, largeText ? 0 : 1);
         if (!largeText) p.leftMargin = dp(8);
         line.addView(words, p); content.addView(line);
@@ -145,12 +149,12 @@ final class TourOverlay extends FrameLayout {
         footerParams(next, stacked ? -1 : -2, 0);
         footer.measure(MeasureSpec.makeMeasureSpec(innerWidth, MeasureSpec.EXACTLY), MeasureSpec.makeMeasureSpec(height, MeasureSpec.AT_MOST));
         int available = Math.max(0, height - dp(32));
-        scroll.maxHeight = Math.max(0, available - footer.getMeasuredHeight() - card.getPaddingTop() - card.getPaddingBottom());
+        scroll.maxHeight = Math.max(0, available - footer.getMeasuredHeight() - dp(14) - card.getPaddingTop() - card.getPaddingBottom());
         card.measure(MeasureSpec.makeMeasureSpec(cardWidth, MeasureSpec.EXACTLY), MeasureSpec.makeMeasureSpec(available, MeasureSpec.AT_MOST));
         TourPlacement.Result placed = placement(width, height, cardWidth, card.getMeasuredHeight());
         int fit = Math.max(0, Math.round(placed.card().height()));
         if (fit < card.getMeasuredHeight()) {
-            scroll.maxHeight = Math.max(0, fit - footer.getMeasuredHeight() - card.getPaddingTop() - card.getPaddingBottom());
+            scroll.maxHeight = Math.max(0, fit - footer.getMeasuredHeight() - dp(14) - card.getPaddingTop() - card.getPaddingBottom());
             card.measure(MeasureSpec.makeMeasureSpec(cardWidth, MeasureSpec.EXACTLY), MeasureSpec.makeMeasureSpec(fit, MeasureSpec.AT_MOST));
         }
     }
@@ -194,6 +198,25 @@ final class TourOverlay extends FrameLayout {
         paint.setStyle(Paint.Style.FILL);
     }
     private TextView label(Context context, int size, int color) { TextView text = new TextView(context); text.setTextSize(size); text.setTextColor(color); return text; }
+    private final class ProgressDots extends View {
+        private int index, count;
+        ProgressDots(Context context) { super(context); setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO); }
+        void setStep(int index, int count) { this.index = index; this.count = count; requestLayout(); invalidate(); }
+        @Override protected void onMeasure(int widthSpec, int heightSpec) {
+            int desired = count > 1 ? dp(count * 6 + (count - 1) * 6) : 0;
+            setMeasuredDimension(resolveSize(desired, widthSpec), resolveSize(dp(44), heightSpec));
+        }
+        @Override protected void onDraw(Canvas canvas) {
+            if (count <= 1) return;
+            float diameter = dp(6), gap = dp(6);
+            float x = (getWidth() - (count * diameter + (count - 1) * gap)) / 2 + diameter / 2;
+            Paint dotPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+            for (int i = 0; i < count; i++, x += diameter + gap) {
+                dotPaint.setColor(i == index ? ACCENT : 0x66a4abb5);
+                canvas.drawCircle(x, getHeight() / 2f, diameter / 2, dotPaint);
+            }
+        }
+    }
     private static final class BoundedScroll extends ScrollView {
         int maxHeight;
         BoundedScroll(Context context) { super(context); }

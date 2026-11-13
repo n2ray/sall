@@ -104,3 +104,5 @@ javac -cp "$test_dir" -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/s
 java -ea -cp "$test_dir" io.github.n2ray.sill.SessionAuthorizationTest
 javac -cp "$test_dir" -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/PairingAuthorization.java "$root"/tests/PairingAuthorizationTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sill.PairingAuthorizationTest
+javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/QrPairingAttempt.java "$root"/tests/QrPairingAttemptTest.java
+java -ea -cp "$test_dir" io.github.n2ray.sill.QrPairingAttemptTest
