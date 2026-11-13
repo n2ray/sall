@@ -14,11 +14,16 @@ final class SignedMacInfo {
             0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, (byte) 0x86, 0x48, (byte) 0xce, 0x3d, 0x02, 0x01,
             0x06, 0x08, 0x2a, (byte) 0x86, 0x48, (byte) 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00};
 
-    record Update(String macId, String name, double issuedAt, boolean remoteAccess, List<SavedMacs.Endpoint> addresses) {
+    record Update(String macId, String name, double issuedAt, boolean remoteAccess, List<SavedMacs.Endpoint> addresses, List<String> kinds) {
+        Update(String id, String name, double at, boolean remote, List<SavedMacs.Endpoint> addresses) {
+            this(id, name, at, remote, addresses, java.util.Collections.nCopies(addresses.size(), "internet"));
+        }
         Update {
             if (macId == null || name == null || !Double.isFinite(issuedAt) || issuedAt <= 0)
                 throw new IllegalArgumentException("Invalid Mac info");
-            addresses = List.copyOf(addresses);
+            addresses = List.copyOf(addresses); kinds = List.copyOf(kinds);
+            if (kinds.size() != addresses.size() || kinds.stream().anyMatch(k -> !java.util.Set.of("vpn", "lan", "internet").contains(k)))
+                throw new IllegalArgumentException("Invalid address kind");
         }
     }
 

@@ -26,6 +26,15 @@ public final class RemoteDialTest {
                 new SavedMacs.Mac(two, List.of(wrong), wrong, 0));
         check(RemoteDial.order(records, pin, lan, false).equals(List.of(lan, name, vpn)), "lastWorked, VPN order, dedup and identity isolation");
         check(RemoteDial.order(records, pin, manual, true).equals(List.of(manual, lan, name, vpn)), "explicit route retained first");
+        double now = System.currentTimeMillis() / 1000.0;
+        var lifecycle = new SavedMacs.Mac(one, List.of(lan), vpn, 2, List.of(), List.of(),
+                List.of(new SavedMacs.Remembered(new SavedMacs.Advertised(vpn, "vpn"), now)), now);
+        check(RemoteDial.order(List.of(lifecycle), pin, vpn, false).equals(List.of(lan, vpn)),
+                "Remembered lastWorked stays after current group, even when requested by saved UI");
+        var expired = new SavedMacs.Mac(one, List.of(lan), vpn, 2, List.of(), List.of(),
+                List.of(new SavedMacs.Remembered(new SavedMacs.Advertised(vpn, "vpn"), now - SavedMacs.REMEMBER_FOR - 1)), now);
+        check(RemoteDial.order(List.of(expired), pin, vpn, false).equals(List.of(lan)),
+                "Expired lastWorked/requested paths cannot return to automatic fallback");
         AtomicInteger calls = new AtomicInteger();
         Resource first = new Resource(), winner = new Resource();
         var result = RemoteDial.connect(List.of(lan, vpn), pin, new RemoteDial.Attempt(), (endpoint, identity, attempt) -> {

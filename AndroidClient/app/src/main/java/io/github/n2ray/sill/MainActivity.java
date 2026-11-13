@@ -1364,7 +1364,7 @@ public final class MainActivity extends Activity {
                         } finally { pendingDial = null; }
                         try (SillConnection session = route.value().session()) {
                             if (!running || closing) break;
-                            savedMacStore.connected(pin, route.endpoint());
+                            savedMacStore.connected(pin, route.endpoint(), selectedIdentity == null && route.endpoint().equals(endpoint));
                             HostLockState sessionLock = new HostLockState(false); sessionLock.requireFreshFrame();
                             picturePresented = false; hostLock = sessionLock; keyframeRecovery = new KeyframeRecovery(); keyframeStreaming = false; keyframeWorstRtt = 0; keyframeRttWindow = 0; recoveryFrame.set(null); lastParameters = null; revealFrame.set(null); recoveryGeneration = -1;
                             pointerSync = new PointerSync();
@@ -1509,15 +1509,18 @@ public final class MainActivity extends Activity {
                     if (defaultPort < 1 || defaultPort > 65535 || info.getDouble("remotePort") != defaultPort) return;
                     JSONArray advertised = info.getJSONArray("addresses");
                     java.util.List<SavedMacs.Endpoint> addresses = new java.util.ArrayList<>();
+                    java.util.List<String> kinds = new java.util.ArrayList<>();
                     for (int i = 0; i < advertised.length(); i++) {
                         JSONObject entry = advertised.getJSONObject(i);
                         int port = entry.isNull("port") ? defaultPort : entry.getInt("port");
                         if (!entry.isNull("port") && entry.getDouble("port") != port) continue;
                         SavedMacs.Endpoint address = SignedMacInfo.address(entry.getString("host"), port);
-                        if (address != null && !addresses.contains(address)) addresses.add(address);
+                        if (address != null && !addresses.contains(address)) {
+                            addresses.add(address); kinds.add(entry.getString("kind"));
+                        }
                     }
                     SignedMacInfo.Update update = new SignedMacInfo.Update(macId, info.getString("name"),
-                            info.getDouble("issuedAt"), info.getBoolean("remoteAccess"), addresses);
+                            info.getDouble("issuedAt"), info.getBoolean("remoteAccess"), addresses, kinds);
                     ui.post(() -> {
                         if (connection == messageSession && savedMacStore.refresh(pin, update)) refreshSavedMacs();
                     });

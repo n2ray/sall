@@ -63,34 +63,49 @@ final class SavedMacStore {
         List<SavedMacs.Endpoint> addresses = new ArrayList<>();
         SavedMacs.Identity savedIdentity = identity;
         double issuedAt = 0;
+        SavedMacs.Mac previous = null;
         for (SavedMacs.Mac mac : records) if (mac.identity().macId().equals(identity.macId())) {
             if (!mac.identity().fingerprint().equals(identity.fingerprint()))
                 throw new IllegalArgumentException("Conflicting saved identity");
-            addresses.addAll(mac.addresses());
+            addresses.addAll(mac.typedAddresses());
+            previous = mac;
             issuedAt = mac.infoIssuedAt();
             if (identity.recognitionKey().isEmpty() && (!mac.identity().recognitionKey().isEmpty() || !mac.identity().name().isEmpty()))
                 savedIdentity = mac.identity();
         }
         records.removeIf(mac -> mac.identity().macId().equals(identity.macId()));
         addresses.add(endpoint);
-        records.add(new SavedMacs.Mac(savedIdentity, addresses, endpoint, issuedAt));
+        records.add(new SavedMacs.Mac(savedIdentity, addresses, endpoint, issuedAt,
+                previous == null ? List.of() : previous.discoveredAddresses(), previous == null ? List.of() : previous.advertised(),
+                previous == null ? List.of() : previous.remembered(), previous == null ? System.currentTimeMillis() / 1000.0 : previous.listedAt()));
         // The old endpoint pin remains a rollback-compatible authoritative choice after re-pairing.
         write(records, preferences.edit().putString(endpoint.legacyKey(), identity.fingerprint())).apply();
     }
 
-    synchronized void connected(byte[] pin, SavedMacs.Endpoint endpoint) {
+    synchronized void connected(byte[] pin, SavedMacs.Endpoint endpoint) { connected(pin, endpoint, false); }
+
+    synchronized void connected(byte[] pin, SavedMacs.Endpoint endpoint, boolean typed) {
         List<SavedMacs.Mac> records = new ArrayList<>(all());
         for (int i = 0; i < records.size(); i++) {
             SavedMacs.Mac mac = records.get(i);
             if (!java.security.MessageDigest.isEqual(mac.identity().pin(), pin)) continue;
-            List<SavedMacs.Endpoint> addresses = new ArrayList<>(mac.addresses()); addresses.add(endpoint);
-            records.set(i, new SavedMacs.Mac(mac.identity(), addresses, endpoint, mac.infoIssuedAt()));
+            List<SavedMacs.Endpoint> manual = new ArrayList<>(mac.typedAddresses());
+            List<SavedMacs.Endpoint> discovered = new ArrayList<>(mac.discoveredAddresses());
+            if (typed) manual.add(endpoint);
+            else if (!mac.addresses().contains(endpoint)) discovered.add(endpoint);
+            records.set(i, new SavedMacs.Mac(mac.identity(), manual, endpoint, mac.infoIssuedAt(), discovered,
+                    mac.advertised(), mac.remembered(), mac.listedAt()));
             write(records, preferences.edit()).apply(); return;
         }
     }
 
     // Call only after SignedMacInfo.verify has authenticated the payload against this TLS session.
     synchronized boolean refresh(byte[] sessionPin, SignedMacInfo.Update info) {
+        return refresh(sessionPin, info, System.currentTimeMillis() / 1000.0);
+    }
+
+    synchronized boolean refresh(byte[] sessionPin, SignedMacInfo.Update info, double now) {
+        if (!Double.isFinite(now) || now < 0) return false;
         if (sessionPin == null || sessionPin.length != 32 || !PairLink.macId(sessionPin).equals(info.macId())) return false;
         List<SavedMacs.Mac> records = new ArrayList<>(all());
         for (int i = 0; i < records.size(); i++) {
@@ -99,10 +114,15 @@ final class SavedMacStore {
                     || info.issuedAt() <= mac.infoIssuedAt()) continue;
             SavedMacs.Identity next = new SavedMacs.Identity(info.macId(), mac.identity().fingerprint(), info.name(), mac.identity().recognitionKey());
             if (next.name().isEmpty()) next = mac.identity();
-            List<SavedMacs.Endpoint> addresses = new ArrayList<>(mac.addresses());
-            // shortcut: old addresses lack origin metadata; keep them until typed/advertised address lifetimes are modeled.
-            if (info.remoteAccess()) addresses.addAll(info.addresses());
-            records.set(i, new SavedMacs.Mac(next, addresses, mac.lastWorked(), info.issuedAt()));
+            List<SavedMacs.Advertised> advertised = new ArrayList<>();
+            for (int j = 0; j < info.addresses().size(); j++)
+                advertised.add(new SavedMacs.Advertised(info.addresses().get(j), info.kinds().get(j)));
+            boolean replace = info.remoteAccess() && !advertised.isEmpty();
+            if (!replace) advertised = mac.advertised();
+            records.set(i, new SavedMacs.Mac(next, mac.typedAddresses(), mac.lastWorked(), info.issuedAt(),
+                    // A successful Bonjour path is provisional; the signed list owns advertised routes.
+                    replace ? List.of() : mac.discoveredAddresses(), advertised, SavedMacs.remembering(mac, advertised, replace, now),
+                    replace ? now : mac.listedAt()));
             write(records, preferences.edit()).apply();
             return true;
         }

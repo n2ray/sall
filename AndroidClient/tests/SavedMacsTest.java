@@ -121,7 +121,68 @@ public final class SavedMacsTest {
         check(infoStore.all().get(0).identity().recognitionKey().equals(key), "Info path preserves pairing recognition key");
         infoStore.forget(one);
         check(!infoStore.refresh(first, new SignedMacInfo.Update(one.macId(), "Revived", 103, true, List.of(vpn))), "A late info update cannot revive a forgotten Mac");
-        System.out.println("Saved Mac identity, migration, persistence and forget checks passed");
+        MemoryPreferences lifecyclePreferences = new MemoryPreferences();
+        SavedMacStore lifecycle = new SavedMacStore(lifecyclePreferences);
+        lifecycle.paired(one, lan);
+        double now = System.currentTimeMillis() / 1000.0;
+        SavedMacs.Endpoint oldLan = new SavedMacs.Endpoint("192.168.2.8", 7455);
+        SavedMacs.Endpoint newLan = new SavedMacs.Endpoint("192.168.3.8", 7455);
+        lifecycle.refresh(first, new SignedMacInfo.Update(one.macId(), "Mac", 1, true,
+                List.of(vpn, oldLan), List.of("vpn", "lan")), now);
+        lifecycle.connected(first, oldLan);
+        lifecycle.refresh(first, new SignedMacInfo.Update(one.macId(), "Mac", 2, true,
+                List.of(newLan), List.of("lan")), now + 1);
+        SavedMacs.Mac paths = new SavedMacStore(lifecyclePreferences).all().get(0);
+        check(paths.typedAddresses().equals(List.of(lan)), "Signed paths must not become typed after successful use");
+        check(paths.lastWorked().equals(oldLan) && !paths.addresses().contains(oldLan), "Preserve lastWorked metadata without reviving withdrawn LAN");
+        check(paths.addresses().containsAll(List.of(lan, vpn, newLan)), "Retain typed and remembered VPN paths");
+        check(paths.remembered().get(0).listedAt() == now, "VPN expiry starts when last listed, not when removed");
+        check(!paths.addresses(now + SavedMacs.REMEMBER_FOR + 1).contains(vpn), "Remembered VPN expires after 90 days");
+        check(SavedMacs.remembering(paths, paths.advertised(), false, now + SavedMacs.REMEMBER_FOR + 1).isEmpty(), "Refresh also prunes expired VPN records");
+        lifecycle.refresh(first, new SignedMacInfo.Update(one.macId(), "Mac", 3, true,
+                List.of(vpn), List.of("vpn")), now + 2);
+        check(lifecycle.all().get(0).remembered().isEmpty(), "A relisted VPN leaves remembered group");
+        check(lifecycle.all().get(0).identity().fingerprint().equals(one.fingerprint()), "Address replacement cannot change pin");
+        List<SavedMacs.Advertised> many = new java.util.ArrayList<>();
+        for (int i = 1; i <= 6; i++) many.add(new SavedMacs.Advertised(new SavedMacs.Endpoint("100.87.0." + i, 7455), "vpn"));
+        SavedMacs.Mac large = new SavedMacs.Mac(one, List.of(lan), null, 1, List.of(), many, List.of(), now + 100);
+        List<SavedMacs.Remembered> capped = SavedMacs.remembering(large, List.of(), true, now);
+        check(capped.size() == 4 && capped.get(0).address().equals(many.get(0)) && capped.get(0).listedAt() == now,
+                "Remember cap four, stable ties and future clock clamping match iOS");
+        SavedMacs.Endpoint discoveredPath = new SavedMacs.Endpoint("192.168.4.1", 7455);
+        lifecycle.connected(first, discoveredPath);
+        check(new SavedMacStore(lifecyclePreferences).all().get(0).discoveredAddresses().contains(discoveredPath), "Successful discovered address retains separate provenance");
+        lifecycle.refresh(first, new SignedMacInfo.Update(one.macId(), "Mac", 4, false,
+                List.of(newLan), List.of("lan")), now + 3);
+        check(lifecycle.all().get(0).discoveredAddresses().contains(discoveredPath), "Remote-off info cannot erase provisional discovery paths");
+        lifecycle.refresh(first, new SignedMacInfo.Update(one.macId(), "Mac", 5, true, List.of()), now + 4);
+        check(lifecycle.all().get(0).discoveredAddresses().contains(discoveredPath), "Empty info cannot erase provisional discovery paths");
+        lifecycle.refresh(first, new SignedMacInfo.Update(one.macId(), "Mac", 6, true,
+                List.of(newLan), List.of("lan")), now + 5);
+        SavedMacs.Mac withdrawn = new SavedMacStore(lifecyclePreferences).all().get(0);
+        check(withdrawn.discoveredAddresses().isEmpty() && !withdrawn.addresses().contains(discoveredPath),
+                "Signed replacement withdraws provisional Bonjour LAN after reload");
+        check(withdrawn.addresses().contains(lan), "Signed withdrawal never removes manually paired endpoint");
+        SavedMacs.Endpoint discoveredVpn = new SavedMacs.Endpoint("100.87.9.1", 7455);
+        lifecycle.connected(first, discoveredVpn);
+        lifecycle.refresh(first, new SignedMacInfo.Update(one.macId(), "Mac", 7, true,
+                List.of(discoveredVpn), List.of("vpn")), now + 6);
+        check(lifecycle.all().get(0).discoveredAddresses().isEmpty(), "Signed VPN takes over discovery provenance");
+        lifecycle.refresh(first, new SignedMacInfo.Update(one.macId(), "Mac", 8, true,
+                List.of(newLan), List.of("lan")), now + 7);
+        SavedMacs.Mac rememberedDiscovery = new SavedMacStore(lifecyclePreferences).all().get(0);
+        check(!rememberedDiscovery.currentAddresses().contains(discoveredVpn)
+                && rememberedDiscovery.addresses(now + 8).contains(discoveredVpn)
+                && !rememberedDiscovery.addresses(now + 7 + SavedMacs.REMEMBER_FOR).contains(discoveredVpn),
+                "Previously discovered signed VPN must obey remembered expiry, never bypass via current group");
+        lifecycle.connected(first, discoveredVpn, true);
+        lifecycle.refresh(first, new SignedMacInfo.Update(one.macId(), "Mac", 9, true,
+                List.of(newLan), List.of("lan")), now + 8);
+        check(lifecycle.all().get(0).addresses(now + 9 + SavedMacs.REMEMBER_FOR).contains(discoveredVpn),
+                "Explicit manual choice of the same VPN remains after remembered expiry");
+        lifecyclePreferences.values.put(oldLan.legacyKey(), one.fingerprint());
+        check(!new SavedMacStore(lifecyclePreferences).all().get(0).addresses().contains(oldLan), "Rollback legacy pins cannot resurrect withdrawn paths");
+        System.out.println("Saved Mac identity, migration, persistence, address provenance, VPN expiry/cap and forget checks passed");
     }
 
     private static void check(boolean result, String message) { if (!result) throw new AssertionError(message); }

@@ -39,14 +39,19 @@ final class RemoteDial {
 
     static List<SavedMacs.Endpoint> order(List<SavedMacs.Mac> records, byte[] pin, SavedMacs.Endpoint requested, boolean preferRequested) {
         if (pin == null || pin.length != 32) throw new IllegalArgumentException("Missing Mac identity");
-        List<SavedMacs.Endpoint> addresses = new ArrayList<>();
+        List<SavedMacs.Endpoint> addresses = new ArrayList<>(), remembered = new ArrayList<>();
         SavedMacs.Endpoint last = null;
         for (SavedMacs.Mac mac : records) if (java.security.MessageDigest.isEqual(pin, mac.identity().pin())) {
-            addresses.addAll(mac.addresses()); last = mac.lastWorked();
+            addresses.addAll(mac.currentAddresses());
+            for (SavedMacs.Endpoint endpoint : mac.addresses()) if (!mac.currentAddresses().contains(endpoint)) remembered.add(endpoint);
+            last = mac.lastWorked();
         }
         addresses.sort(java.util.Comparator.comparingInt(RemoteDial::rank));
-        if (last != null) addresses.add(0, last);
-        if (preferRequested) addresses.add(0, requested); else addresses.add(requested);
+        remembered.sort(java.util.Comparator.comparingInt(RemoteDial::rank));
+        if (last != null && addresses.remove(last)) addresses.add(0, last);
+        else if (last != null && remembered.remove(last)) remembered.add(0, last);
+        if (preferRequested) addresses.add(0, requested);
+        addresses.addAll(remembered);
         java.util.Set<String> seen = new java.util.HashSet<>();
         return addresses.stream().filter(e -> seen.add(e.host().toLowerCase(Locale.ROOT) + "|" + e.port())).toList();
     }
@@ -63,7 +68,7 @@ final class RemoteDial {
             return 5;
         } catch (NumberFormatException ignored) { }
         if (host.startsWith("fd7a:115c:a1e0:")) return 3;
-        // shortcut: stored endpoints lack interface/origin metadata; shared-subnet and remembered-route ordering need that model.
+        // shortcut: shared-subnet priority requires the Android network interface prefixes.
         if (host.endsWith(".local") || host.equals("localhost") || host.startsWith("fd") && host.contains(":") || host.startsWith("fe8") && host.contains(":")) return 6;
         return host.contains(":") ? 5 : 4;
     }
