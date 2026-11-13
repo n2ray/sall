@@ -71,6 +71,8 @@ public final class MainActivity extends Activity {
     private final Runnable tourWait = this::considerTour;
     private ScrollView connectionContainer;
     private LinearLayout connectionHome, addMacCard, typedPairing;
+    private LinearLayout connectionFooter;
+    private String connectingMacId;
     private LinearLayout pairDetails, pairActions;
     private TextView pairWords;
     private boolean pairSideBySide;
@@ -398,7 +400,8 @@ public final class MainActivity extends Activity {
                 int number = selected.port() == 0 ? link.port : selected.port();
                 getPreferences(0).edit().putString("host", selected.host()).putString("port", String.valueOf(number)).apply();
                 host.setText(selected.host()); port.setText(String.valueOf(number)); code.setText(""); refreshSavedMacs();
-                start(false, null, null, false);
+                setAddingMac(false, false);
+                start(false, authenticated, null, false);
             });
         }); } catch (java.util.concurrent.RejectedExecutionException busy) {
             cancelQrPairing(); show("配对线程仍在结束，请稍后重试。");
@@ -424,11 +427,41 @@ public final class MainActivity extends Activity {
         connectionPanel = new LinearLayout(this); connectionPanel.setOrientation(LinearLayout.VERTICAL);
         android.widget.FrameLayout.LayoutParams column = new android.widget.FrameLayout.LayoutParams(dp(380), -2, android.view.Gravity.CENTER);
         space.addView(connectionPanel, column); root.addView(connectionContainer, new LinearLayout.LayoutParams(-1, -1));
+        connectionFooter = new LinearLayout(this); connectionFooter.setOrientation(LinearLayout.VERTICAL);
+        connectionFooter.setPadding(dp(10), 0, dp(10), dp(14));
+        TextView needs = new TextView(this); needs.setText("Mac 需要安装免费的 Sill 应用。");
+        needs.setTextColor(0xffa4abb5); needs.setTextSize(13); connectionFooter.addView(needs);
+        TextView links = new TextView(this); links.setTextSize(13); links.setLinkTextColor(0xff9bb7ff);
+        String linkText = "获取 Mac 版  ·  支持  ·  隐私政策";
+        android.text.SpannableString linked = new android.text.SpannableString(linkText);
+        String[] labels = {"获取 Mac 版", "支持", "隐私政策"};
+        String[] targets = {"https://getsill.app/download", "https://getsill.app/support", "https://getsill.app/privacy"};
+        for (int i = 0; i < labels.length; i++) {
+            int start = linkText.indexOf(labels[i]);
+            linked.setSpan(new android.text.style.URLSpan(targets[i]), start, start + labels[i].length(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
+        links.setText(linked); links.setMovementMethod(android.text.method.LinkMovementMethod.getInstance());
+        links.setPadding(0, dp(8), 0, dp(8)); connectionFooter.addView(links);
+        TextView version = new TextView(this); version.setTextColor(0xffa4abb5); version.setTextSize(12);
+        try { version.setText("Sill Android " + getPackageManager().getPackageInfo(getPackageName(), 0).versionName); }
+        catch (android.content.pm.PackageManager.NameNotFoundException ignored) { version.setText("Sill Android"); }
+        connectionFooter.addView(version);
+        android.widget.FrameLayout.LayoutParams footerParams = new android.widget.FrameLayout.LayoutParams(dp(380), -2,
+                android.view.Gravity.BOTTOM | android.view.Gravity.CENTER_HORIZONTAL);
+        space.addView(connectionFooter, footerParams);
+        connectionFooter.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, oright, ob) -> {
+            android.widget.FrameLayout.LayoutParams p = (android.widget.FrameLayout.LayoutParams) connectionPanel.getLayoutParams();
+            int bottom = connectionFooter.getVisibility() == android.view.View.VISIBLE ? b - t + dp(24) : 0;
+            if (p.bottomMargin != bottom) { p.bottomMargin = bottom; connectionPanel.setLayoutParams(p); }
+        });
         connectionContainer.addOnLayoutChangeListener((v, left, top, right, bottom, ol, ot, oright, ob) -> {
             boolean side = addingMac && !typingPairing && bottom - top < dp(520) && right - left >= dp(540);
             int width = Math.max(1, Math.min(dp(side ? 620 : 380), right - left - dp(8)));
             android.widget.FrameLayout.LayoutParams p = (android.widget.FrameLayout.LayoutParams) connectionPanel.getLayoutParams();
             if (p.width != width) { p.width = width; connectionPanel.setLayoutParams(p); }
+            android.widget.FrameLayout.LayoutParams fp = (android.widget.FrameLayout.LayoutParams) connectionFooter.getLayoutParams();
+            int footerWidth = Math.max(1, Math.min(dp(380), right - left - dp(8)));
+            if (fp.width != footerWidth) { fp.width = footerWidth; connectionFooter.setLayoutParams(fp); }
             int columns = width >= dp(340) && getResources().getConfiguration().fontScale < 1.3f ? 2 : 1;
             if (columns != savedMacColumns) { savedMacColumns = columns; refreshSavedMacs(); }
             if (pairSideBySide != side) connectionContainer.post(this::updatePairingGeometry);
@@ -436,6 +469,10 @@ public final class MainActivity extends Activity {
         connectionContainer.setOnApplyWindowInsetsListener((view, insets) -> {
             if (android.os.Build.VERSION.SDK_INT >= 30) {
                 boolean imeVisible = insets.isVisible(android.view.WindowInsets.Type.ime());
+                connectionFooter.setVisibility(imeVisible ? android.view.View.GONE : android.view.View.VISIBLE);
+                android.widget.FrameLayout.LayoutParams columnParams = (android.widget.FrameLayout.LayoutParams) connectionPanel.getLayoutParams();
+                int footerMargin = imeVisible ? 0 : connectionFooter.getHeight() + dp(24);
+                if (columnParams.bottomMargin != footerMargin) { columnParams.bottomMargin = footerMargin; connectionPanel.setLayoutParams(columnParams); }
                 int imeBottom = imeVisible ? Math.max(0, insets.getInsets(android.view.WindowInsets.Type.ime()).bottom - insetBottom) : 0;
                 if (connectionContainer.getPaddingBottom() != imeBottom) {
                     connectionContainer.setPadding(0, 0, 0, imeBottom);
@@ -582,6 +619,8 @@ public final class MainActivity extends Activity {
     private void updateConnectionCancel() {
         if (cancelConnection != null) cancelConnection.setVisibility(running ? android.view.View.VISIBLE : android.view.View.GONE);
         if (inlineScanner != null) inlineScanner.setVisible(addingMac && !typingPairing && !running);
+        if (!running) connectingMacId = null;
+        if (savedMacs != null) refreshSavedMacs();
     }
     private void cancelConnectionAttempt() {
         if (running) {
@@ -618,6 +657,7 @@ public final class MainActivity extends Activity {
         LinearLayout tileRow = null; int inRow = 0;
         for (SavedMacs.Mac mac : savedMacStore.all()) {
             android.view.View row;
+            boolean connecting = running && mac.identity().macId().equals(connectingMacId);
             if (connectionTiles) {
                 if (tileRow == null || inRow == Math.max(1, savedMacColumns)) {
                     tileRow = new LinearLayout(this); tileRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -626,8 +666,10 @@ public final class MainActivity extends Activity {
                     savedMacs.addView(tileRow, rowParams); inRow = 0;
                 }
                 LinearLayout tile = new LinearLayout(this); tile.setOrientation(LinearLayout.VERTICAL);
-                tile.setBackground(shape(0xff23262c, 12)); tile.setClipToOutline(true);
-                android.widget.FrameLayout image = new android.widget.FrameLayout(this); image.setBackgroundColor(0xff2b2e33);
+                android.graphics.drawable.GradientDrawable tileBackground = shape(connecting ? 0xff2c3550 : 0xff23262c, 12);
+                tileBackground.setStroke(dp(1), connecting ? 0x8c9bb7ff : 0x14ffffff);
+                tile.setBackground(tileBackground); tile.setClipToOutline(true);
+                android.widget.FrameLayout image = new android.widget.FrameLayout(this); image.setBackgroundColor(0xff202227);
                 android.widget.ImageView icon = new android.widget.ImageView(this);
                 icon.setImageDrawable(new ToolbarSymbol("desktop", 0xd9ffffff));
                 image.addView(icon, new android.widget.FrameLayout.LayoutParams(dp(24), dp(24), android.view.Gravity.CENTER));
@@ -637,8 +679,8 @@ public final class MainActivity extends Activity {
                 TextView name = new TextView(this); name.setText(mac.displayName()); name.setTextSize(14); name.setTextColor(0xffeef0f3);
                 name.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
                 name.setSingleLine(true); name.setEllipsize(android.text.TextUtils.TruncateAt.END); description.addView(name);
-                TextView kind = new TextView(this); kind.setText("已配对"); kind.setTextSize(12); kind.setTextColor(0xffa4abb5); description.addView(kind);
-                tile.addView(description); tile.setContentDescription(mac.displayName() + "，已配对");
+                TextView kind = new TextView(this); kind.setText(connecting ? "正在连接…" : "已配对"); kind.setTextSize(12); kind.setTextColor(0xffa4abb5); description.addView(kind);
+                tile.addView(description); tile.setContentDescription(mac.displayName() + (connecting ? "，正在连接" : "，已配对"));
                 tile.setOnClickListener(v -> connectSavedMac(mac.identity(), mac.preferred()));
                 LinearLayout.LayoutParams tileParams = new LinearLayout.LayoutParams(0, -2, 1);
                 if (inRow > 0) tileParams.leftMargin = dp(10); tileRow.addView(tile, tileParams); inRow++;
@@ -650,8 +692,20 @@ public final class MainActivity extends Activity {
                 } else if (inRow == 2) tileRow.removeViewAt(1);
                 row = tile;
             } else {
-                Button list = button(savedMacs, mac.displayName() + "  ·  已配对", v -> connectSavedMac(mac.identity(), mac.preferred()));
-                styleConnectionRow(list); row = list;
+                LinearLayout list = new LinearLayout(this); list.setGravity(android.view.Gravity.CENTER_VERTICAL);
+                list.setPadding(dp(10), 0, dp(10), 0); list.setMinimumHeight(dp(50));
+                list.setBackground(shape(connecting ? 0xff2c3550 : 0x00000000, 10));
+                android.widget.FrameLayout iconBox = new android.widget.FrameLayout(this); iconBox.setBackground(shape(0xff3a3d44, 9));
+                android.widget.ImageView icon = new android.widget.ImageView(this); icon.setImageDrawable(new ToolbarSymbol("desktop", 0xffeef0f3));
+                iconBox.addView(icon, new android.widget.FrameLayout.LayoutParams(dp(16), dp(16), android.view.Gravity.CENTER));
+                list.addView(iconBox, new LinearLayout.LayoutParams(dp(32), dp(32)));
+                TextView name = new TextView(this); name.setText(mac.displayName()); name.setTextColor(0xffeef0f3); name.setTextSize(15);
+                name.setSingleLine(true); name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                LinearLayout.LayoutParams nameParams = new LinearLayout.LayoutParams(0, -2, 1); nameParams.leftMargin = dp(12); list.addView(name, nameParams);
+                TextView route = new TextView(this); route.setText(connecting ? "正在连接…" : "已配对"); route.setTextColor(0xffa4abb5); route.setTextSize(13); list.addView(route);
+                list.setContentDescription(mac.displayName() + (connecting ? "，正在连接" : "，已配对"));
+                list.setOnClickListener(v -> connectSavedMac(mac.identity(), mac.preferred()));
+                savedMacs.addView(list, new LinearLayout.LayoutParams(-1, -2)); row = list;
             }
             row.setOnLongClickListener(v -> {
                 if (running) { show("请先取消当前连接。"); return true; }
@@ -1499,8 +1553,7 @@ public final class MainActivity extends Activity {
         int pipIndex = labels.size();
         labels.add(pip == null || !pip.supported() ? "画中画：此设备不支持" : pipEnabled ? "关闭画中画" : "开启画中画");
         int holdIndex = labels.size();
-        int holdTenths = Math.max(2, Math.min(20, getPreferences(0).getInt("thumbnailHoldTenths", 5)));
-        labels.add("窗口控制长按时间：" + (holdTenths / 10f) + " 秒");
+        labels.add("窗口控制长按时间");
         int muteIndex = labels.size();
         labels.add(localAudio.muted() ? "取消本机静音" : "本机静音");
         boolean[] muteShown = {localAudio.muted()};
@@ -1543,20 +1596,6 @@ public final class MainActivity extends Activity {
             if (i == pipIndex && pip != null && pip.supported()) { pipEnabled = !pipEnabled; getPreferences(0).edit().putBoolean("pictureInPicture", pipEnabled).apply(); }
             if (i == muteIndex) localAudio.setMuted(!muteShown[0]);
             if (i == pasteModeIndex) { pasteRightAway = !pasteRightAway; getPreferences(0).edit().putBoolean("pasteRightAway", pasteRightAway).apply(); }
-            if (i == holdIndex) {
-                String[] durations = new String[19];
-                for (int n = 0; n < durations.length; n++) durations[n] = ((n + 2) / 10f) + " 秒";
-                int currentHold = Math.max(2, Math.min(20, getPreferences(0).getInt("thumbnailHoldTenths", 5)));
-                showSettingsChild(new android.app.AlertDialog.Builder(this).setTitle("窗口控制长按时间")
-                        .setSingleChoiceItems(durations, currentHold - 2, (choice, selected) -> {
-                            getPreferences(0).edit().putInt("thumbnailHoldTenths", selected + 2).apply();
-                            if (settingsOverlay != null) {
-                                TextView holdRow = settingsOverlay.findViewWithTag("thumbnailHold");
-                                if (holdRow != null) holdRow.setText("窗口控制长按时间：" + ((selected + 2) / 10f) + " 秒");
-                            }
-                            choice.dismiss();
-                        }).setNegativeButton("取消", null).create());
-            }
             if (i == tourIndex) {
                 SillConnection expected = connection;
                 boolean restore = settingsRestoreKeyboard;
@@ -1653,6 +1692,7 @@ public final class MainActivity extends Activity {
         };
         LinearLayout clipboardGroup = null;
         for (int index : order) {
+            if (index == holdIndex) { addThumbnailHoldRow(rows); continue; }
             String label = index == pipIndex ? (pip == null || !pip.supported() ? items[index] : "画中画")
                     : offerLarge && index == 6 ? (android.os.Build.VERSION.SDK_INT < 30 || portraitImeHeight <= 0 ? items[index] : "大画面")
                     : index == 1 ? "共享剪贴板" : index == pasteModeIndex ? "确认后立即粘贴"
@@ -1678,7 +1718,6 @@ public final class MainActivity extends Activity {
                     settingsReanchorPending = true; reanchorSettings();
                 }
             });
-            if (index == holdIndex) row.getChildAt(0).setTag("thumbnailHold");
             if (index == 2) row.getChildAt(0).setTag("clipboardAction");
             if (index == muteIndex) refreshSettingsMute = () -> {
                 if (settingsOverlay == overlay && localAudio.muted() != muteShown[0]) {
@@ -1724,6 +1763,100 @@ public final class MainActivity extends Activity {
     private void addSettingsNote(LinearLayout rows, String text) {
         TextView note = new TextView(this); note.setText(text); note.setTextSize(12); note.setTextColor(0xffa4abb5);
         note.setPadding(dp(14), dp(2), dp(14), dp(8)); rows.addView(note);
+    }
+    private void addThumbnailHoldRow(LinearLayout rows) {
+        ThumbnailHoldRow row = new ThumbnailHoldRow();
+        rows.addView(row, new LinearLayout.LayoutParams(-1, -2));
+        TextView note = new TextView(this);
+        note.setText("按住窗口缩略图，等待关闭、最小化和全屏控件出现；继续按住并拖动可调整窗口顺序。");
+        note.setTextSize(13); note.setTextColor(0xffa4abb5);
+        note.setPadding(dp(14), dp(6), dp(14), dp(12)); rows.addView(note);
+    }
+    private final class ThumbnailHoldRow extends LinearLayout {
+        private final TextView title, value;
+        private final LinearLayout controls;
+        private final Button decrease, increase;
+        private int tenths;
+        private boolean stacked;
+        ThumbnailHoldRow() {
+            super(MainActivity.this);
+            setOrientation(HORIZONTAL); setGravity(android.view.Gravity.CENTER_VERTICAL);
+            setPadding(dp(14), dp(6), dp(14), dp(6)); setMinimumHeight(dp(44));
+            setBackground(shape(0xff23262c, 12));
+            setFocusable(true); setImportantForAccessibility(android.view.View.IMPORTANT_FOR_ACCESSIBILITY_YES);
+            title = new TextView(MainActivity.this); title.setText("窗口控制长按时间");
+            title.setTextColor(0xffeef0f3); title.setTextSize(15);
+            title.setImportantForAccessibility(android.view.View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            addView(title, new LinearLayout.LayoutParams(0, -2, 1));
+            controls = new LinearLayout(MainActivity.this); controls.setGravity(android.view.Gravity.CENTER_VERTICAL);
+            controls.setImportantForAccessibility(android.view.View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+            value = new TextView(MainActivity.this); value.setTextColor(0xffa4abb5); value.setTextSize(15);
+            value.setTypeface(android.graphics.Typeface.MONOSPACE); value.setSingleLine(true);
+            LinearLayout.LayoutParams valueParams = new LinearLayout.LayoutParams(-2, -2); valueParams.rightMargin = dp(8);
+            controls.addView(value, valueParams);
+            LinearLayout buttons = new LinearLayout(MainActivity.this); buttons.setGravity(android.view.Gravity.CENTER_VERTICAL);
+            buttons.setBackground(shape(0xff3a3d44, 12));
+            decrease = holdButton("−", () -> adjust(-1)); increase = holdButton("+", () -> adjust(1));
+            buttons.addView(decrease, new LinearLayout.LayoutParams(dp(44), dp(44)));
+            android.view.View divider = new android.view.View(MainActivity.this); divider.setBackgroundColor(0x33ffffff);
+            buttons.addView(divider, new LinearLayout.LayoutParams(dp(1), dp(24)));
+            buttons.addView(increase, new LinearLayout.LayoutParams(dp(44), dp(44)));
+            controls.addView(buttons, new LinearLayout.LayoutParams(-2, -2));
+            addView(controls, new LinearLayout.LayoutParams(-2, -2));
+            tenths = Math.max(2, Math.min(20, getPreferences(0).getInt("thumbnailHoldTenths", 5)));
+            updateValue();
+        }
+        private Button holdButton(String text, Runnable action) {
+            Button result = new Button(MainActivity.this); result.setAllCaps(false); result.setText(text);
+            result.setTextColor(0xffeef0f3); result.setTextSize(18); result.setIncludeFontPadding(false);
+            result.setPadding(0, 0, 0, 0); result.setMinWidth(0); result.setMinimumWidth(0);
+            result.setBackgroundColor(android.graphics.Color.TRANSPARENT);
+            result.setAutoSizeTextTypeUniformWithConfiguration(8, 18, 1, android.util.TypedValue.COMPLEX_UNIT_SP);
+            result.setOnClickListener(v -> action.run()); return result;
+        }
+        private void updateValue() {
+            String text = String.format(java.util.Locale.ROOT, "%.1f 秒", tenths / 10.0);
+            value.setText(text); decrease.setEnabled(tenths > 2); decrease.setAlpha(tenths > 2 ? 1 : .35f);
+            increase.setEnabled(tenths < 20); increase.setAlpha(tenths < 20 ? 1 : .35f);
+            setContentDescription("窗口控制长按时间，" + text);
+        }
+        private boolean adjust(int direction) {
+            int next = Math.max(2, Math.min(20, tenths + direction));
+            if (next == tenths) return false;
+            tenths = next; getPreferences(0).edit().putInt("thumbnailHoldTenths", tenths).apply();
+            updateValue(); sendAccessibilityEvent(android.view.accessibility.AccessibilityEvent.TYPE_VIEW_SELECTED);
+            return true;
+        }
+        @Override protected void onMeasure(int widthSpec, int heightSpec) {
+            int width = android.view.View.MeasureSpec.getSize(widthSpec) - getPaddingLeft() - getPaddingRight();
+            float controlsWidth = value.getPaint().measureText("2.0 秒") + dp(8 + 89);
+            float titleWidth = title.getPaint().measureText("窗口控制");
+            boolean stack = width < controlsWidth + dp(8) + titleWidth;
+            if (stack != stacked) {
+                stacked = stack; setOrientation(stack ? VERTICAL : HORIZONTAL);
+                setGravity(stack ? android.view.Gravity.START : android.view.Gravity.CENTER_VERTICAL);
+                title.setLayoutParams(new LinearLayout.LayoutParams(stack ? -1 : 0, -2, stack ? 0 : 1));
+                LinearLayout.LayoutParams controlParams = new LinearLayout.LayoutParams(stack ? -1 : -2, -2);
+                if (stack) controlParams.topMargin = dp(8);
+                controls.setLayoutParams(controlParams);
+                LinearLayout.LayoutParams valueParams = new LinearLayout.LayoutParams(stack ? 0 : -2, -2, stack ? 1 : 0);
+                valueParams.rightMargin = dp(8); value.setLayoutParams(valueParams);
+            }
+            super.onMeasure(widthSpec, heightSpec);
+        }
+        @Override public void onInitializeAccessibilityNodeInfo(android.view.accessibility.AccessibilityNodeInfo info) {
+            super.onInitializeAccessibilityNodeInfo(info);
+            info.setClassName("android.widget.SeekBar");
+            info.setRangeInfo(android.view.accessibility.AccessibilityNodeInfo.RangeInfo.obtain(
+                    android.view.accessibility.AccessibilityNodeInfo.RangeInfo.RANGE_TYPE_FLOAT, .2f, 2f, tenths / 10f));
+            if (tenths < 20) info.addAction(android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_FORWARD);
+            if (tenths > 2) info.addAction(android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_BACKWARD);
+        }
+        @Override public boolean performAccessibilityAction(int action, android.os.Bundle arguments) {
+            if (action == android.view.accessibility.AccessibilityNodeInfo.ACTION_SCROLL_FORWARD) return adjust(1);
+            if (action == android.view.accessibility.AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD) return adjust(-1);
+            return super.performAccessibilityAction(action, arguments);
+        }
     }
     private void addHostChoice(LinearLayout group, String title, String field, Object value) {
         if (!(value instanceof Number number)) return;
@@ -2271,6 +2404,7 @@ public final class MainActivity extends Activity {
             pairingGuard = pairing ? new PairingAuthorization(savedMacStore.pin(new SavedMacs.Endpoint(address, number))) : null;
             pendingPairing = pairingGuard;
         }
+        connectingMacId = selectedIdentity == null ? null : selectedIdentity.macId();
         running = true; closing = false; updateConnectionCancel(); getPreferences(0).edit().putString("host", address).putString("port", String.valueOf(number)).apply();
         network.execute(() -> {
             try {
