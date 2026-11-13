@@ -49,6 +49,48 @@ public final class RemoteTextStateTest {
         assert state.reconcile("cmd\r\n").equals(new RemoteTextState.Edit(0, "cmd\r\n"));
         assert state.reconcile("cmd\r\nx").equals(new RemoteTextState.Edit(0, "x"));
         assert state.reconcile("cmd\r\ny").equals(new RemoteTextState.Edit(1, "y"));
+        state.clear();
+        assert state.reconcile("한글\nㅎ").equals(new RemoteTextState.Edit(0, "한글\nㅎ"));
+        assert java.util.Arrays.equals(state.selection(1, 1), new int[]{4, 4});
+        assert java.util.Arrays.equals(state.selection(0, 3), new int[]{4, 4});
+        assert java.util.Arrays.equals(state.selection(4, 2), new int[]{2, 4});
+        assert state.deleteCrossingSelection(2, 4).equals(new RemoteTextState.Edit(1, ""));
+        assert state.hasRetype();
+        assert state.text().equals("한글\n") && state.fence() == 3;
+        // A no-op finishComposingText between deletion and retyping must retain the fence.
+        assert state.reconcile(state.text()).equals(new RemoteTextState.Edit(0, ""));
+        assert state.consumeRetype("\n").equals("");
+        assert !state.hasRetype();
+        assert state.consumeRetype("하").equals("하");
+        assert state.reconcile(state.text() + "하").equals(new RemoteTextState.Edit(0, "하"));
+        String genuineReturn = state.consumeRetype("\n");
+        assert genuineReturn.equals("\n");
+        assert state.reconcile(state.text() + genuineReturn).equals(new RemoteTextState.Edit(0, "\n"));
+        state.clear();
+        state.reconcile("sent\nabc");
+        assert state.deleteCrossingSelection(3, 7).equals(new RemoteTextState.Edit(3, "c"));
+        assert state.consumeRetype("t").equals("");
+        assert state.consumeRetype("\nXYZ").equals("XYZ");
+        assert state.reconcile(state.text() + "XYZ").equals(new RemoteTextState.Edit(0, "XYZ"));
+        state.clear();
+        state.reconcile("sent\nabc");
+        state.deleteCrossingSelection(3, 7);
+        assert state.consumeRetype("replacement") == null;
+        assert state.text().equals("sent\nc");
+        state.clear();
+        String longText = "A".repeat(3500) + "\n" + "😀".repeat(1000);
+        state.reconcile(longText);
+        assert state.wantsTrim() && state.trim();
+        assert state.text().equals("😀".repeat(1000));
+        assert state.fence() == 0 && !state.wantsTrim();
+        assert state.reconcile(state.text() + "好").equals(new RemoteTextState.Edit(0, "好"));
+        state.clear();
+        state.reconcile("A".repeat(3500) + "\n" + "B".repeat(1000));
+        assert state.trim() && state.fence() == 0 && state.text().length() == 1000;
+        state.clear();
+        state.reconcile("A".repeat(4000) + "\nB");
+        assert state.trim() && state.fence() == 999;
+        assert state.reconcile("B") == null;
         System.out.println("Remote text checks passed");
     }
 }

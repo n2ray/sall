@@ -9,6 +9,13 @@ public final class InputGenerationTest {
         assert !generation.current(first) && generation.current(afterCaretMove);
         long afterSession = generation.next();
         assert !generation.current(afterCaretMove) && generation.current(afterSession);
+        long beforeTrim = generation.next();
+        long afterTrim = generation.next();
+        int[] sent = {0};
+        if (generation.current(beforeTrim)) sent[0]++;
+        assert sent[0] == 0;
+        if (generation.current(afterTrim)) sent[0]++;
+        assert sent[0] == 1;
         System.out.println("Input generation checks passed");
     }
 }
