@@ -1,4 +1,4 @@
-package io.github.n2ray.sill;
+package io.github.n2ray.sall;
 
 import android.app.Instrumentation;
 import android.content.Context;

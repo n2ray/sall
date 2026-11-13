@@ -28,7 +28,7 @@ class RunnerTests(unittest.TestCase):
 
             def copytree(_source, target, **_kwargs):
                 target = Path(target)
-                dest = target / "app/src/main/java/io/github/n2ray/sill"
+                dest = target / "app/src/main/java/io/github/n2ray/sall"
                 dest.mkdir(parents=True)
                 (target / "app/src/main/AndroidManifest.xml").write_text("<manifest></manifest>")
                 (dest / "AndroidAudioDevice.java").write_text("track.unexpected();" if bad_anchor else "track.play(); route = null;")
@@ -42,7 +42,7 @@ class RunnerTests(unittest.TestCase):
                 if args[0] == "swiftc" or args[0] == str(work / "fixture"):
                     return b""
                 if args[0] == "fake-gradle":
-                    source = (Path(kwargs["cwd"]) / "app/src/main/java/io/github/n2ray/sill/AndroidAudioDevice.java").read_text()
+                    source = (Path(kwargs["cwd"]) / "app/src/main/java/io/github/n2ray/sall/AndroidAudioDevice.java").read_text()
                     state["muted_before_play"] = "track.setVolume(0f)" in source and source.index("track.setVolume(0f)") < source.index("track.play()")
                     apk = Path(kwargs["cwd"]) / "app/build/outputs/apk/debug/app-debug.apk"
                     apk.parent.mkdir(parents=True)

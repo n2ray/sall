@@ -1,4 +1,4 @@
-package io.github.n2ray.sill;
+package io.github.n2ray.sall;
 
 import java.util.ArrayList;
 import java.util.List;

@@ -25,7 +25,7 @@ def run(args, timeout=180, cwd=None):
     return subprocess.check_output([str(x) for x in args], stderr=subprocess.STDOUT, timeout=timeout, cwd=cwd)
 
 def installed_path():
-    output = run(adb + ["shell", "pm", "path", "io.github.n2ray.sill"]).decode().strip()
+    output = run(adb + ["shell", "pm", "path", "io.github.n2ray.sall"]).decode().strip()
     if not output.startswith("package:/data/app/") or not output.endswith("/base.apk") or "\n" in output:
         raise RuntimeError("Expected one installed Sill APK")
     return output.removeprefix("package:")
@@ -51,10 +51,10 @@ try:
     shutil.copytree(root, project, ignore=shutil.ignore_patterns("build", ".gradle", "artifacts"))
     manifest = project / "app/src/main/AndroidManifest.xml"
     text = manifest.read_text().replace('</manifest>',
-        '    <instrumentation android:name="io.github.n2ray.sill.GroupProbe" '
-        'android:targetPackage="io.github.n2ray.sill" />\n</manifest>')
+        '    <instrumentation android:name="io.github.n2ray.sall.GroupProbe" '
+        'android:targetPackage="io.github.n2ray.sall" />\n</manifest>')
     manifest.write_text(text)
-    shutil.copy(root / "tests/group-device/GroupProbe.java", project / "app/src/main/java/io/github/n2ray/sill/GroupProbe.java")
+    shutil.copy(root / "tests/group-device/GroupProbe.java", project / "app/src/main/java/io/github/n2ray/sall/GroupProbe.java")
     run([gradle, "--no-daemon", "assembleDebug"], timeout=300, cwd=project)
     probe = project / "app/build/outputs/apk/debug/app-debug.apk"
     if signer(backup) != signer(probe) or installed_hash() != original_hash:
@@ -62,9 +62,9 @@ try:
     replaced = True
     run(adb + ["install", "-r", probe])
     for phase in ("check",):
-        run(adb + ["shell", "am", "force-stop", "io.github.n2ray.sill"])
+        run(adb + ["shell", "am", "force-stop", "io.github.n2ray.sall"])
         output = run(adb + ["shell", "am", "instrument", "-w", "-e", "phase", phase,
-                            "io.github.n2ray.sill/io.github.n2ray.sill.GroupProbe"], timeout=90).decode()
+                            "io.github.n2ray.sall/io.github.n2ray.sall.GroupProbe"], timeout=90).decode()
         print(output, end="")
         if f"result=PASS: group graphemes {phase}" not in output or "INSTRUMENTATION_CODE: -1" not in output:
             raise RuntimeError(f"Group graphemes {phase} probe failed")
@@ -75,7 +75,7 @@ finally:
             if installed_hash() != original_hash:
                 raise RuntimeError("Restored APK differs from the original")
             restored = True
-            run(adb + ["shell", "am", "start", "-n", "io.github.n2ray.sill/.MainActivity"])
+            run(adb + ["shell", "am", "start", "-n", "io.github.n2ray.sall/.MainActivity"])
             print("Original Sill APK restored and verified")
         except BaseException:
             print(f"Restore failed; original APK retained at {backup}", file=sys.stderr)

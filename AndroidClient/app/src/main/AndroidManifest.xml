@@ -2,10 +2,10 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.CAMERA" />
-    <permission android:name="io.github.n2ray.sill.permission.PIP_CONTROL" android:protectionLevel="signature" />
-    <uses-permission android:name="io.github.n2ray.sill.permission.PIP_CONTROL" />
+    <permission android:name="io.github.n2ray.sall.permission.PIP_CONTROL" android:protectionLevel="signature" />
+    <uses-permission android:name="io.github.n2ray.sall.permission.PIP_CONTROL" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
-    <application android:label="Sill Android" android:allowBackup="false" android:theme="@android:style/Theme.Material.NoActionBar">
+    <application android:label="Sall" android:icon="@mipmap/sall_launcher" android:roundIcon="@mipmap/sall_launcher" android:allowBackup="false" android:theme="@style/SillTheme">
         <activity android:name=".PairScannerActivity" android:exported="false" />
         <activity android:name=".MainActivity" android:launchMode="singleTask" android:exported="true" android:enableOnBackInvokedCallback="true" android:supportsPictureInPicture="true" android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden" android:windowSoftInputMode="adjustNothing">
             <intent-filter>

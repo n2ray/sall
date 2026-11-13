@@ -1,0 +1,33 @@
+<resources>
+    <style name="SillTheme" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">#9BB7FF</item>
+        <item name="android:alertDialogTheme">@style/SillAlert</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+    </style>
+    <style name="SillAlert" parent="android:style/Theme.Material.Dialog.Alert">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">#9BB7FF</item>
+        <item name="android:windowBackground">@drawable/sill_dialog_background</item>
+        <item name="android:textColorPrimary">#EEF0F3</item>
+        <item name="android:textColorSecondary">#A4ABB5</item>
+        <item name="android:buttonBarPositiveButtonStyle">@style/SillAlertPrimaryButton</item>
+        <item name="android:buttonBarNegativeButtonStyle">@style/SillAlertButton</item>
+        <item name="android:buttonBarNeutralButtonStyle">@style/SillAlertButton</item>
+    </style>
+    <style name="SillAlertButton" parent="android:style/Widget.Material.Button.Borderless.Colored">
+        <item name="android:textAllCaps">false</item>
+        <item name="android:textColor">#9BB7FF</item>
+        <item name="android:minHeight">44dp</item>
+    </style>
+    <style name="SillAlertPrimaryButton" parent="android:style/Widget.Material.Button.Borderless">
+        <item name="android:textAllCaps">false</item>
+        <item name="android:textColor">#101215</item>
+        <item name="android:background">@drawable/sill_dialog_primary</item>
+        <item name="android:minWidth">88dp</item>
+        <item name="android:minHeight">44dp</item>
+        <item name="android:paddingLeft">12dp</item>
+        <item name="android:paddingRight">12dp</item>
+    </style>
+</resources>

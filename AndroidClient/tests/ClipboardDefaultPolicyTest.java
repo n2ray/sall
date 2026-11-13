@@ -1,4 +1,4 @@
-package io.github.n2ray.sill;
+package io.github.n2ray.sall;
 
 public final class ClipboardDefaultPolicyTest {
     static final class FakeStore implements ClipboardDefaultPolicy.Store {

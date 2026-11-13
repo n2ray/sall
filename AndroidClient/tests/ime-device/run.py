@@ -26,7 +26,7 @@ def run(args, timeout=180, cwd=None):
     return subprocess.check_output([str(x) for x in args], stderr=subprocess.STDOUT, timeout=timeout, cwd=cwd)
 
 def installed_path():
-    value = run(adb + ["shell", "pm", "path", "io.github.n2ray.sill"]).decode().strip()
+    value = run(adb + ["shell", "pm", "path", "io.github.n2ray.sall"]).decode().strip()
     if not value.startswith("package:/data/app/") or not value.endswith("/base.apk") or "\n" in value:
         raise RuntimeError("Expected one installed Sill APK")
     return value.removeprefix("package:")
@@ -35,7 +35,7 @@ def installed_hash():
     return run(adb + ["shell", "sha256sum", installed_path()]).decode().split()[0]
 
 def preferences_hash():
-    data = run(adb + ["exec-out", "run-as", "io.github.n2ray.sill", "cat", "shared_prefs/MainActivity.xml"])
+    data = run(adb + ["exec-out", "run-as", "io.github.n2ray.sall", "cat", "shared_prefs/MainActivity.xml"])
     return hashlib.sha256(data).hexdigest()
 
 def signer(path):
@@ -61,20 +61,20 @@ try:
                         '<activity android:name=".ImeProbeActivity" android:exported="false" />\n'
                         '        <activity android:name=".PairScannerActivity"')
     text = text.replace('</manifest>',
-                        '    <instrumentation android:name="io.github.n2ray.sill.ImeProbe" '
-                        'android:targetPackage="io.github.n2ray.sill" />\n</manifest>')
+                        '    <instrumentation android:name="io.github.n2ray.sall.ImeProbe" '
+                        'android:targetPackage="io.github.n2ray.sall" />\n</manifest>')
     manifest.write_text(text)
-    dest = project / "app/src/main/java/io/github/n2ray/sill"
+    dest = project / "app/src/main/java/io/github/n2ray/sall"
     for name in ("ImeProbe.java", "ImeProbeActivity.java"):
         source = (root / "tests/ime-device" / name).read_text()
-        (dest / name).write_text(source.replace("io.github.n2ray.sill.imeprobe", "io.github.n2ray.sill"))
+        (dest / name).write_text(source.replace("io.github.n2ray.sall.imeprobe", "io.github.n2ray.sall"))
     run([gradle, "--no-daemon", "assembleDebug"], timeout=300, cwd=project)
     probe = project / "app/build/outputs/apk/debug/app-debug.apk"
     if signer(backup) != signer(probe) or installed_hash() != original_hash:
         raise RuntimeError("Probe signing identity or installed APK changed")
     replaced = True  # Restore even if adb times out after installing.
     run(adb + ["install", "-r", probe])
-    output = run(adb + ["shell", "am", "instrument", "-w", "io.github.n2ray.sill/io.github.n2ray.sill.ImeProbe"], timeout=90).decode()
+    output = run(adb + ["shell", "am", "instrument", "-w", "io.github.n2ray.sall/io.github.n2ray.sall.ImeProbe"], timeout=90).decode()
     print(output, end="")
     if preferences_hash() != before:
         raise RuntimeError("Sill preferences changed during the probe")
@@ -88,7 +88,7 @@ finally:
             if installed_hash() != original_hash:
                 raise RuntimeError("Restored APK does not match the original")
             restored = True
-            run(adb + ["shell", "am", "start", "-n", "io.github.n2ray.sill/.MainActivity"])
+            run(adb + ["shell", "am", "start", "-n", "io.github.n2ray.sall/.MainActivity"])
             print("Original Sill APK restored and verified")
         except BaseException:
             print(f"Restore failed; original APK retained at {backup}", file=sys.stderr)

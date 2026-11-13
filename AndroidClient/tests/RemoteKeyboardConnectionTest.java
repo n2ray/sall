@@ -1,4 +1,4 @@
-package io.github.n2ray.sill;
+package io.github.n2ray.sall;
 
 import android.content.Context;
 import android.view.inputmethod.BaseInputConnection;

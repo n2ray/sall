@@ -30,7 +30,7 @@ def run(args, timeout=180, cwd=None, env=None):
 
 
 def installed_path():
-    value = run(adb + ["shell", "pm", "path", "io.github.n2ray.sill"]).decode().strip()
+    value = run(adb + ["shell", "pm", "path", "io.github.n2ray.sall"]).decode().strip()
     if not value.startswith("package:/data/app/") or not value.endswith("/base.apk") or "\n" in value:
         raise RuntimeError("Expected one installed Sill APK")
     return value.removeprefix("package:")
@@ -41,7 +41,7 @@ def installed_hash():
 
 
 def preferences_hash():
-    data = run(adb + ["exec-out", "run-as", "io.github.n2ray.sill", "cat", "shared_prefs/MainActivity.xml"])
+    data = run(adb + ["exec-out", "run-as", "io.github.n2ray.sall", "cat", "shared_prefs/MainActivity.xml"])
     return hashlib.sha256(data).hexdigest()
 
 
@@ -93,10 +93,10 @@ try:
     marker = "</manifest>"
     if text.count(marker) != 1:
         raise RuntimeError("Cannot add instrumentation")
-    manifest.write_text(text.replace(marker, '    <instrumentation android:name="io.github.n2ray.sill.AudioDeviceProbe" '
-                                     'android:targetPackage="io.github.n2ray.sill" />\n</manifest>'))
-    dest = project / "app/src/main/java/io/github/n2ray/sill"
-    for name in ("AudioDeviceProbe.java", "AudioProbeChecks.java", "AudioProbeClock.java", "AudioRuntimeProbe.java", "EsdsDecoderSpecificInfo.java"):
+    manifest.write_text(text.replace(marker, '    <instrumentation android:name="io.github.n2ray.sall.AudioDeviceProbe" '
+                                     'android:targetPackage="io.github.n2ray.sall" />\n</manifest>'))
+    dest = project / "app/src/main/java/io/github/n2ray/sall"
+    for name in ("AudioDeviceProbe.java", "AudioProbeChecks.java", "AudioProbeClock.java", "AudioRuntimeProbe.java", "AudioPlayerProbe.java", "EsdsDecoderSpecificInfo.java"):
         shutil.copy(root / "tests/audio-device" / name, dest / name)
     device = dest / "AndroidAudioDevice.java"
     source = device.read_text()
@@ -114,7 +114,7 @@ try:
     replaced = True
     run(adb + ["install", "-r", probe])
     try:
-        raw = run(adb + ["shell", "am", "instrument", "-w", "io.github.n2ray.sill/io.github.n2ray.sill.AudioDeviceProbe"], timeout=90)
+        raw = run(adb + ["shell", "am", "instrument", "-w", "io.github.n2ray.sall/io.github.n2ray.sall.AudioDeviceProbe"], timeout=90)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as failure:
         save_report(failure.output)
         raise

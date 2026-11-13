@@ -1,15 +1,27 @@
 plugins { id 'com.android.application' }
 
 android {
-    namespace 'io.github.n2ray.sill'
+    namespace 'io.github.n2ray.sall'
     compileSdk 35
     defaultConfig {
-        applicationId 'io.github.n2ray.sill'
+        applicationId 'io.github.n2ray.sall'
         minSdk 29
         targetSdk 35
         versionCode 1
-        versionName '0.1.0'
+        versionName '0.1.0-alpha.1'
     }
+    signingConfigs {
+        release {
+            def keyPath = System.getenv('SALL_KEYSTORE_PATH')
+            if (keyPath) {
+                storeFile file(keyPath)
+                storePassword System.getenv('SALL_KEYSTORE_PASSWORD')
+                keyAlias 'sall'
+                keyPassword System.getenv('SALL_KEYSTORE_PASSWORD')
+            }
+        }
+    }
+    buildTypes { release { signingConfig signingConfigs.release } }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17

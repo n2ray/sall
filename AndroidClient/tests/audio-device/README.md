@@ -36,6 +36,10 @@ track: the device wrapper substitutes zero PCM on every write. The temporary pro
 inserts a fail-closed per-track `setVolume(0)` before playback; a missing insertion anchor or a
 failed mute aborts the test. The production source in the repository is not changed.
 
+An additional probe exercises `AudioPlayer` itself over two synthetic sessions, including mute,
+resume, and malformed or oversized packet input. It checks that the real playback clock returns to
+READY and no player error is reported; it still does not verify audible sound or a real network.
+
 Track diagnostics, all four AAC packet-size/CSD checks and all four runtime checks run independently, so a failed track
 timestamp check does not hide decoder capabilities (and one failed configuration does not hide
 another). Any failing check still makes the overall instrumentation result fail. Decoder

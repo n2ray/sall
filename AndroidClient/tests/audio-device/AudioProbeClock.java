@@ -1,4 +1,4 @@
-package io.github.n2ray.sill;
+package io.github.n2ray.sall;
 
 /** Mirrors the runtime's timestamp sampling boundary without depending on Android APIs. */
 final class AudioProbeClock {

@@ -1,4 +1,4 @@
-package io.github.n2ray.sill;
+package io.github.n2ray.sall;
 
 import java.io.IOException;
 import java.security.GeneralSecurityException;
@@ -17,9 +17,11 @@ public final class ConnectionPreviewStoreTest {
         final Map<String, SecretKey> keys = new HashMap<>();
         final Map<String, byte[]> files = new HashMap<>();
         final Set<String> markers = new HashSet<>();
-        boolean unlocked = true, failKey, invalidKey, failDelete, failDataDelete, failWrite, failMark, lockBeforeCommit;
+        boolean unlocked = true, failKey, needsAuth, invalidKey, failDelete, failDataDelete, failWrite, failMark, lockBeforeCommit;
+        java.util.concurrent.CountDownLatch writeEntered, continueWrite;
         public boolean available() { return unlocked; }
         public SecretKey key(String id, boolean create) throws GeneralSecurityException {
+            if (needsAuth) throw new GeneralSecurityException(new UserNotAuthenticatedException());
             if (failKey) throw invalidKey ? new Permanent() : new GeneralSecurityException();
             if (create && !keys.containsKey(id)) { byte[] b = new byte[32]; new SecureRandom().nextBytes(b); keys.put(id, new SecretKeySpec(b, "AES")); }
             return keys.get(id);
@@ -34,6 +36,11 @@ public final class ConnectionPreviewStoreTest {
         }
         public boolean write(String id, byte[] encrypted, BooleanSupplier mayCommit) throws IOException {
             if (failWrite) throw new IOException();
+            if (writeEntered != null) {
+                writeEntered.countDown();
+                try { if (!continueWrite.await(5, java.util.concurrent.TimeUnit.SECONDS)) throw new IOException("Write wait timed out"); }
+                catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new IOException(e); }
+            }
             if (lockBeforeCommit) { unlocked = false; lockBeforeCommit = false; }
             if (!mayCommit.getAsBoolean()) return false;
             files.put(id, encrypted.clone()); return true;
@@ -42,6 +49,7 @@ public final class ConnectionPreviewStoreTest {
         public boolean permanentlyInvalid(Throwable e) { return e instanceof Permanent; }
     }
     private static final class Permanent extends GeneralSecurityException {}
+    private static final class UserNotAuthenticatedException extends GeneralSecurityException {}
     private static boolean contains(byte[] data, byte[] needle) {
         outer: for (int i = 0; i <= data.length - needle.length; i++) {
             for (int j = 0; j < needle.length; j++) if (data[i + j] != needle[j]) continue outer;
@@ -66,6 +74,8 @@ public final class ConnectionPreviewStoreTest {
         assert s.save(ticket, 1, pin, true, true, synthetic);
         byte[] first = backend.files.get(id).clone();
         assert !contains(first, synthetic) && Arrays.equals(synthetic, s.load(pin, true));
+        backend.needsAuth = true; assert s.load(pin, true) == null && s.needsAuthentication();
+        backend.needsAuth = false; assert Arrays.equals(synthetic, s.load(pin, true)) && !s.needsAuthentication();
         ticket = s.begin(1, pin, true); assert s.save(ticket, 1, pin, true, true, synthetic);
         assert !Arrays.equals(first, backend.files.get(id)); // random GCM nonces
         assert s.load(pin, false) == null;
@@ -138,6 +148,28 @@ public final class ConnectionPreviewStoreTest {
         assert unresolved.forget(pin);
         unresolved.bind(9, pin); unresolved.context(true, true); fresh = unresolved.begin(9, pin, true);
         assert unresolved.save(fresh, 9, pin, true, true, synthetic);
+
+        // Backgrounding becomes visible to a write already waiting to commit.
+        Fake racing = new Fake(); ConnectionPreviewStore raceStore = new ConnectionPreviewStore(racing);
+        byte[] racePin = new byte[32]; racePin[0] = 42;
+        raceStore.bind(10, racePin); raceStore.context(true, true);
+        var raceTicket = raceStore.begin(10, racePin, true);
+        racing.writeEntered = new java.util.concurrent.CountDownLatch(1);
+        racing.continueWrite = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicBoolean result = new java.util.concurrent.atomic.AtomicBoolean(true);
+        Thread save = new Thread(() -> result.set(raceStore.save(raceTicket, 10, racePin, true, true, synthetic)));
+        Thread pause = new Thread(() -> raceStore.context(true, false));
+        save.start();
+        try {
+            assert racing.writeEntered.await(5, java.util.concurrent.TimeUnit.SECONDS);
+            pause.start();
+            long end = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+            while (pause.getState() != Thread.State.BLOCKED && System.nanoTime() < end) Thread.yield();
+            assert pause.getState() == Thread.State.BLOCKED;
+        } finally { racing.continueWrite.countDown(); }
+        save.join(5000); pause.join(5000);
+        assert !save.isAlive() && !pause.isAlive() && !result.get();
+        assert !racing.files.containsKey(ConnectionPreviewPolicy.fingerprintName(racePin));
         System.out.println("Encrypted preview AAD, lock, tombstone and recovery checks passed (synthetic backend)");
     }
 }

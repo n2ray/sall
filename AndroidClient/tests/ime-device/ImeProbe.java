@@ -1,4 +1,4 @@
-package io.github.n2ray.sill;
+package io.github.n2ray.sall;
 
 import android.app.Activity;
 import android.app.Instrumentation;
@@ -31,7 +31,7 @@ public final class ImeProbe extends Instrumentation {
     @Override public void onStart() {
         Bundle result = new Bundle();
         try {
-            Intent intent = new Intent().setClassName("io.github.n2ray.sill.imeprobe", ImeProbeActivity.class.getName());
+            Intent intent = new Intent().setClassName("io.github.n2ray.sall.imeprobe", ImeProbeActivity.class.getName());
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             activity = (ImeProbeActivity) startActivitySync(intent);
             runOnMainSync(() -> {

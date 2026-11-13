@@ -4,6 +4,11 @@ from probe_sequence import AUTH_REQUIRED, SAME_PROCESS_FAILED, CleanupFailure, r
 
 
 class ProbeSequenceTest(unittest.TestCase):
+    def test_crash_sequence_checks_both_recovery_points(self):
+        calls = []
+        self.assertEqual(run_sequence(lambda name: calls.append(name) or True, crash=True), "passed")
+        self.assertEqual(calls, ["claim", "prepare", "write", "crash_before", "verify_before", "crash_after", "verify_after", "read", "cleanup"])
+
     def test_cleanup_after_claim_timeout(self):
         calls = []
 
@@ -88,6 +93,27 @@ class ProbeSequenceTest(unittest.TestCase):
             return True
         self.assertEqual(run_sequence(phase, authenticate=True), "same_process_failed")
         self.assertEqual(calls, ["claim", "prepare", "write", "auth", "write", "read", "cleanup"])
+
+    def test_credential_only_prompts_even_if_key_already_authorized(self):
+        calls = []
+        self.assertEqual(run_sequence(lambda name: calls.append(name) or True, credential_only=True), "passed")
+        self.assertEqual(calls, ["claim", "prepare", "auth", "write", "read", "cleanup"])
+
+    def test_credential_only_cancel_and_failure_keep_cleanup(self):
+        calls = []
+        def cancelled(name):
+            calls.append(name)
+            return name != "auth"
+        self.assertEqual(run_sequence(cancelled, credential_only=True), "skipped")
+        self.assertEqual(calls, ["claim", "prepare", "auth", "cleanup"])
+        calls.clear()
+        def needs_auth(name):
+            calls.append(name)
+            return AUTH_REQUIRED if name == "write" else True
+        self.assertEqual(run_sequence(needs_auth, credential_only=True), "authentication_required")
+        self.assertEqual(calls, ["claim", "prepare", "auth", "write", "cleanup"])
+        with self.assertRaises(ValueError):
+            run_sequence(lambda name: True, authenticate=True, credential_only=True)
 
 
 if __name__ == "__main__":

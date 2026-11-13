@@ -1,4 +1,4 @@
-package io.github.n2ray.sill;
+package io.github.n2ray.sall;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayDeque;
@@ -109,6 +109,14 @@ public final class AudioRuntimeTest {
         runtime.close();
     }
     public static void main(String[] args) throws Exception {
+        Fake waitingDevice = new Fake(); waitingDevice.noTimestamp = true;
+        AudioRuntime waitingRuntime = new AudioRuntime(waitingDevice, () -> waitingDevice.now);
+        waitingRuntime.format(1, 480, 0, new byte[]{1});
+        for (int i = 0; i < 150; i++)
+            waitingRuntime.packet(packet(i, i == 0), 1000 + i * .01, waitingDevice.now, waitingDevice.now);
+        assert waitingDevice.active;
+        waitingRuntime.close();
+        System.out.println("PASS bounded startup packet rollover while the presentation clock is unavailable");
         sustainedIdle(15_000_000, Integer.MAX_VALUE);
         sustainedIdle(30_000_000, 401); // odd short writes, finite 40 ms device queue.
         System.out.println("PASS sustained READY idle: 15/30ms cadence, finite queue, long/401-float short writes, <=8 calls/tick, mute/resume, both tails, no fill over unresolved PCM");

@@ -1,4 +1,4 @@
-package io.github.n2ray.sill;
+package io.github.n2ray.sall;
 public class FrameGeometryTest {
     public static void main(String[] args) {
         var wide = FrameGeometry.fit(160, 100, 160, 90);

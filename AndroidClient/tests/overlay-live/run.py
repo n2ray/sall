@@ -21,7 +21,7 @@ sys.path.insert(0, str(HERE.parent / 'preview-device'))
 from device_lock import device_package_lock
 from controlled_build import patch
 
-PACKAGE = 'io.github.n2ray.sill'
+PACKAGE = 'io.github.n2ray.sall'
 parser = argparse.ArgumentParser(description='Temporarily test a same-Mac-only external pairing link')
 parser.add_argument('serial', help='adb USB serial')
 parser.add_argument('--seconds', type=int, default=300, help='test window, 30–600 seconds')
@@ -85,7 +85,7 @@ with device_package_lock(args.serial, PACKAGE):
         print(' '.join(shlex.quote(str(x)) for x in adb + ['install', '-r', backup]), flush=True)
         project = tmp / 'project'
         shutil.copytree(root, project, ignore=shutil.ignore_patterns('build', '.gradle', 'artifacts', '__pycache__'))
-        activity = project / 'app/src/main/java/io/github/n2ray/sill/MainActivity.java'
+        activity = project / 'app/src/main/java/io/github/n2ray/sall/MainActivity.java'
         activity.write_text(patch(activity.read_text()))
         run([os.environ.get('SILL_GRADLE', 'gradle'), '--no-daemon', 'assembleDebug'], timeout=300, cwd=project)
         probe = project / 'app/build/outputs/apk/debug/app-debug.apk'

@@ -1,4 +1,4 @@
-package io.github.n2ray.sill;
+package io.github.n2ray.sall;
 
 public final class TourPlacementTest {
     static void check(boolean value, String message) { if (!value) throw new AssertionError(message); }

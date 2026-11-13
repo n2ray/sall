@@ -1,4 +1,4 @@
-package io.github.n2ray.sill;
+package io.github.n2ray.sall;
 public final class ClipboardChangeTrackerTest {
     public static void main(String[] args) {
         ClipboardChangeTracker t = new ClipboardChangeTracker();

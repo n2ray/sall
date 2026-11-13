@@ -1,0 +1,10 @@
+Sall is an unofficial Android client derived from Sill.
+Sill: Copyright 2026 Noah Saffer and contributors.
+Sall modifications: n2ray and contributors.
+
+Sall includes ZXing Android Embedded 4.3.0 by Journey Mobile, Inc. and contributors,
+and ZXing core 3.4.1 by the ZXing authors. Both are provided under Apache License 2.0.
+https://github.com/journeyapps/zxing-android-embedded
+https://github.com/zxing/zxing
+
+The Apache License 2.0 text is included as APACHE-2.0.txt in this directory.

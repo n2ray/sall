@@ -1,4 +1,4 @@
-package io.github.n2ray.sill;
+package io.github.n2ray.sall;
 
 import android.app.Activity;
 import android.app.Instrumentation;
@@ -18,11 +18,11 @@ import javax.crypto.spec.GCMParameterSpec;
 
 /** Synthetic data only, in a run-unique namespace; never reads app previews or preferences. */
 public final class PreviewProbe extends Instrumentation {
-    private String phase, token, ownerNonce;
+    private String phase, token, ownerNonce, authMode;
     private long startedAt;
     @Override public void onCreate(Bundle args) {
         super.onCreate(args); phase = args.getString("phase", ""); token = args.getString("token", "");
-        ownerNonce = args.getString("owner", ""); start();
+        ownerNonce = args.getString("owner", ""); authMode = args.getString("auth_mode", "mixed"); start();
     }
     @Override public void onStart() {
         startedAt = SystemClock.elapsedRealtime();
@@ -30,6 +30,7 @@ public final class PreviewProbe extends Instrumentation {
         try {
             if (!token.matches("[0-9a-f]{32}") || !ownerNonce.matches("[0-9a-f]{32}"))
                 throw new AssertionError("invalid synthetic namespace");
+            if (!authMode.equals("mixed") && !authMode.equals("credential")) throw new AssertionError("invalid auth mode");
             Context context = getTargetContext();
             AndroidConnectionPreviewBackend backend = AndroidConnectionPreviewBackend.probe(context, token, phase.equals("prepare"));
             byte[] pin = MessageDigest.getInstance("SHA-256").digest(("preview-probe:" + token).getBytes(StandardCharsets.US_ASCII));
@@ -65,16 +66,18 @@ public final class PreviewProbe extends Instrumentation {
                     if (!backend.available()) { finishResult(result, "SKIP: device not securely unlocked", Activity.RESULT_OK); return; }
                     verifyKey(alias, created);
                     PreviewAuthActivity.prepare();
-                    Intent intent = new Intent(context, PreviewAuthActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    Intent intent = new Intent(context, PreviewAuthActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            .putExtra("credential_only", authMode.equals("credential"));
                     Activity prompt = startActivitySync(intent);
                     if (!PreviewAuthActivity.await()) {
                         runOnMainSync(prompt::finish);
                         finishResult(result, "SKIP: authentication timed out", Activity.RESULT_OK); return;
                     }
+                    result.putString("auth_type", PreviewAuthActivity.authenticationType());
+                    if (!PreviewAuthActivity.exceptionType().isEmpty()) result.putString("exception", PreviewAuthActivity.exceptionType());
                     if (!PreviewAuthActivity.accepted()) {
                         finishResult(result, "SKIP: authentication cancelled or unavailable", Activity.RESULT_OK); return;
                     }
-                    result.putString("auth_type", PreviewAuthActivity.authenticationType());
                     verifyKey(alias, created);
                     long cryptoStart = SystemClock.elapsedRealtime();
                     try {
@@ -117,6 +120,31 @@ public final class PreviewProbe extends Instrumentation {
                     byte[] ciphertext = backend.read(identity, 2_000_032);
                     if (ciphertext == null || contains(ciphertext, sample)) throw new AssertionError("plaintext present in cache");
                     Arrays.fill(sample, (byte) 0);
+                } else if (phase.equals("crash_before") || phase.equals("crash_after")) {
+                    if (!backend.available()) throw new AssertionError("device locked");
+                    verifyKey(alias, created);
+                    ConnectionPreviewStore store = new ConnectionPreviewStore(backend);
+                    store.bind(3, pin); store.context(true, true);
+                    ConnectionPreviewPolicy.Ticket ticket = store.begin(3, pin, true);
+                    AndroidConnectionPreviewBackend.probeCrashPoint = phase.substring("crash_".length());
+                    AndroidConnectionPreviewBackend.probeCrashMarker = new File(ownerDir, token + "." + AndroidConnectionPreviewBackend.probeCrashPoint);
+                    store.save(ticket, 3, pin, true, true, "new synthetic bytes".getBytes(StandardCharsets.US_ASCII));
+                    throw new AssertionError("crash hook did not terminate process");
+                } else if (phase.equals("verify_before") || phase.equals("verify_after")) {
+                    String point = phase.substring("verify_".length());
+                    if (!new File(ownerDir, token + "." + point).isFile()) throw new AssertionError("crash marker missing");
+                    ConnectionPreviewStore store = new ConnectionPreviewStore(backend);
+                    store.bind(4, pin); store.context(true, true);
+                    byte[] actual = store.load(pin, true);
+                    byte[] expected = point.equals("before") ? sample() : "new synthetic bytes".getBytes(StandardCharsets.US_ASCII);
+                    if (!Arrays.equals(actual, expected)) throw new AssertionError("atomic recovery failed");
+                    Arrays.fill(actual, (byte) 0); Arrays.fill(expected, (byte) 0);
+                    if (point.equals("after")) {
+                        ConnectionPreviewPolicy.Ticket ticket = store.begin(4, pin, true);
+                        byte[] reset = sample();
+                        if (!store.save(ticket, 4, pin, true, true, reset)) throw new AssertionError("reset failed");
+                        Arrays.fill(reset, (byte) 0);
+                    }
                 } else if (phase.equals("read")) {
                     if (!backend.available()) { finishResult(result, "SKIP: device not securely unlocked", Activity.RESULT_OK); return; }
                     verifyKey(alias, created);
@@ -140,6 +168,10 @@ public final class PreviewProbe extends Instrumentation {
                     if ((cache.exists() && !cache.delete()) || (markers.exists() && !markers.delete())
                             || (created.exists() && !created.delete()) || !owner.delete())
                         throw new AssertionError("synthetic namespace cleanup failed");
+                    for (String point : new String[]{"before", "after"}) {
+                        File marker = new File(ownerDir, token + "." + point);
+                        if (marker.exists() && !marker.delete()) throw new AssertionError("crash marker cleanup failed");
+                    }
                     ownerDir.delete();
                 } else throw new AssertionError("invalid phase");
             }

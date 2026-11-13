@@ -1,7 +1,7 @@
 """Apply the narrowly scoped live-probe changes to a temporary source copy only."""
 
 def patch(source):
-    old_flag = 'private static final boolean OVERLAY_EXTERNAL_ENABLED = false;'
+    old_flag = 'private static final boolean OVERLAY_EXTERNAL_ENABLED = true;'
     new_flag = 'private static final boolean OVERLAY_EXTERNAL_ENABLED = true;'
     anchor = '            overlayPairing.session(owner, owner.peerFingerprint()); overlayOwner = owner;'
     route = ('        if (connection != null) {\n'
@@ -10,14 +10,14 @@ def patch(source):
              '            return;\n'
              '        }')
     session_bar = '        LinearLayout bar = new LinearLayout(this); sessionBar = bar; bar.setGravity(android.view.Gravity.CENTER_VERTICAL); sessionPanel.addView(bar);'
-    stop = '@Override protected void onStop() { closeOverlayPair();'
-    destroy = '@Override protected void onDestroy() {\n        closeOverlayPair();'
+    stop = '@Override protected void onStop() { closeHomeAsk(); closePairLinkInput(); closeOverlayPair();'
+    destroy = '@Override protected void onDestroy() {\n        previewGeneration++; memoryPreviews.clear(); sessionScanOwner = null;\n        closeHomeAsk(); closePairLinkInput(); closeOverlayPair();'
     method = '    private void openOverlayPair(PairLink supplied) {'
     intent = '    private void handlePairIntent(android.content.Intent intent) {\n'
-    revoke = '        if (old != null) ui.post(() -> { if (overlayOwner == old) closeOverlayPair(); });'
+    revoke = '        if (old != null) ui.post(() -> { if (homeAsk != null && homeAsk.owner == old) closeHomeAsk(); if (pairLinkInputOwner == old) closePairLinkInput(); if (overlayOwner == old) closeOverlayPair(); });'
     if any(source.count(x) != 1 for x in (old_flag, anchor, route, session_bar, stop, destroy, method, intent, revoke)):
         raise RuntimeError('Unexpected overlay source; refusing to build probe')
-    guard = ('            if (!java.security.MessageDigest.isEqual(supplied.fingerprint(), owner.peerFingerprint())) {\n'
+    guard = ('            if (!OverlayPairingAuthorization.matchesSession(owner.peerFingerprint(), supplied.fingerprint())) {\n'
              '                supplied.clearSecret(); show("测试版只允许配对当前连接的 Mac。"); return;\n'
              '            }\n')
     probe_methods = '''    private android.app.AlertDialog probeInputDialog;
@@ -70,7 +70,7 @@ def patch(source):
             .replace(route, '        if (link != null) { openOverlayPair(link); return; }', 1)
             .replace(method, probe_methods + method, 1)
             .replace(intent, intent + '        if (probeInputDialog != null) closeProbeInput();\n', 1)
-            .replace(revoke, '        if (old != null) ui.post(() -> { if (probeInputOwner == old) closeProbeInput(); if (overlayOwner == old) closeOverlayPair(); });', 1)
+            .replace(revoke, '        if (old != null) ui.post(() -> { if (probeInputOwner == old) closeProbeInput(); if (homeAsk != null && homeAsk.owner == old) closeHomeAsk(); if (pairLinkInputOwner == old) closePairLinkInput(); if (overlayOwner == old) closeOverlayPair(); });', 1)
             .replace(session_bar, probe_button + session_bar, 1)
-            .replace(stop, '@Override protected void onStop() { closeProbeInput(); closeOverlayPair();', 1)
-            .replace(destroy, '@Override protected void onDestroy() {\n        closeProbeInput();\n        closeOverlayPair();', 1))
+            .replace(stop, '@Override protected void onStop() { closeProbeInput(); closeHomeAsk(); closePairLinkInput(); closeOverlayPair();', 1)
+            .replace(destroy, '@Override protected void onDestroy() {\n        closeProbeInput();\n        previewGeneration++; memoryPreviews.clear(); sessionScanOwner = null;\n        closeHomeAsk(); closePairLinkInput(); closeOverlayPair();', 1))

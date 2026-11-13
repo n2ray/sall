@@ -1,4 +1,4 @@
-package io.github.n2ray.sill;
+package io.github.n2ray.sall;
 
 import java.io.Closeable;
 import java.net.ConnectException;
@@ -35,6 +35,12 @@ public final class RemoteDialTest {
                 List.of(new SavedMacs.Remembered(new SavedMacs.Advertised(vpn, "vpn"), now - SavedMacs.REMEMBER_FOR - 1)), now);
         check(RemoteDial.order(List.of(expired), pin, vpn, false).equals(List.of(lan)),
                 "Expired lastWorked/requested paths cannot return to automatic fallback");
+        check(RemoteDial.reconnectOrder(List.of(), pin, lan, true, null).equals(List.of(lan)),
+                "unsaved open-door first dial uses only selected local endpoint");
+        check(RemoteDial.reconnectOrder(List.of(), pin, lan, false, lan).equals(List.of(lan)),
+                "unsaved open-door reconnect retains only verified endpoint");
+        check(RemoteDial.reconnectOrder(List.of(), pin, lan, false, null).isEmpty(),
+                "unsaved open-door route is not retained across runs");
         AtomicInteger calls = new AtomicInteger();
         Resource first = new Resource(), winner = new Resource();
         var result = RemoteDial.connect(List.of(lan, vpn), pin, new RemoteDial.Attempt(), (endpoint, identity, attempt) -> {

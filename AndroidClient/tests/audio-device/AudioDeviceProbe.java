@@ -1,4 +1,4 @@
-package io.github.n2ray.sill;
+package io.github.n2ray.sall;
 
 import android.app.Instrumentation;
 import android.app.Activity;
@@ -27,8 +27,16 @@ public final class AudioDeviceProbe extends Instrumentation {
                 () -> decodeScenario(512, false), () -> decodeScenario(512, true),
                 () -> runtimeScenario(480, false), () -> runtimeScenario(480, true),
                 () -> runtimeScenario(512, false), () -> runtimeScenario(512, true));
-        result.putString("result", (report.passed() ? "PASS" : "FAIL") + ": " + report.detail());
-        finish(report.passed() ? Activity.RESULT_OK : Activity.RESULT_CANCELED, result);
+        String player;
+        boolean playerPassed = false;
+        try {
+            Properties fixture = new Properties();
+            try (var input = getTargetContext().getAssets().open("audio-silence.properties")) { fixture.load(input); }
+            player = AudioPlayerProbe.run(fixture); playerPassed = true;
+        } catch (Throwable failure) { player = "FAIL: " + failure.getClass().getSimpleName() + ": " + failure.getMessage(); }
+        boolean passed = report.passed() && playerPassed;
+        result.putString("result", (passed ? "PASS" : "FAIL") + ": " + report.detail() + "; Player " + player);
+        finish(passed ? Activity.RESULT_OK : Activity.RESULT_CANCELED, result);
     }
 
     private AudioProbeChecks.Result decodeScenario(int frames, boolean decoderSpecific) throws Exception {

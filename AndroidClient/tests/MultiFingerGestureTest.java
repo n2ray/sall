@@ -1,4 +1,4 @@
-package io.github.n2ray.sill;
+package io.github.n2ray.sall;
 
 public final class MultiFingerGestureTest {
     private static MultiFingerGesture start(int fingers) {

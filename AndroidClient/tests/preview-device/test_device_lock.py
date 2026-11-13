@@ -12,7 +12,7 @@ from device_lock import device_package_lock
 class DeviceLockTest(unittest.TestCase):
     def test_same_device_and_package_rejected_until_owner_exits(self):
         serial = "synthetic-" + uuid.uuid4().hex
-        package = "io.github.n2ray.sill"
+        package = "io.github.n2ray.sall"
         code = (
             "import sys; from device_lock import device_package_lock; "
             "guard=device_package_lock(sys.argv[1], sys.argv[2]); guard.__enter__(); "

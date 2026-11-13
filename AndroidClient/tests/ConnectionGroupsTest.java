@@ -1,4 +1,4 @@
-package io.github.n2ray.sill;
+package io.github.n2ray.sall;
 import java.util.List;
 import java.util.Map;
 public final class ConnectionGroupsTest {

@@ -15,6 +15,9 @@ AuthKey_*
 *.provisionprofile
 *.keychain
 *.keychain-db
+*.jks
+*.keystore
+AndroidClient/.sall-signing/
 
 # The sizzle reel's renders (design/reel, over a gigabyte): kept out of git.
 design/reel/

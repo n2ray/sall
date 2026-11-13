@@ -95,10 +95,10 @@ stimulus.write_text('\n'.join(commands) + '\n')
 java_home = pathlib.Path('/Library/Java/JavaVirtualMachines/jdk-21.jdk/Contents/Home')
 classes = out / 'classes'; classes.mkdir(exist_ok=True)
 subprocess.run([str(java_home / 'bin/javac'), '-d', str(classes),
-                str(root / 'AndroidClient/app/src/main/java/io/github/n2ray/sill/AudioPlayout.java'),
+                str(root / 'AndroidClient/app/src/main/java/io/github/n2ray/sall/AudioPlayout.java'),
                 str(root / 'AndroidClient/tests/AudioPlayoutTrace.java')], check=True)
 subprocess.run(['swiftc', '-module-cache-path', str(out / 'swift-module-cache'), '-O', str(root / 'iOSClient/AudioPlayout.swift'), str(pathlib.Path(__file__).with_name('main.swift')), '-o', str(out / 'swift-reference')], check=True)
-for name, cmd in [('swift', [str(out / 'swift-reference')]), ('java', [str(java_home / 'bin/java'), '-cp', str(classes), 'io.github.n2ray.sill.AudioPlayoutTrace'])]:
+for name, cmd in [('swift', [str(out / 'swift-reference')]), ('java', [str(java_home / 'bin/java'), '-cp', str(classes), 'io.github.n2ray.sall.AudioPlayoutTrace'])]:
     with stimulus.open() as stdin, (out / (name + '.txt')).open('w') as stdout:
         subprocess.run(cmd, stdin=stdin, stdout=stdout, check=True)
 

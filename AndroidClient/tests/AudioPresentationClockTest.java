@@ -1,4 +1,4 @@
-package io.github.n2ray.sill;
+package io.github.n2ray.sall;
 
 public final class AudioPresentationClockTest {
     public static void main(String[] args) {
@@ -24,6 +24,13 @@ public final class AudioPresentationClockTest {
         assert clock.startupSilence(g, start + 101_000_000) == 0;
         assert clock.observe(g, 4800, start + 100_000_000, start + 200_000_000, 4800) == AudioPresentationClock.State.READY;
         assert clock.check(start + 351_000_000) == AudioPresentationClock.State.FAILED;
+        g = clock.reset(start);
+        clock.observe(g, 0, start, start, 10000);
+        clock.observe(g, 2400, start + 50_000_000, start + 50_000_000, 10000);
+        clock.observe(g, 4800, start + 100_000_000, start + 100_000_000, 10000);
+        assert clock.observe(g, 6720, start + 145_100_000, start + 145_100_000, 10000) == AudioPresentationClock.State.READY;
+        assert clock.observe(g, 8640, start + 185_100_000, start + 185_100_000, 10000) == AudioPresentationClock.State.READY;
+        assert clock.observe(g, 9600, start + 220_100_000, start + 220_100_000, 10000) == AudioPresentationClock.State.FAILED;
         g = clock.reset(start);
         assert clock.observe(g - 1, 0, start, start, 0) == AudioPresentationClock.State.STALE;
         assert clock.observe(g, 481, start, start, 480) == AudioPresentationClock.State.STARTING;

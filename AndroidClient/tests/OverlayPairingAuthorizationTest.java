@@ -1,4 +1,4 @@
-package io.github.n2ray.sill;
+package io.github.n2ray.sall;
 
 import java.io.Closeable;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -11,6 +11,10 @@ public final class OverlayPairingAuthorizationTest {
         Object stream = new Object(), newStream = new Object();
         byte[] mac = new byte[32], other = new byte[32]; other[0] = 1;
         AtomicInteger saved = new AtomicInteger();
+        check(OverlayPairingAuthorization.matchesSession(mac, mac.clone()), "same Mac accepted");
+        check(!OverlayPairingAuthorization.matchesSession(mac, other), "different Mac rejected");
+        check(!OverlayPairingAuthorization.matchesSession(null, mac), "missing identity rejected");
+        check(!OverlayPairingAuthorization.matchesSession(new byte[31], mac), "invalid fingerprint rejected");
         p.session(stream, mac);
         var first = p.begin(stream, other, 100, 0);
         check(!p.targetsStream(first), "different Mac does not acquire stream identity");
