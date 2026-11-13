@@ -2,8 +2,11 @@ package io.github.n2ray.sill;
 
 import android.content.Context;
 import android.graphics.Canvas;
-import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.LinearGradient;
+import android.graphics.Path;
+import android.graphics.RectF;
+import android.graphics.Shader;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
@@ -27,6 +30,7 @@ final class TextScaleControl extends Button {
     private float downX;
     private double start, live;
     private boolean off, tracking;
+    private float stepPixels;
     private final float density;
 
     TextScaleControl(Context context, Delegate delegate) {
@@ -49,17 +53,24 @@ final class TextScaleControl extends Button {
                 off = delegate.offersOff(); start = live = TextScale.position(delegate.scale(), off);
                 downX = event.getRawX(); tracking = true;
                 getParent().requestDisallowInterceptTouchEvent(true);
+                boolean landscape = getRootView().getWidth() > getRootView().getHeight();
+                float step = landscape ? (getHeight() / density >= 60 ? 44 : 40)
+                        : Math.max(1, Math.min(36, ((getLeft() + getWidth() / 2f) / density * 2 - 60) / 4));
+                stepPixels = step * density;
+                int rulerWidth = Math.round((4 * step + 60) * density);
                 ruler = new Ruler(getContext());
-                popup = new PopupWindow(ruler, Math.round(236 * density), Math.round(58 * density), false);
+                int rulerHeight = ruler.heightFor(getHeight());
+                popup = new PopupWindow(ruler, rulerWidth, rulerHeight, false);
                 popup.setTouchable(false); popup.setClippingEnabled(true);
                 int[] location = new int[2]; getLocationOnScreen(location);
                 popup.showAtLocation(this, Gravity.TOP | Gravity.LEFT,
-                        location[0] + getWidth() / 2 - Math.round(118 * density), location[1]);
+                        location[0] + getWidth() / 2 - rulerWidth / 2,
+                        location[1] + (getHeight() - rulerHeight) / 2);
                 return true;
             case MotionEvent.ACTION_MOVE:
                 if (!tracking) return false;
                 if (!delegate.canCommit()) { cancel("state changed"); return true; }
-                double next = TextScale.snap(start + (event.getRawX() - downX) / (44 * density) * .25, off);
+                double next = TextScale.snap(start + (event.getRawX() - downX) / stepPixels * .25, off);
                 if (next != live) { live = next; ruler.invalidate(); performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK); }
                 return true;
             case MotionEvent.ACTION_UP:
@@ -80,11 +91,16 @@ final class TextScaleControl extends Button {
     private void cancel(String reason) {
         if (tracking && !reason.equals("released")) android.util.Log.i("SillAndroid", "Aa: cancelled (" + reason + ")");
         tracking = false;
+        if (getParent() != null) getParent().requestDisallowInterceptTouchEvent(false);
         if (popup != null) popup.dismiss();
         popup = null; ruler = null;
     }
     @Override public void onInitializeAccessibilityNodeInfo(AccessibilityNodeInfo info) {
         super.onInitializeAccessibilityNodeInfo(info);
+        info.setClassName("android.widget.SeekBar");
+        info.setEnabled(delegate.available());
+        info.setRangeInfo(AccessibilityNodeInfo.RangeInfo.obtain(AccessibilityNodeInfo.RangeInfo.RANGE_TYPE_FLOAT,
+                delegate.offersOff() ? .25f : .5f, 1.5f, (float) TextScale.position(delegate.scale(), delegate.offersOff())));
         if (delegate.available()) {
             info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_FORWARD);
             info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_BACKWARD);
@@ -102,20 +118,65 @@ final class TextScaleControl extends Button {
     }
     private final class Ruler extends View {
         private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-        Ruler(Context context) { super(context); }
+        private float middleY, titleTop, labelsTop;
+        Ruler(Context context) { super(context); setLayerType(View.LAYER_TYPE_SOFTWARE, null); }
+        int heightFor(int buttonHeight) {
+            p.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.BOLD));
+            p.setTextSize(android.util.TypedValue.applyDimension(android.util.TypedValue.COMPLEX_UNIT_SP, 13, getResources().getDisplayMetrics()));
+            float titleHeight = p.descent() - p.ascent();
+            p.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
+            p.setTextSize(android.util.TypedValue.applyDimension(android.util.TypedValue.COMPLEX_UNIT_SP, 10, getResources().getDisplayMetrics()));
+            float labelsHeight = p.descent() - p.ascent();
+            middleY = buttonHeight / 2f + 4 * density;
+            titleTop = Math.max(middleY - 34 * density, -density);
+            labelsTop = middleY + 9 * density;
+            if (titleTop + titleHeight > middleY - 12 * density || labelsTop + labelsHeight > buttonHeight) {
+                titleTop = 2 * density;
+                middleY = titleTop + titleHeight + 14 * density;
+                labelsTop = middleY + 13 * density;
+                return Math.max(buttonHeight, (int) Math.ceil(labelsTop + labelsHeight + 2 * density));
+            }
+            return buttonHeight;
+        }
         @Override protected void onDraw(Canvas c) {
             super.onDraw(c);
-            p.setColor(0xff30343c); c.drawRoundRect(0, 0, getWidth(), getHeight(), 12*density, 12*density, p);
-            float center = getWidth()/2f, y = 22*density, spacing = 44*density;
+            float radius = (TextScaleControl.this.getHeight() / density >= 58 ? 16 : 14) * density;
+            Path outline = new Path();
+            outline.addRoundRect(new RectF(0, 0, getWidth(), getHeight()), radius, radius, Path.Direction.CW);
+            int saved = c.save(); c.clipPath(outline);
+            p.setStyle(Paint.Style.FILL); p.setColor(0xff2c3550);
+            c.drawRoundRect(0, 0, getWidth(), getHeight(), radius, radius, p);
+            float center = getWidth() / 2f, y = middleY;
+            double first = off ? .25 : .5;
+            float firstX = center + (float) ((first - live) / .25) * stepPixels;
+            float lastX = center + (float) ((1.5 - live) / .25) * stepPixels;
+            p.setStrokeWidth(3 * density); p.setStrokeCap(Paint.Cap.ROUND);
+            p.setShader(new LinearGradient(0, 0, getWidth(), 0,
+                    new int[]{0x00c4c9d1, 0x59c4c9d1, 0x59c4c9d1, 0x00c4c9d1},
+                    new float[]{0, .12f, .88f, 1}, Shader.TileMode.CLAMP));
+            c.drawLine(firstX, y, lastX, y, p); p.setShader(null);
+            p.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
+            p.setTextSize(android.util.TypedValue.applyDimension(android.util.TypedValue.COMPLEX_UNIT_SP, 10, getResources().getDisplayMetrics()));
+            boolean sparseLabels = p.measureText("1.25") > stepPixels - 2 * density;
             for (double value = off ? .25 : .5; value <= 1.5; value += .25) {
-                float x = center + (float)((value-live)/.25) * spacing;
+                float x = center + (float)((value-live)/.25) * stepPixels;
                 if (x < 4*density || x > getWidth()-4*density) continue;
-                p.setColor(value == live ? Color.WHITE : 0xffa7adb8); p.setStrokeWidth(2*density);
-                c.drawLine(x, y-4*density, x, y+5*density, p);
-                p.setTextSize(10*density); p.setTextAlign(Paint.Align.CENTER);
-                c.drawText(TextScale.title(value), x, y+20*density, p);
+                float fade = Math.min(1, Math.min(x, getWidth() - x) / (getWidth() * .12f));
+                p.setColor(0xffc4c9d1); p.setAlpha(Math.round(153 * fade)); p.setStrokeWidth(2*density);
+                p.setStrokeCap(Paint.Cap.BUTT); c.drawLine(x, y-4.5f*density, x, y+4.5f*density, p);
+                p.setColor(value == live ? 0xffeef0f3 : 0xffc4c9d1); p.setAlpha(Math.round(255 * fade));
+                p.setTextAlign(Paint.Align.CENTER);
+                String title = TextScale.title(value);
+                String label = value == .25 ? title : title.substring(0, title.length() - 1);
+                if (!sparseLabels || value == live)
+                    c.drawText(label, x, labelsTop - p.ascent(), p);
             }
-            p.setColor(Color.WHITE); c.drawCircle(center, y, 3*density, p);
+            p.setAlpha(255); p.setColor(0xff9bb7ff); p.setShadowLayer(3*density, 0, density, 0x59000000);
+            c.drawCircle(center, y, 11*density, p); p.clearShadowLayer();
+            p.setColor(0xffeef0f3); p.setTextSize(android.util.TypedValue.applyDimension(android.util.TypedValue.COMPLEX_UNIT_SP, 13, getResources().getDisplayMetrics()));
+            p.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.BOLD));
+            c.drawText(TextScale.title(live), center, titleTop - p.ascent(), p);
+            c.restoreToCount(saved);
         }
     }
 }

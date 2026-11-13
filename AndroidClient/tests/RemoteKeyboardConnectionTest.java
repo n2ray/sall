@@ -37,6 +37,32 @@ public final class RemoteKeyboardConnectionTest {
         sink.expect("\n");
 
         keyboard.discard();
+        connection = keyboard.onCreateInputConnection(new EditorInfo());
+        assert connection.setComposingText("我", 1); sink.expect();
+        assert connection.setComposingText("我想", 1); sink.expect();
+        assert connection.setComposingText("我想去", 1); sink.expect();
+        assert connection.commitText("我想去", 1); sink.expect("我想去");
+        assert connection.setComposingRegion(1, 3); sink.expect();
+        assert connection.setComposingText("需要", 1); sink.expect();
+        assert connection.commitText("需要", 1); sink.expect("\b\b", "需要");
+        assert connection.setSelection(1, 3);
+        assert connection.commitText("希望", 1); sink.expect("\b\b", "希望");
+        assert connection.commitText("\n", 1); sink.expect("\n");
+        assert connection.setComposingText("今天", 1); sink.expect();
+        assert connection.commitText("今天", 1); sink.expect("今天");
+        InputConnection discarded = connection;
+        keyboard.discard();
+        assert !discarded.setComposingText("旧", 1);
+        assert !discarded.setComposingRegion(0, 1);
+        assert !discarded.commitText("旧", 1); sink.expect();
+        connection = keyboard.onCreateInputConnection(new EditorInfo());
+        assert connection.commitText("语音", 1); sink.expect("语音");
+        InputConnection finished = connection;
+        keyboard.finishAndForget(); sink.expect();
+        assert !finished.setComposingText("旧", 1);
+        assert !finished.commitText("旧", 1); sink.expect();
+
+        keyboard.discard();
         connection = begin(keyboard, sink);
         assert connection.finishComposingText();
         assert connection.commitText("\n", 1);

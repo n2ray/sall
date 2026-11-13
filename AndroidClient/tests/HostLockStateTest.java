@@ -46,6 +46,22 @@ public final class HostLockStateTest {
         assert !view.onWindowList(false, false, false, 4);
         view.onKeyframePresented(old);
         assert view.needsFreshFrame() && view.shade() == HostLockState.Shade.UNLOCKING;
+        HostLockState lists = new HostLockState(true);
+        int[] published = {0};
+        assert !lists.withPresentedList(() -> published[0]++);
+        long unlocked = lists.onWindowListUpdate(false, false, false, 1).version();
+        long otherUser = lists.onWindowListUpdate(true, true, true, 2).version();
+        assert !lists.presentList(unlocked, () -> published[0]++);
+        assert !lists.withPresentedList(() -> published[0]++);
+        assert lists.presentList(otherUser, () -> published[0]++);
+        assert lists.withPresentedList(() -> published[0]++);
+        lists.onWindowList(true, false, false, 3);
+        long locked = lists.listVersion();
+        lists.onWindowList(false, false, false, 4);
+        assert !lists.presentList(locked, () -> published[0]++);
+        assert !lists.withPresentedList(() -> published[0]++);
+        assert lists.presentList(lists.listVersion(), () -> published[0]++);
+        assert published[0] == 3;
         System.out.println("Host lock state checks passed");
     }
 }

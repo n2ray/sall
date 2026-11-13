@@ -71,6 +71,12 @@ public final class MainActivity extends Activity {
     private final Runnable tourWait = this::considerTour;
     private ScrollView connectionContainer;
     private LinearLayout connectionHome, addMacCard, typedPairing;
+    private LinearLayout pairDetails, pairActions;
+    private TextView pairWords;
+    private boolean pairSideBySide;
+    private InlinePairScanner inlineScanner;
+    private android.app.AlertDialog pairConfirmation;
+    private PairLink confirmationLink;
     private TextView connectionTitle;
     private Button connectionStyle, pairingPath, cancelConnection;
     private android.window.OnBackInvokedCallback addMacBack;
@@ -129,6 +135,9 @@ public final class MainActivity extends Activity {
     private android.app.AlertDialog settingsDialog;
     private Runnable refreshSettingsMute;
     private Runnable refreshInlineHostSettings;
+    private android.widget.PopupMenu qualityMenu;
+    private static final String[] QUALITY_NAMES = {"低", "节省", "均衡", "高", "专业", "极高", "极限"};
+    private static final int[] QUALITY_RATES = {4000000, 8000000, 15000000, 25000000, 40000000, 80000000, 150000000};
     private boolean settingsRestoreKeyboard;
     private SillConnection settingsSession;
     private int lastViewportFps = -1;
@@ -174,7 +183,9 @@ public final class MainActivity extends Activity {
     private static final int MOVE_LEFT_ACTION = 0x00ff0001, MOVE_RIGHT_ACTION = 0x00ff0002;
     private static final int CLOSE_WINDOW_ACTION = 0x00ff0003, MINIMIZE_WINDOW_ACTION = 0x00ff0004, FULL_SCREEN_ACTION = 0x00ff0005;
     private final Runnable drawerUpdate = () -> {
-        if (appDrawer != null && appDrawer.isShowing()) appDrawer.update(drawerWindows, appList, appIcons, activeWindowId, desktopActive);
+        HostLockState lock = hostLock;
+        if (appDrawer != null && appDrawer.isShowing() && lock != null)
+            lock.withPresentedList(() -> appDrawer.update(drawerWindows, appList, appIcons, activeWindowId, desktopActive));
     };
     private int menuVersion, menuToken, pendingMenuToken;
     private boolean menuStale;
@@ -296,8 +307,15 @@ public final class MainActivity extends Activity {
         if (raw != null) handlePairIntent(new android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(raw)));
     }
 
+    @Override public void onRequestPermissionsResult(int request, String[] permissions, int[] results) {
+        super.onRequestPermissionsResult(request, permissions, results);
+        if (request == InlinePairScanner.CAMERA_REQUEST && inlineScanner != null) inlineScanner.permissionResult();
+    }
+
     private void handlePairIntent(android.content.Intent intent) {
         if (intent == null || !android.content.Intent.ACTION_VIEW.equals(intent.getAction()) || intent.getData() == null) return;
+        if (inlineScanner != null) inlineScanner.hold();
+        clearPairConfirmation();
         String raw = intent.getData().toString();
         intent.setData(null);
         final PairLink link;
@@ -307,12 +325,24 @@ public final class MainActivity extends Activity {
         for (PairLink.Address a : link.addresses) message.append("\n").append(a.display(link.port));
         if (link.addresses.isEmpty()) message.append("\n将在本地网络查找此 Mac。");
         message.append("\n\n仅信任来自你自己 Mac 的配对链接。");
+        confirmationLink = link;
         android.app.AlertDialog dialog = new android.app.AlertDialog.Builder(this)
                 .setTitle("确认配对 Mac").setMessage(message.toString())
-                .setNegativeButton("取消", (d, which) -> link.clearSecret())
-                .setPositiveButton("配对", (d, which) -> pairLink(link))
-                .setOnCancelListener(d -> link.clearSecret()).create();
+                .setNegativeButton("取消", (d, which) -> clearPairConfirmation())
+                .setPositiveButton("配对", (d, which) -> {
+                    if (confirmationLink != link) return;
+                    confirmationLink = null; pairConfirmation = null; pairLink(link);
+                })
+                .setOnCancelListener(d -> clearPairConfirmation()).create();
+        pairConfirmation = dialog;
         dialog.show();
+    }
+
+    private void clearPairConfirmation() {
+        PairLink link = confirmationLink; confirmationLink = null;
+        android.app.AlertDialog dialog = pairConfirmation; pairConfirmation = null;
+        if (link != null) link.clearSecret();
+        if (dialog != null) dialog.dismiss();
     }
 
     private void pairLink(PairLink link) {
@@ -395,11 +425,13 @@ public final class MainActivity extends Activity {
         android.widget.FrameLayout.LayoutParams column = new android.widget.FrameLayout.LayoutParams(dp(380), -2, android.view.Gravity.CENTER);
         space.addView(connectionPanel, column); root.addView(connectionContainer, new LinearLayout.LayoutParams(-1, -1));
         connectionContainer.addOnLayoutChangeListener((v, left, top, right, bottom, ol, ot, oright, ob) -> {
-            int width = Math.max(1, Math.min(dp(380), right - left - dp(8)));
+            boolean side = addingMac && !typingPairing && bottom - top < dp(520) && right - left >= dp(540);
+            int width = Math.max(1, Math.min(dp(side ? 620 : 380), right - left - dp(8)));
             android.widget.FrameLayout.LayoutParams p = (android.widget.FrameLayout.LayoutParams) connectionPanel.getLayoutParams();
             if (p.width != width) { p.width = width; connectionPanel.setLayoutParams(p); }
             int columns = width >= dp(340) && getResources().getConfiguration().fontScale < 1.3f ? 2 : 1;
             if (columns != savedMacColumns) { savedMacColumns = columns; refreshSavedMacs(); }
+            if (pairSideBySide != side) connectionContainer.post(this::updatePairingGeometry);
         });
         connectionContainer.setOnApplyWindowInsetsListener((view, insets) -> {
             if (android.os.Build.VERSION.SDK_INT >= 30) {
@@ -449,14 +481,15 @@ public final class MainActivity extends Activity {
         updateConnectionCancel();
         addMacCard = new LinearLayout(this); addMacCard.setOrientation(LinearLayout.VERTICAL);
         addMacCard.setPadding(dp(10), 0, dp(10), 0); connectionPanel.addView(addMacCard);
-        TextView words = new TextView(this); words.setTextSize(13); words.setTextColor(0xffa4abb5);
-        words.setText("配对一次后，即可通过 VPN 或网络连接这台 Mac。\n在 Mac 的 Sill 菜单中打开配对窗口。");
-        addMacCard.addView(words);
-        Button scan = button(addMacCard, "扫描 Mac 上的配对码", v -> {
-            if (!running) startActivityForResult(new android.content.Intent(this, PairScannerActivity.class), 102);
+        pairWords = new TextView(this); pairWords.setTextSize(13); pairWords.setTextColor(0xffa4abb5);
+        pairWords.setText("配对一次后，即可通过 VPN 或网络连接这台 Mac。\n在 Mac 的 Sill 菜单中打开配对窗口。");
+        addMacCard.addView(pairWords);
+        inlineScanner = new InlinePairScanner(this, raw -> {
+            if (!running && addingMac && !typingPairing)
+                handlePairIntent(new android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(raw)));
         });
-        scan.setTextSize(15); scan.setTextColor(0xffeef0f3); scan.setBackground(shape(0xff23262c, 12));
-        LinearLayout.LayoutParams scanParams = new LinearLayout.LayoutParams(-1, dp(72)); scanParams.topMargin = dp(10); scan.setLayoutParams(scanParams);
+        LinearLayout.LayoutParams scanParams = new LinearLayout.LayoutParams(-1, -2); scanParams.topMargin = dp(10);
+        addMacCard.addView(inlineScanner, scanParams);
         typedPairing = new LinearLayout(this); typedPairing.setOrientation(LinearLayout.VERTICAL); addMacCard.addView(typedPairing);
         host = field("Mac IP 或 Tailscale 地址", getPreferences(0).getString("host", ""));
         port = field("端口", getPreferences(0).getString("port", "7455")); port.setInputType(2);
@@ -465,11 +498,12 @@ public final class MainActivity extends Activity {
         pair.setTextSize(15); pair.setTextColor(android.graphics.Color.BLACK); pair.setBackground(shape(0xff9bb7ff, 12));
         LinearLayout.LayoutParams pairParams = new LinearLayout.LayoutParams(dp(88), dp(44)); pairParams.topMargin = dp(8); pair.setLayoutParams(pairParams);
         connectionLink(typedPairing, "连接已配对的 Mac", v -> start(false));
-        LinearLayout actions = new LinearLayout(this); addMacCard.addView(actions);
-        pairingPath = connectionLink(actions, "", v -> setAddingMac(true, !typingPairing));
+        pairActions = new LinearLayout(this); addMacCard.addView(pairActions);
+        pairingPath = connectionLink(pairActions, "", v -> setAddingMac(true, !typingPairing));
         LinearLayout.LayoutParams pathParams = new LinearLayout.LayoutParams(-2, dp(44)); pathParams.rightMargin = dp(18); pairingPath.setLayoutParams(pathParams);
-        connectionLink(actions, "取消", v -> closeAddMac());
-        scan.setTag("scanner"); setAddingMac(false, false); updateConnectionStyle();
+        connectionLink(pairActions, "取消", v -> closeAddMac());
+        pairDetails = new LinearLayout(this); pairDetails.setOrientation(LinearLayout.VERTICAL);
+        inlineScanner.setTag("scanner"); setAddingMac(false, false); updateConnectionStyle();
     }
     private Button connectionLink(LinearLayout parent, String label, android.view.View.OnClickListener action) {
         Button b = button(parent, label, action); b.setTextSize(15); b.setTextColor(0xff9bb7ff);
@@ -482,6 +516,8 @@ public final class MainActivity extends Activity {
         connectionStyle.setContentDescription(connectionTiles ? "显示为列表" : "显示为卡片");
     }
     private void setAddingMac(boolean adding, boolean typed) {
+        if (!adding && addingMac) clearPairConfirmation();
+        if (inlineScanner != null && (addingMac != adding || typingPairing != typed)) inlineScanner.reset();
         if (addingMac && (!adding || typingPairing != typed)) {
             android.view.View focused = getCurrentFocus();
             if (focused == host || focused == port || focused == code) {
@@ -506,10 +542,46 @@ public final class MainActivity extends Activity {
         typedPairing.setVisibility(typed ? android.view.View.VISIBLE : android.view.View.GONE);
         android.view.View scanner = addMacCard.findViewWithTag("scanner");
         if (scanner != null) scanner.setVisibility(typed ? android.view.View.GONE : android.view.View.VISIBLE);
+        if (inlineScanner != null) inlineScanner.setVisible(adding && !typed && !running);
         pairingPath.setText(typed ? "改为扫码" : "手动输入配对码");
+        connectionContainer.post(this::updatePairingGeometry);
+    }
+    private void updatePairingGeometry() {
+        int width = connectionContainer.getWidth(), height = connectionContainer.getHeight();
+        if (width <= 0 || height <= 0) return;
+        boolean side = addingMac && !typingPairing && height < dp(520) && width >= dp(540);
+        int columnWidth = Math.max(1, Math.min(dp(side ? 620 : 380), width - dp(8)));
+        android.widget.FrameLayout.LayoutParams p = (android.widget.FrameLayout.LayoutParams) connectionPanel.getLayoutParams();
+        if (p.width != columnWidth) { p.width = columnWidth; connectionPanel.setLayoutParams(p); }
+        layoutPairingCard(side);
+    }
+    private void layoutPairingCard(boolean side) {
+        if (pairSideBySide == side || inlineScanner == null) return;
+        pairSideBySide = side;
+        inlineScanner.setVisible(false);
+        if (side) {
+            addMacCard.removeView(pairWords); addMacCard.removeView(inlineScanner);
+            addMacCard.removeView(typedPairing); addMacCard.removeView(pairActions);
+            addMacCard.setOrientation(LinearLayout.HORIZONTAL);
+            inlineScanner.setCompact(true);
+            addMacCard.addView(inlineScanner, new LinearLayout.LayoutParams(dp(260), -2));
+            pairDetails.addView(pairWords); pairDetails.addView(typedPairing); pairDetails.addView(pairActions);
+            LinearLayout.LayoutParams details = new LinearLayout.LayoutParams(0, -2, 1); details.leftMargin = dp(16);
+            addMacCard.addView(pairDetails, details);
+        } else {
+            pairDetails.removeView(pairWords); pairDetails.removeView(typedPairing); pairDetails.removeView(pairActions);
+            addMacCard.removeView(pairDetails); addMacCard.removeView(inlineScanner);
+            addMacCard.setOrientation(LinearLayout.VERTICAL);
+            inlineScanner.setCompact(false);
+            addMacCard.addView(pairWords);
+            LinearLayout.LayoutParams scan = new LinearLayout.LayoutParams(-1, -2); scan.topMargin = dp(10);
+            addMacCard.addView(inlineScanner, scan); addMacCard.addView(typedPairing); addMacCard.addView(pairActions);
+        }
+        inlineScanner.setVisible(addingMac && !typingPairing && !running);
     }
     private void updateConnectionCancel() {
         if (cancelConnection != null) cancelConnection.setVisibility(running ? android.view.View.VISIBLE : android.view.View.GONE);
+        if (inlineScanner != null) inlineScanner.setVisible(addingMac && !typingPairing && !running);
     }
     private void cancelConnectionAttempt() {
         if (running) {
@@ -1203,8 +1275,18 @@ public final class MainActivity extends Activity {
             ((android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(keyboard.getWindowToken(), 0);
             keyboard.clearFocus();
         }
-        appDrawer.show(drawerWindows, appList, appIcons, activeWindowId, desktopActive, picture,
-                sessionLayer, sessionPanel, sessionBar, root.getWidth() > root.getHeight(), largerPictureApplied);
+        HostLockState drawerLock = hostLock;
+        appDrawer.setLock(drawerLock == null ? HostLockState.Reason.NONE : drawerLock.reason(),
+                drawerLock != null && drawerLock.viewOnly(), windowOrderMac);
+        if (drawerLock == null || !drawerLock.withPresentedList(() -> {
+            appDrawer.acceptLockList();
+            appDrawer.show(drawerWindows, appList, appIcons, activeWindowId, desktopActive, picture,
+                    sessionLayer, sessionPanel, sessionBar, root.getWidth() > root.getHeight(), largerPictureApplied);
+        })) {
+            appDrawer.awaitLockList();
+            appDrawer.show(new JSONArray(), new JSONArray(), java.util.Collections.emptyMap(), -1, false, picture,
+                    sessionLayer, sessionPanel, sessionBar, root.getWidth() > root.getHeight(), largerPictureApplied);
+        }
     }
     private void refreshDrawer() { ui.removeCallbacks(drawerUpdate); ui.postDelayed(drawerUpdate, 250); }
     private void dismissMenu() {
@@ -1528,6 +1610,7 @@ public final class MainActivity extends Activity {
                     + "|" + values.opt("sendAudio") + "|" + state.opt("virtualDisplayAvailable") + "|" + state.opt("virtualDisplayNote");
             snapshot += "|" + pendingSettingsToken + "|" + pendingSettingsField;
             if (snapshot.equals(hostSnapshot[0])) return;
+            if (qualityMenu != null) { qualityMenu.dismiss(); qualityMenu = null; }
             hostSnapshot[0] = snapshot; hostRows.removeAllViews();
             if (values == null) { addSettingsNote(hostRows, "正在等待 Mac 提供设置。"); return; }
             LinearLayout streamGroup = new LinearLayout(this); streamGroup.setOrientation(LinearLayout.VERTICAL);
@@ -1648,18 +1731,79 @@ public final class MainActivity extends Activity {
             android.view.View line = new android.view.View(this); line.setBackgroundColor(0xff3a3d44);
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, dp(1)); lp.leftMargin = dp(14); group.addView(line, lp);
         }
-        String display;
-        if (field.equals("bitrate")) {
-            double mbps = number.doubleValue() / 1000000d;
-            display = (mbps == Math.rint(mbps) ? String.valueOf((long) mbps) : String.format(java.util.Locale.ROOT, "%.2f", mbps)) + " Mbps";
+        if (!field.equals("bitrate")) {
+            addHostSegments(group, title, field, number);
+            return;
         }
-        else if (field.equals("maxFPS")) display = number.intValue() + " fps";
-        else display = number.doubleValue() == 1 ? "标准" : number.doubleValue() == 2 ? "Retina" : number + "×";
+        String display = qualityTitle(number);
         if (pendingSettingsToken != 0 && field.equals(pendingSettingsField)) display = "等待 Mac…";
-        LinearLayout row = addSettingsRow(group, title, null, true, () -> showHostSettingChoice(field));
+        LinearLayout row = addSettingsRow(group, title, null, true, () -> {});
         TextView detail = new TextView(this); detail.setText(display + "  ▾"); detail.setTextSize(14); detail.setTextColor(0xff9bb7ff);
-        detail.setSingleLine(true); row.addView(detail); row.setContentDescription(title + "，" + display);
+        detail.setSingleLine(true); detail.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        row.addView(detail); row.setContentDescription(title + "，" + display);
+        TextView label = (TextView) row.getChildAt(0);
+        row.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, oright, ob) -> {
+            float required = label.getPaint().measureText(label.getText().toString())
+                    + detail.getPaint().measureText(detail.getText().toString()) + dp(12);
+            boolean stack = required > r - l - row.getPaddingLeft() - row.getPaddingRight();
+            int direction = stack ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL;
+            if (row.getOrientation() == direction) return;
+            row.setOrientation(direction);
+            row.setGravity(stack ? android.view.Gravity.START : android.view.Gravity.CENTER_VERTICAL);
+            label.setLayoutParams(new LinearLayout.LayoutParams(stack ? -1 : 0, -2, stack ? 0 : 1));
+            LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(stack ? -1 : -2, -2);
+            if (stack) p.topMargin = dp(4);
+            detail.setLayoutParams(p);
+        });
+        row.setOnClickListener(v -> showQualityMenu(row));
         if (pendingSettingsToken != 0) { row.setEnabled(false); row.setAlpha(.5f); }
+    }
+    private String qualityTitle(Number value) {
+        double rate = value.doubleValue(), mbps = rate / 1000000d;
+        String quality = "自定义";
+        for (int i = 0; i < QUALITY_RATES.length; i++) if (rate == QUALITY_RATES[i]) quality = QUALITY_NAMES[i];
+        return quality + " — " + (mbps == Math.rint(mbps) ? String.valueOf((long) mbps)
+                : String.format(java.util.Locale.ROOT, "%.1f", mbps)) + " Mbps";
+    }
+    private void addHostSegments(LinearLayout group, String title, String field, Number current) {
+        boolean fps = field.equals("maxFPS");
+        String[] labels = fps ? new String[]{"60 fps", "120 fps"} : new String[]{"Retina", "标准"};
+        double[] values = fps ? new double[]{60, 120} : new double[]{2, 1};
+        LinearLayout row = new LinearLayout(this);
+        boolean stacked = getResources().getConfiguration().fontScale > 1.2f
+                || root.getWidth() - root.getPaddingLeft() - root.getPaddingRight() < dp(320);
+        row.setOrientation(stacked ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
+        row.setGravity(stacked ? android.view.Gravity.START : android.view.Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(14), dp(6), dp(14), dp(6)); row.setMinimumHeight(dp(44));
+        TextView label = new TextView(this); label.setText(title); label.setTextColor(0xffeef0f3); label.setTextSize(15);
+        if (pendingSettingsToken != 0 && field.equals(pendingSettingsField)) label.setText(title + " · 等待 Mac…");
+        row.addView(label, new LinearLayout.LayoutParams(stacked ? -1 : 0, -2, stacked ? 0 : 1));
+        LinearLayout segments = new LinearLayout(this); segments.setOrientation(LinearLayout.HORIZONTAL);
+        segments.setPadding(dp(2), dp(2), dp(2), dp(2)); segments.setBackground(shape(0xff34373d, 8));
+        LinearLayout.LayoutParams segmentParams = new LinearLayout.LayoutParams(-2, -2);
+        if (stacked) segmentParams.topMargin = dp(6);
+        row.addView(segments, segmentParams);
+        for (int i = 0; i < labels.length; i++) {
+            final int selected = i;
+            boolean active = Double.compare(current.doubleValue(), values[i]) == 0;
+            Button segment = new Button(this); segment.setAllCaps(false); segment.setText(labels[i]); segment.setTextSize(13);
+            segment.setTextColor(0xffeef0f3); segment.setIncludeFontPadding(false);
+            segment.setPadding(dp(8), dp(4), dp(8), dp(4)); segment.setMinWidth(0); segment.setMinimumWidth(dp(62));
+            segment.setMinHeight(dp(30)); segment.setMinimumHeight(dp(30));
+            segment.setBackground(shape(active ? 0xff64676e : 0x00000000, 6));
+            segment.setSelected(active);
+            segment.setContentDescription(title + "，" + labels[i] + (active ? "，已选中" : ""));
+            segment.setEnabled(pendingSettingsToken == 0);
+            segment.setOnClickListener(v -> {
+                JSONObject settings = hostSettings == null ? null : hostSettings.optJSONObject("settings");
+                if (settings == null || !(settings.opt(field) instanceof Number latest)) { show("Mac 已不提供此设置"); return; }
+                if (Double.compare(latest.doubleValue(), values[selected]) != 0)
+                    changeHostSetting(field, fps ? (Object) (int) values[selected] : values[selected]);
+            });
+            segments.addView(segment, new LinearLayout.LayoutParams(-2, -2));
+        }
+        if (pendingSettingsToken != 0) row.setAlpha(.5f);
+        group.addView(row, new LinearLayout.LayoutParams(-1, -2));
     }
     private void addHostToggle(LinearLayout rows, String title, String field, boolean value, boolean available, String note) {
         String label = pendingSettingsToken != 0 && field.equals(pendingSettingsField) ? title + " · 等待 Mac…" : title;
@@ -1716,6 +1860,7 @@ public final class MainActivity extends Activity {
             android.util.Log.i("SillAndroid", "Settings: dismiss caller=" + caller + " restore=" + restoreKeyboard);
         }
         settingsReanchorPending = false;
+        if (qualityMenu != null) { qualityMenu.dismiss(); qualityMenu = null; }
         if (!restoreKeyboard) settingsRestoreKeyboard = false;
         if (android.os.Build.VERSION.SDK_INT >= 33 && settingsBack != null) {
             getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(settingsBack); settingsBack = null;
@@ -1736,6 +1881,7 @@ public final class MainActivity extends Activity {
         settingsReanchorPending = false;
         settingsReanchoring = true;
         try {
+            if (qualityMenu != null) { qualityMenu.dismiss(); qualityMenu = null; }
             if (settingsScroll != null) settingsScrollY = settingsScroll.getScrollY();
             settingsScroll = null; refreshInlineHostSettings = null;
             if (android.os.Build.VERSION.SDK_INT >= 33 && settingsBack != null) {
@@ -1763,22 +1909,32 @@ public final class MainActivity extends Activity {
             ((android.view.inputmethod.InputMethodManager)getSystemService(INPUT_METHOD_SERVICE)).showSoftInput(keyboard, 0);
         });
     }
-    private void showHostSettingChoice(String field) {
+    private void showQualityMenu(android.view.View anchor) {
         if (pendingSettingsToken != 0) { show("正在等待 Mac 确认设置"); return; }
         JSONObject state = hostSettings, values = state == null ? null : state.optJSONObject("settings");
-        if (values == null || !(values.opt(field) instanceof Number)) { show("Mac 已不提供此设置"); return; }
-        if (field.equals("bitrate")) {
-            String[] labels = {"低 4 Mbps", "节省 8 Mbps", "均衡 15 Mbps", "高 25 Mbps", "专业 40 Mbps", "极高 80 Mbps", "极限 150 Mbps"};
-            int[] rates = {4000000, 8000000, 15000000, 25000000, 40000000, 80000000, 150000000};
-            showSettingsChild(new android.app.AlertDialog.Builder(this).setTitle("画质")
-                    .setItems(labels, (d, i) -> changeHostSetting("bitrate", rates[i])).create());
-        } else if (field.equals("maxFPS")) {
-            showSettingsChild(new android.app.AlertDialog.Builder(this).setTitle("帧率")
-                    .setItems(new String[]{"60 fps", "120 fps"}, (d, i) -> changeHostSetting("maxFPS", i == 0 ? 60 : 120)).create());
-        } else if (field.equals("captureScale")) {
-            showSettingsChild(new android.app.AlertDialog.Builder(this).setTitle("分辨率")
-                    .setItems(new String[]{"标准", "Retina"}, (d, i) -> changeHostSetting("captureScale", i == 0 ? 1.0 : 2.0)).create());
+        if (values == null || !(values.opt("bitrate") instanceof Number current)) { show("Mac 已不提供此设置"); return; }
+        SillConnection owner = connection;
+        android.widget.PopupMenu popup = new android.widget.PopupMenu(this, anchor);
+        qualityMenu = popup;
+        boolean preset = false;
+        for (int i = 0; i < QUALITY_RATES.length; i++) {
+            android.view.MenuItem item = popup.getMenu().add(0, i, i, qualityTitle(QUALITY_RATES[i]));
+            boolean checked = current.doubleValue() == QUALITY_RATES[i]; preset |= checked;
+            item.setCheckable(true).setChecked(checked);
         }
+        if (!preset) popup.getMenu().add(0, QUALITY_RATES.length, QUALITY_RATES.length, qualityTitle(current))
+                .setCheckable(true).setChecked(true).setEnabled(false);
+        popup.setOnMenuItemClickListener(item -> {
+            if (connection != owner || !settingsOpen || pendingSettingsToken != 0) return true;
+            JSONObject latest = hostSettings == null ? null : hostSettings.optJSONObject("settings");
+            if (latest == null || !(latest.opt("bitrate") instanceof Number rate)) { show("Mac 已不提供此设置"); return true; }
+            if (item.getItemId() < 0 || item.getItemId() >= QUALITY_RATES.length) return true;
+            int next = QUALITY_RATES[item.getItemId()];
+            if (rate.longValue() != next) changeHostSetting("bitrate", next);
+            return true;
+        });
+        popup.setOnDismissListener(menu -> { if (qualityMenu == popup) qualityMenu = null; });
+        popup.show();
     }
     private void changeHostSetting(String field, Object value) {
         JSONObject settings = hostSettings == null ? null : hostSettings.optJSONObject("settings");
@@ -2379,6 +2535,7 @@ public final class MainActivity extends Activity {
                 }
             }
             case 2 -> {
+                if (messageSession == null || connection != messageSession) return;
                 JSONObject list = new JSONObject(new String(message.payload(), StandardCharsets.UTF_8));
                 JSONArray windows = list.getJSONArray("windows");
                 JSONObject streamingSource = list.optJSONObject("active");
@@ -2386,15 +2543,18 @@ public final class MainActivity extends Activity {
                 if (keyframeStreaming != streaming) android.util.Log.i("SillAndroid", "Recovery: streaming=" + streaming);
                 keyframeStreaming = streaming;
                 HostLockState lock = hostLock; SillConnection listedSession = connection;
+                long listVersion = -1;
                 if (lock != null && listedSession != null) {
                     boolean wasCovered = lock.isCovered();
-                    boolean blank = lock.onWindowList(list.optBoolean("locked", false), list.optBoolean("offConsole", false),
+                    HostLockState.ListUpdate lockUpdate = lock.onWindowListUpdate(list.optBoolean("locked", false), list.optBoolean("offConsole", false),
                             list.optBoolean("offConsoleView", false), android.os.SystemClock.uptimeMillis());
+                    boolean blank = lockUpdate.blank(); listVersion = lockUpdate.version();
                     if (blank) { clipboardReceipt.cancel(); releaseDecoder(); waitingForKeyframe = true; }
                     if (wasCovered && !lock.isCovered()) { waitingForKeyframe = true; interruptPicture(); requestKeyframe(); }
                     ui.post(() -> {
                         if (connection != listedSession || hostLock != lock) return;
                         if (blank) { trackpad.cancelGestures(); keyboard.discard(); }
+                        if (appDrawer != null) appDrawer.setLock(lock.reason(), lock.viewOnly(), windowOrderMac);
                         renderLockOverlay(lock, listedSession);
                     });
                     if (wasCovered && !lock.isCovered()) ui.postDelayed(() -> {
@@ -2421,6 +2581,7 @@ public final class MainActivity extends Activity {
                 if (!hostClipboardAvailable) { clipboardSubscribed = false; clipboardReceipt.cancel(); }
                 if (clipboardEnabled && !clipboardSubscribed && hostClipboardAvailable) updateClipboard();
                 SillConnection listConnection = connection;
+                final long receivedListVersion = listVersion;
                 ui.post(() -> {
                     if (connection != listConnection || listConnection == null) return;
                     int count = list.optInt("desktopDisplays", 0), current = list.optInt("desktopDisplay", 0);
@@ -2466,7 +2627,15 @@ public final class MainActivity extends Activity {
                         if (tile instanceof android.widget.FrameLayout frame && frame.getChildCount() > 0)
                             frame.getChildAt(0).setVisibility(chosen ? android.view.View.VISIBLE : android.view.View.INVISIBLE);
                     }
-                    drawerWindows = windows; refreshDrawer(); considerTourPicture();
+                    if (lock != null && hostLock == lock && connection == listedSession) lock.presentList(receivedListVersion, () -> {
+                        drawerWindows = windows;
+                        if (appDrawer != null) {
+                            appDrawer.setLock(lock.reason(), lock.viewOnly(), windowOrderMac);
+                            appDrawer.acceptLockList();
+                        }
+                        refreshDrawer();
+                    });
+                    considerTourPicture();
                     if (tourOverlay != null) updateTourStep();
                 });
             }
@@ -3112,12 +3281,14 @@ public final class MainActivity extends Activity {
     @Override protected void onStart() { super.onStart(); if (discovery != null) discovery.start(); startFpsObservers(); }
     @Override protected void onResume() {
         super.onResume(); keyframeForeground = true;
+        if (inlineScanner != null) inlineScanner.setForeground(true);
         android.util.Log.i("SillAndroid", "Recovery: foreground");
         if (localAudio != null) localAudio.setWatched(pictureWatched());
         if (screenAwake != null) screenAwake.setForeground(true);
         if (picture != null) { picture.post(this::sendViewport); picture.post(this::considerTourPicture); }
     }
     @Override protected void onPause() {
+        if (inlineScanner != null) inlineScanner.setForeground(false);
         if (scaleControl != null) scaleControl.cancel();
         hideTour();
         android.util.Log.i("SillAndroid", "Recovery: background"); keyframeForeground = false;
@@ -3161,6 +3332,7 @@ public final class MainActivity extends Activity {
     }
     @Override protected void onStop() { if (pip != null && pip.active()) pip.stop(); dismissSettings(false); dismissMenu(); if (appDrawer != null) appDrawer.dismiss(); dismissWindowControls(); cancelWindowDrag(); stopFpsObservers(); clipboardReceipt.cancel(); if (pictureInput != null) pictureInput.cancel(); if (trackpad != null) trackpad.cancelGestures(); if (discovery != null) discovery.stop(); nearby.clear(); nearbyMacs.removeAllViews(); super.onStop(); }
     @Override protected void onDestroy() {
+        clearPairConfirmation();
         android.view.accessibility.AccessibilityManager accessibility = (android.view.accessibility.AccessibilityManager) getSystemService(ACCESSIBILITY_SERVICE);
         if (accessibility != null && tourAccessibilityListener != null) accessibility.removeTouchExplorationStateChangeListener(tourAccessibilityListener);
         if (pip != null) pip.close();

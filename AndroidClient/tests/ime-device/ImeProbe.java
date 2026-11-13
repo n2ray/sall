@@ -74,6 +74,35 @@ public final class ImeProbe extends Instrumentation {
                 connection = keyboard.onCreateInputConnection(new EditorInfo());
                 check(connection.commitText("\n", 1), "genuine return after finish"); expect("\n");
 
+                // Dictation-style hypotheses remain local until the IME commits a candidate.
+                keyboard.discard(); connection = keyboard.onCreateInputConnection(new EditorInfo());
+                check(connection.setComposingText("我", 1), "dictation first hypothesis"); expect();
+                check(connection.setComposingText("我想", 1), "dictation second hypothesis"); expect();
+                check(connection.setComposingText("我想去", 1), "dictation final hypothesis"); expect();
+                check(connection.commitText("我想去", 1), "dictation commit"); expect("我想去");
+
+                // A recognizer may mark and revise a suffix it already committed.
+                check(connection.setComposingRegion(1, 3), "dictation reopen committed suffix"); expect();
+                check(connection.setComposingText("需要", 1), "dictation revise marked suffix"); expect();
+                check(connection.commitText("需要", 1), "dictation commit revision"); expect("\b\b", "需要");
+                check(connection.setSelection(1, 3), "dictation select committed suffix");
+                check(connection.commitText("希望", 1), "dictation replace selection"); expect("\b\b", "希望");
+                check(connection.commitText("\n", 1), "dictation newline"); expect("\n");
+                check(connection.setComposingText("今天", 1), "dictation next line"); expect();
+                check(connection.commitText("今天", 1), "dictation next line commit"); expect("今天");
+
+                InputConnection discarded = connection;
+                keyboard.discard();
+                check(!discarded.setComposingText("旧", 1), "discarded composition rejected");
+                check(!discarded.setComposingRegion(0, 1), "discarded region rejected");
+                check(!discarded.commitText("旧", 1), "discarded commit rejected"); expect();
+                connection = keyboard.onCreateInputConnection(new EditorInfo());
+                check(connection.commitText("语音", 1), "new generation commit"); expect("语音");
+                InputConnection finished = connection;
+                keyboard.finishAndForget(); expect();
+                check(!finished.setComposingText("旧", 1), "finished composition rejected");
+                check(!finished.commitText("旧", 1), "finished commit rejected"); expect();
+
                 keyboard.discard(); connection = keyboard.onCreateInputConnection(new EditorInfo());
                 check(connection.commitText("a".repeat(4001), 1), "long commit"); expect("a".repeat(4001));
             });

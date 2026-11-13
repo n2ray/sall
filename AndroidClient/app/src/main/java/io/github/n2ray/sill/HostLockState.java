@@ -11,13 +11,16 @@ final class HostLockState {
     private Shade shade = Shade.NONE;
     private boolean viewOnly, covered, freshFrameRequired;
     private long unlockingAt, generation;
+    private long listVersion, presentedListVersion = -1;
 
     HostLockState(boolean advertisedView) { this.advertisedView = advertisedView; }
+    record ListUpdate(boolean blank, long version) { }
 
     synchronized void requireFreshFrame() { freshFrameRequired = true; generation++; }
 
     /** Returns true when the displayed frame must be cleared immediately. */
     synchronized boolean onWindowList(boolean locked, boolean offConsole, boolean offConsoleView, long now) {
+        listVersion++;
         Reason next = !locked ? Reason.NONE : offConsole ? Reason.OTHER_USER : Reason.SCREEN_LOCKED;
         boolean nextView = advertisedView && next == Reason.OTHER_USER && offConsoleView;
         boolean nextCovered = next == Reason.OTHER_USER && !nextView;
@@ -33,6 +36,9 @@ final class HostLockState {
         }
         reason = next; viewOnly = nextView; covered = nextCovered;
         return blank;
+    }
+    synchronized ListUpdate onWindowListUpdate(boolean locked, boolean offConsole, boolean offConsoleView, long now) {
+        return new ListUpdate(onWindowList(locked, offConsole, offConsoleView, now), listVersion);
     }
 
     /** A timeout dismisses the text, but callers must keep the old frame blank until a fresh keyframe. */
@@ -61,4 +67,13 @@ final class HostLockState {
     synchronized boolean needsFreshFrame() { return freshFrameRequired; }
     synchronized boolean maySendControl() { return reason != Reason.OTHER_USER; }
     synchronized long generation() { return generation; }
+    synchronized long listVersion() { return listVersion; }
+    synchronized boolean presentList(long version, Runnable apply) {
+        if (version != listVersion) return false;
+        presentedListVersion = version; apply.run(); return true;
+    }
+    synchronized boolean withPresentedList(Runnable apply) {
+        if (presentedListVersion != listVersion) return false;
+        apply.run(); return true;
+    }
 }

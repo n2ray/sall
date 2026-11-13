@@ -33,6 +33,11 @@ final class AppDrawerDialog {
     private EditText search;
     private ScrollView scroll;
     private LinearLayout rows;
+    private TextView lockNotice;
+    private HostLockState.Reason lockReason = HostLockState.Reason.NONE;
+    private boolean lockView;
+    private boolean awaitingLockList;
+    private String macName = "";
     private List<AppDrawerModel.Window> windows = java.util.Collections.emptyList();
     private List<AppDrawerModel.App> apps = java.util.Collections.emptyList();
     private Map<String, Bitmap> icons = java.util.Collections.emptyMap();
@@ -56,6 +61,11 @@ final class AppDrawerDialog {
         root.setBackground(panelBackground);
         root.setElevation(dp(24));
         root.setFocusableInTouchMode(true);
+        lockNotice = text("", 15, 0xffeef0f3);
+        lockNotice.setPadding(dp(14), dp(14), dp(14), dp(14));
+        lockNotice.setBackground(background(0xff23262c, 12));
+        lockNotice.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        root.addView(lockNotice, new LinearLayout.LayoutParams(-1, -2));
         search = new EditText(activity); search.setSingleLine(true); search.setHint("搜索应用");
         search.setTextColor(0xffeef0f3); search.setHintTextColor(0xffa4abb5); search.setTextSize(15);
         search.setPadding(dp(14), 0, dp(14), 0);
@@ -78,6 +88,7 @@ final class AppDrawerDialog {
             public void afterTextChanged(Editable value) { }
         });
         update(windowList, appList, appIcons, active, desktop);
+        applyLock();
         overlay = new FrameLayout(activity);
         if (landscape) {
             overlay.setBackgroundColor(0x94000000);
@@ -144,6 +155,7 @@ final class AppDrawerDialog {
     }
 
     void update(JSONArray windowList, JSONArray appList, Map<String, Bitmap> appIcons, long active, boolean desktop) {
+        if (awaitingLockList) return;
         boolean sourceChanged = isShowing() && AppDrawerModel.sourceChanged(activeWindow, activeDesktop, active, desktop);
         List<AppDrawerModel.Window> nextWindows = new ArrayList<>();
         if (windowList != null) for (int i = 0; i < windowList.length(); i++) {
@@ -172,6 +184,43 @@ final class AppDrawerDialog {
     }
 
     boolean isShowing() { return overlay != null; }
+    void setLock(HostLockState.Reason reason, boolean viewOnly, String name) {
+        HostLockState.Reason next = reason == null ? HostLockState.Reason.NONE : reason;
+        String nextName = name == null ? "" : name;
+        if (lockReason == next && lockView == viewOnly && macName.equals(nextName)) return;
+        if (lockReason != next || lockView != viewOnly) {
+            windows = java.util.Collections.emptyList(); apps = java.util.Collections.emptyList();
+            icons = java.util.Collections.emptyMap();
+            awaitingLockList = true;
+        }
+        lockReason = next; lockView = viewOnly; macName = nextName;
+        applyLock();
+        if (rows != null) render(true);
+    }
+    void acceptLockList() { awaitingLockList = false; }
+    void awaitLockList() {
+        awaitingLockList = true;
+        windows = java.util.Collections.emptyList(); apps = java.util.Collections.emptyList();
+        icons = java.util.Collections.emptyMap();
+        if (rows != null) render(true);
+    }
+    private void applyLock() {
+        if (lockNotice == null || search == null || scroll == null) return;
+        boolean locked = lockReason != HostLockState.Reason.NONE && !lockView;
+        boolean notice = locked || lockView;
+        String name = macName.isEmpty() ? "Mac" : macName;
+        lockNotice.setText(lockView ? "其他用户正在使用这台 Mac。当前显示的是你账户自己的桌面和窗口；恢复到你的账户后才能操作或打开应用。"
+                : lockReason == HostLockState.Reason.OTHER_USER ? "其他用户开始控制这台 Mac。请登录你的账户以重新启用 Sill 屏幕共享。"
+                : name + "已锁定。解锁后可查看窗口。");
+        lockNotice.setVisibility(notice ? View.VISIBLE : View.GONE);
+        if (locked && search.hasFocus()) {
+            ((android.view.inputmethod.InputMethodManager) activity.getSystemService(Activity.INPUT_METHOD_SERVICE))
+                    .hideSoftInputFromWindow(search.getWindowToken(), 0);
+            search.clearFocus();
+        }
+        search.setVisibility(locked ? View.GONE : View.VISIBLE);
+        scroll.setVisibility(locked ? View.GONE : View.VISIBLE);
+    }
     int presentationVersion() { return presentationVersion; }
     void reanchor(int expectedVersion, JSONArray windowList, JSONArray appList, Map<String, Bitmap> appIcons,
                   long active, boolean desktop, FrameLayout picture, FrameLayout sessionLayer, LinearLayout sessionPanel,
@@ -236,6 +285,7 @@ final class AppDrawerDialog {
         int y = keepScroll ? scroll.getScrollY() : 0;
         AppDrawerModel.Results result = AppDrawerModel.filter(windows, apps, search.getText().toString());
         rows.removeAllViews(); badgeViews.clear();
+        if (lockReason != HostLockState.Reason.NONE && !lockView) return;
         if (!result.open().isEmpty()) {
             header("正在运行");
             for (AppDrawerModel.Group group : result.open()) {
@@ -247,6 +297,7 @@ final class AppDrawerDialog {
                 label.setContentDescription(group.name() + "，" + group.windows().size() + " 个窗口" + (selected ? "，当前显示" : ""));
                 addRow(label, 50);
                 label.setOnClickListener(v -> {
+                    if (lockReason != HostLockState.Reason.NONE && !lockView) return;
                     AppDrawerModel.Group current = AppDrawerModel.filter(windows, apps, "").open().stream()
                             .filter(g -> g.bundleId().equals(group.bundleId()) && g.name().equals(group.name())).findFirst().orElse(null);
                     if (current == null) { render(true); return; }
@@ -256,12 +307,13 @@ final class AppDrawerDialog {
                 });
             }
         }
-        if (!result.closed().isEmpty()) {
+        if (!lockView && !result.closed().isEmpty()) {
             header("所有应用");
             for (AppDrawerModel.App app : result.closed()) {
                 LinearLayout entry = row(app.name(), app.bundleId(), true); addRow(entry, 46);
                 entry.setContentDescription("打开 " + app.name());
                 entry.setOnClickListener(v -> {
+                    if (lockReason != HostLockState.Reason.NONE || lockView) return;
                     if (apps.stream().noneMatch(a -> a.bundleId().equals(app.bundleId()))) { render(true); return; }
                     listener.launchApp(app.bundleId());
                 });
