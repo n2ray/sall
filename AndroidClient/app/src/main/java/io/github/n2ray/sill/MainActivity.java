@@ -762,6 +762,7 @@ public final class MainActivity extends Activity {
         root.getViewTreeObserver().addOnGlobalLayoutListener(this::refreshToolbarAppearance);
         android.widget.HorizontalScrollView strip = new android.widget.HorizontalScrollView(this); tourStrip = strip;
         strip.setHorizontalScrollBarEnabled(false); choices = new LinearLayout(this); choices.setOrientation(LinearLayout.HORIZONTAL);
+        choices.setGravity(android.view.Gravity.CENTER_VERTICAL); choices.setPadding(dp(2), 0, dp(2), 0);
         strip.addView(choices);
         LinearLayout stripRow = new LinearLayout(this); stripRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
         bar.removeView(menuButton); stripRow.addView(strip, new LinearLayout.LayoutParams(0, -1, 1));
@@ -810,7 +811,7 @@ public final class MainActivity extends Activity {
             stripRow.setVisibility(landscape || large ? android.view.View.GONE : android.view.View.VISIBLE);
             if (landscape && strip.getParent() != bar) {
                 stripRow.removeView(strip); if (menuButton.getParent() == stripRow) stripRow.removeView(menuButton); sessionPanel.removeView(bar);
-                bar.addView(strip, 1, new LinearLayout.LayoutParams(0, dp(58), 1));
+                bar.addView(strip, 1, new LinearLayout.LayoutParams(0, dp(78), 1));
                 if (menuButton.getParent() == bar) bar.removeView(menuButton);
                 bar.addView(menuButton, 2, new LinearLayout.LayoutParams(dp(64), dp(58)));
                 sessionPanel.addView(bar, 1);
@@ -849,7 +850,7 @@ public final class MainActivity extends Activity {
                 portraitButtons(keys, 44);
                 placePortraitRow(trackpad, geometry.trackpad, geometry.keys.bottom());
             } else {
-                if (bar.getPaddingLeft() != dp(14)) bar.setPadding(dp(14), dp(10), dp(14), dp(10));
+                if (bar.getPaddingLeft() != dp(14) || bar.getPaddingTop() != 0) bar.setPadding(dp(14), 0, dp(14), 0);
                 bar.setBackgroundColor(0xff16181c);
                 applyRowParams(bar, new LinearLayout.LayoutParams(-1, dp(78)));
                 LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, 0, 1);
@@ -863,6 +864,7 @@ public final class MainActivity extends Activity {
                     mp.setMargins(dp(6), 0, dp(6), 0); applyRowParams(menuButton, mp);
                 }
             }
+            updateWindowChoiceGeometry(landscape);
             refreshToolbarAppearance();
             layoutVideo(); cursor.invalidate();
             tourLayoutChanged();
@@ -2426,6 +2428,7 @@ public final class MainActivity extends Activity {
                             try { addChoice(item.optString("appName") + " — " + item.optString("title"), new JSONObject().put("_0", item.getLong("id")), item.optString("bundleID")); }
                             catch (Exception ignored) { }
                         }
+                        updateWindowChoiceGeometry(root.getWidth() > root.getHeight());
                         thumbnailImages.keySet().retainAll(thumbnails.keySet());
                     }
                     JSONObject selected = active == null ? null : active.optJSONObject("window");
@@ -2439,9 +2442,8 @@ public final class MainActivity extends Activity {
                     for (int i = 0; i < choices.getChildCount(); i++) {
                         android.view.View tile = choices.getChildAt(i);
                         boolean chosen = tile.getTag() instanceof Long && ((Long) tile.getTag()) == selectedId;
-                        android.graphics.drawable.GradientDrawable border = shape(0x00000000, 10);
-                        border.setStroke(dp(chosen ? 2 : 1), chosen ? 0xff8eb9fb : 0x33ffffff);
-                        tile.setForeground(border);
+                        if (tile instanceof android.widget.FrameLayout frame && frame.getChildCount() > 0)
+                            frame.getChildAt(0).setVisibility(chosen ? android.view.View.VISIBLE : android.view.View.INVISIBLE);
                     }
                     drawerWindows = windows; refreshDrawer(); considerTourPicture();
                     if (tourOverlay != null) updateTourStep();
@@ -2839,21 +2841,64 @@ public final class MainActivity extends Activity {
         }
         return true;
     }
+    private void updateWindowChoiceGeometry(boolean landscape) {
+        if (choices == null) return;
+        for (int i = 0; i < choices.getChildCount(); i++) {
+            if (!(choices.getChildAt(i) instanceof android.widget.FrameLayout tile) || tile.getChildCount() < 2) continue;
+            int width = dp(landscape ? 104 : 92), height = dp(landscape ? 70 : 62);
+            boolean resize = tile.getLayoutParams().width != width;
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(width, height);
+            params.topMargin = params.bottomMargin = landscape ? dp(4) : 0; applyRowParams(tile, params);
+            if (!resize) continue;
+            android.graphics.drawable.GradientDrawable halo = shape(android.graphics.Color.TRANSPARENT, landscape ? 14 : 13);
+            halo.setStroke(dp(2), 0xff9bb7ff); tile.getChildAt(0).setBackground(halo);
+            android.view.View preview = tile.getChildAt(1);
+            preview.setBackground(shape(0xff26282d, landscape ? 9 : 8));
+            android.graphics.drawable.GradientDrawable edge = shape(android.graphics.Color.TRANSPARENT, landscape ? 9 : 8);
+            edge.setStroke(dp(1), 0x1fffffff); preview.setForeground(edge);
+            if (tile.getChildCount() > 2) {
+                android.view.View badge = tile.getChildAt(2);
+                android.widget.FrameLayout.LayoutParams bp = (android.widget.FrameLayout.LayoutParams) badge.getLayoutParams();
+                bp.width = bp.height = dp(landscape ? 28 : 26); badge.setLayoutParams(bp);
+            }
+        }
+    }
     private void addChoice(String title, JSONObject source, String bundleId) {
         android.widget.FrameLayout tile = new android.widget.FrameLayout(this); tile.setContentDescription(title);
-        tile.setBackground(shape(0xff272a30, 10));
-        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(dp(100), dp(66)); p.setMargins(0, dp(3), dp(6), dp(3)); choices.addView(tile, p);
+        choices.addView(tile, new LinearLayout.LayoutParams(dp(92), dp(62)));
+        android.view.View halo = new android.view.View(this);
+        android.graphics.drawable.GradientDrawable haloShape = shape(android.graphics.Color.TRANSPARENT, 13);
+        haloShape.setStroke(dp(2), 0xff9bb7ff); halo.setBackground(haloShape); halo.setVisibility(android.view.View.INVISIBLE);
+        tile.addView(halo, new android.widget.FrameLayout.LayoutParams(-1, -1));
+        android.widget.FrameLayout preview = new android.widget.FrameLayout(this);
+        preview.setBackground(shape(0xff26282d, 8)); preview.setClipToOutline(true);
+        android.widget.FrameLayout.LayoutParams previewParams = new android.widget.FrameLayout.LayoutParams(-1, -1);
+        previewParams.setMargins(dp(6), dp(6), dp(6), dp(6)); tile.addView(preview, previewParams);
+        android.view.View titleBar = new android.view.View(this); titleBar.setBackgroundColor(0xff34373d);
+        preview.addView(titleBar, new android.widget.FrameLayout.LayoutParams(-1, dp(9), android.view.Gravity.TOP));
         android.widget.ImageView image = new android.widget.ImageView(this); image.setScaleType(android.widget.ImageView.ScaleType.CENTER_CROP);
-        tile.addView(image, new android.widget.FrameLayout.LayoutParams(-1, -1));
+        preview.addView(image, new android.widget.FrameLayout.LayoutParams(-1, -1));
+        android.graphics.drawable.GradientDrawable border = shape(android.graphics.Color.TRANSPARENT, 8);
+        border.setStroke(dp(1), 0x1fffffff); preview.setForeground(border);
         if (source.length() != 0) {
             long id = source.optLong("_0"); tile.setTag(id); thumbnails.put(id, image); image.setImageBitmap(thumbnailImages.get(id));
-            android.widget.ImageView badge = new android.widget.ImageView(this); badge.setBackground(shape(0xff353942, 6));
-            badge.setScaleType(android.widget.ImageView.ScaleType.FIT_CENTER); badge.setPadding(dp(2), dp(2), dp(2), dp(2));
-            android.widget.FrameLayout.LayoutParams badgeLayout = new android.widget.FrameLayout.LayoutParams(dp(24), dp(24), android.view.Gravity.BOTTOM | android.view.Gravity.START);
-            tile.addView(badge, badgeLayout); badge.setImageBitmap(appIcons.get(bundleId));
+            android.widget.FrameLayout ring = new android.widget.FrameLayout(this); ring.setPadding(dp(2), dp(2), dp(2), dp(2));
+            ring.setBackground(shape(0xff16181c, 8));
+            android.widget.FrameLayout badgeBody = new android.widget.FrameLayout(this); badgeBody.setBackground(shape(0xff3a3d44, 6)); badgeBody.setClipToOutline(true);
+            ring.addView(badgeBody, new android.widget.FrameLayout.LayoutParams(-1, -1));
+            String name = title.contains(" — ") ? title.substring(0, title.indexOf(" — ")) : title;
+            int end = name.offsetByCodePoints(0, Math.min(2, name.codePointCount(0, name.length())));
+            TextView initials = new TextView(this); initials.setText(name.substring(0, end)); initials.setTextSize(10);
+            initials.setTextColor(android.graphics.Color.WHITE); initials.setGravity(android.view.Gravity.CENTER);
+            initials.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
+            badgeBody.addView(initials, new android.widget.FrameLayout.LayoutParams(-1, -1));
+            android.widget.ImageView badge = new android.widget.ImageView(this);
+            badge.setScaleType(android.widget.ImageView.ScaleType.CENTER_CROP); badge.setImageBitmap(appIcons.get(bundleId));
+            badgeBody.addView(badge, new android.widget.FrameLayout.LayoutParams(-1, -1));
+            android.widget.FrameLayout.LayoutParams badgeLayout = new android.widget.FrameLayout.LayoutParams(dp(26), dp(26), android.view.Gravity.BOTTOM | android.view.Gravity.START);
+            tile.addView(ring, badgeLayout);
             iconBadges.computeIfAbsent(bundleId, ignored -> new java.util.ArrayList<>()).add(badge);
         } else { image.setImageResource(android.R.drawable.ic_menu_view); image.setScaleType(android.widget.ImageView.ScaleType.CENTER_INSIDE); image.setColorFilter(0xffaeb5c0); tile.setContentDescription(title + "（无实时预览）"); }
-        tile.setClipToOutline(true);
         tile.setOnClickListener(v -> {
             if (windowControls != null && windowControls.isShowing()) dismissWindowControls();
             else select(source, false);
@@ -2916,7 +2961,7 @@ public final class MainActivity extends Activity {
                                 tile.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS);
                             }
                             if (draggedWindow == tile) {
-                                int slot = tile.getWidth() + dp(6);
+                                int slot = tile.getWidth();
                                 int target = WindowOrder.dragTarget(dragFrom, dx, slot, choices.getChildCount());
                                 if (target != dragTo && dragPreview != null && WindowOrder.move(dragPreview, (Long) tile.getTag(), target)) {
                                     dragTo = target;
@@ -2956,24 +3001,27 @@ public final class MainActivity extends Activity {
         dismissWindowControls();
         SillConnection expected = connection;
         LinearLayout row = new LinearLayout(this); row.setGravity(android.view.Gravity.CENTER);
-        row.setBackground(shape(0xff303238, 14));
+        android.graphics.drawable.GradientDrawable menu = shape(0xff23262c, 18);
+        menu.setStroke(dp(1), 0x1affffff); row.setBackground(menu); row.setPadding(dp(10), 0, dp(10), 0);
         String[] labels = {"关闭", "最小化", "全屏"};
-        String[] symbols = {"×", "−", "+"};
+        String[] symbols = {"×", "−", "⤢"};
         String[] actions = {"close", "minimize", "fullScreen"};
         int[] colors = {0xffff5f57, 0xffffbd2e, 0xff28c840};
         for (int i = 0; i < labels.length; i++) {
             final String action = actions[i];
             LinearLayout item = new LinearLayout(this); item.setOrientation(LinearLayout.VERTICAL); item.setGravity(android.view.Gravity.CENTER);
             android.widget.TextView light = new android.widget.TextView(this); light.setText(symbols[i]); light.setGravity(android.view.Gravity.CENTER);
-            light.setTextColor(0xff333333); light.setTextSize(16); light.setBackground(shape(colors[i], 24));
+            light.setTextColor(0xa6000000); light.setTextSize(12); light.setTypeface(null, android.graphics.Typeface.BOLD); light.setBackground(shape(colors[i], 24));
             item.addView(light, new LinearLayout.LayoutParams(dp(24), dp(24)));
-            android.widget.TextView label = new android.widget.TextView(this); label.setText(labels[i]); label.setTextColor(0xffeeeeee); label.setTextSize(10); label.setGravity(android.view.Gravity.CENTER);
-            item.addView(label); item.setContentDescription(labels[i] + "窗口");
+            android.widget.TextView label = new android.widget.TextView(this); label.setText(labels[i]); label.setTextColor(0xffc4c9d1); label.setTextSize(10); label.setGravity(android.view.Gravity.CENTER);
+            LinearLayout.LayoutParams labelParams = new LinearLayout.LayoutParams(-2, -2); labelParams.topMargin = dp(5);
+            item.addView(label, labelParams); item.setContentDescription(labels[i] + "窗口");
             item.setOnClickListener(v -> {
                 dismissWindowControls();
                 sendWindowCommand(expected, source, action);
             });
-            row.addView(item, new LinearLayout.LayoutParams(dp(60), -1));
+            LinearLayout.LayoutParams itemParams = new LinearLayout.LayoutParams(dp(60), -1);
+            if (i > 0) itemParams.leftMargin = dp(6); row.addView(item, itemParams);
         }
         windowControls = new android.widget.PopupWindow(row, dp(214), dp(62), false);
         windowControls.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT));
