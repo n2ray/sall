@@ -128,7 +128,7 @@ public final class MainActivity extends Activity {
     private android.app.AlertDialog settingsChild;
     private android.app.AlertDialog settingsDialog;
     private Runnable refreshSettingsMute;
-    private Runnable refreshHostSettings;
+    private Runnable refreshInlineHostSettings;
     private boolean settingsRestoreKeyboard;
     private SillConnection settingsSession;
     private int lastViewportFps = -1;
@@ -1444,7 +1444,6 @@ public final class MainActivity extends Activity {
         }
         android.util.Log.i("SillAndroid", "Settings: show " + (root.getWidth() > root.getHeight() ? "landscape" : "portrait") + " reanchor=" + reanchor);
         java.util.function.IntConsumer choose = i -> {
-            if (i == 0) hostSettingsMenu();
             if (i == 1) { clipboardEnabled = !clipboardEnabled; getPreferences(0).edit().putBoolean("shareClipboard", clipboardEnabled).apply(); updateClipboard(); if (settingsOverlay != null) { settingsReanchorPending = true; reanchorSettings(); } }
             if (i == 2) pasteClipboard();
             if (i == 3) {
@@ -1519,7 +1518,40 @@ public final class MainActivity extends Activity {
         LinearLayout rows = new LinearLayout(this); rows.setOrientation(LinearLayout.VERTICAL); scroller.addView(rows);
         panel.addView(scroller, new LinearLayout.LayoutParams(-1, 0, 1));
         addSettingsHeading(rows, "Mac");
-        addSettingsRow(rows, "画质和帧率", null, false, () -> choose.accept(0));
+        LinearLayout hostRows = new LinearLayout(this); hostRows.setOrientation(LinearLayout.VERTICAL); rows.addView(hostRows);
+        String[] hostSnapshot = {null};
+        refreshInlineHostSettings = () -> {
+            if (settingsOverlay != overlay) return;
+            JSONObject state = hostSettings, values = state == null ? null : state.optJSONObject("settings");
+            String snapshot = values == null ? "none" : values.opt("bitrate") + "|" + values.opt("captureScale") + "|"
+                    + values.opt("maxFPS") + "|" + values.opt("prioritizeSpeed") + "|" + values.opt("virtualDisplay")
+                    + "|" + values.opt("sendAudio") + "|" + state.opt("virtualDisplayAvailable") + "|" + state.opt("virtualDisplayNote");
+            snapshot += "|" + pendingSettingsToken + "|" + pendingSettingsField;
+            if (snapshot.equals(hostSnapshot[0])) return;
+            hostSnapshot[0] = snapshot; hostRows.removeAllViews();
+            if (values == null) { addSettingsNote(hostRows, "正在等待 Mac 提供设置。"); return; }
+            LinearLayout streamGroup = new LinearLayout(this); streamGroup.setOrientation(LinearLayout.VERTICAL);
+            streamGroup.setBackground(shape(0xff23262c, 12));
+            LinearLayout.LayoutParams group = new LinearLayout.LayoutParams(-1, -2); group.bottomMargin = dp(6);
+            hostRows.addView(streamGroup, group);
+            addHostChoice(streamGroup, "画质", "bitrate", values.opt("bitrate"));
+            addHostChoice(streamGroup, "分辨率", "captureScale", values.opt("captureScale"));
+            addHostChoice(streamGroup, "帧率", "maxFPS", values.opt("maxFPS"));
+            if (streamGroup.getChildCount() == 0) hostRows.removeView(streamGroup);
+            if (values.opt("prioritizeSpeed") instanceof Boolean value)
+                addHostToggle(hostRows, "优先编码速度", "prioritizeSpeed", value, true, null);
+            if (values.opt("virtualDisplay") instanceof Boolean value) {
+                Boolean available = state.opt("virtualDisplayAvailable") instanceof Boolean b ? b : null;
+                boolean enabled = HostSettingsOptions.canChangeVirtualDisplay(value, available);
+                String note = state.opt("virtualDisplayNote") instanceof String text ? text.trim() : "";
+                if (note.isEmpty() && !enabled) note = "此 Mac 暂不支持虚拟显示器";
+                addHostToggle(hostRows, "虚拟显示器", "virtualDisplay", value, enabled, note);
+            }
+            Boolean sound = values.opt("sendAudio") instanceof Boolean b ? b : null;
+            addHostToggle(hostRows, "Mac 发送声音（测试版）", "sendAudio", Boolean.TRUE.equals(sound), sound != null,
+                    sound == null ? "更新 Mac 上的 Sill 以使用声音。" : null);
+        };
+        refreshInlineHostSettings.run();
         addSettingsHeading(rows, "此设备");
         java.util.ArrayList<Integer> order = new java.util.ArrayList<>();
         order.add(pipIndex); if (offerLarge) order.add(6);
@@ -1606,6 +1638,47 @@ public final class MainActivity extends Activity {
         heading.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
         heading.setPadding(dp(14), dp(6), dp(14), dp(6)); heading.setAccessibilityHeading(true); rows.addView(heading);
     }
+    private void addSettingsNote(LinearLayout rows, String text) {
+        TextView note = new TextView(this); note.setText(text); note.setTextSize(12); note.setTextColor(0xffa4abb5);
+        note.setPadding(dp(14), dp(2), dp(14), dp(8)); rows.addView(note);
+    }
+    private void addHostChoice(LinearLayout group, String title, String field, Object value) {
+        if (!(value instanceof Number number)) return;
+        if (group.getChildCount() > 0) {
+            android.view.View line = new android.view.View(this); line.setBackgroundColor(0xff3a3d44);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, dp(1)); lp.leftMargin = dp(14); group.addView(line, lp);
+        }
+        String display;
+        if (field.equals("bitrate")) {
+            double mbps = number.doubleValue() / 1000000d;
+            display = (mbps == Math.rint(mbps) ? String.valueOf((long) mbps) : String.format(java.util.Locale.ROOT, "%.2f", mbps)) + " Mbps";
+        }
+        else if (field.equals("maxFPS")) display = number.intValue() + " fps";
+        else display = number.doubleValue() == 1 ? "标准" : number.doubleValue() == 2 ? "Retina" : number + "×";
+        if (pendingSettingsToken != 0 && field.equals(pendingSettingsField)) display = "等待 Mac…";
+        LinearLayout row = addSettingsRow(group, title, null, true, () -> showHostSettingChoice(field));
+        TextView detail = new TextView(this); detail.setText(display + "  ▾"); detail.setTextSize(14); detail.setTextColor(0xff9bb7ff);
+        detail.setSingleLine(true); row.addView(detail); row.setContentDescription(title + "，" + display);
+        if (pendingSettingsToken != 0) { row.setEnabled(false); row.setAlpha(.5f); }
+    }
+    private void addHostToggle(LinearLayout rows, String title, String field, boolean value, boolean available, String note) {
+        String label = pendingSettingsToken != 0 && field.equals(pendingSettingsField) ? title + " · 等待 Mac…" : title;
+        LinearLayout row = addSettingsRow(rows, label, value, false, () -> {
+            JSONObject state = hostSettings, latest = state == null ? null : state.optJSONObject("settings");
+            if (latest == null || !(latest.opt(field) instanceof Boolean current)) { show("Mac 已不提供此设置"); return; }
+            Boolean virtualAvailable = state.opt("virtualDisplayAvailable") instanceof Boolean b ? b : null;
+            if (field.equals("virtualDisplay") && !HostSettingsOptions.canChangeVirtualDisplay(current, virtualAvailable)) {
+                String reason = state.opt("virtualDisplayNote") instanceof String text ? text.trim() : "";
+                show(reason.isEmpty() ? "此 Mac 暂不支持虚拟显示器" : reason); return;
+            }
+            changeHostSetting(field, !current);
+        });
+        if (!available || pendingSettingsToken != 0) {
+            row.setEnabled(false); row.setAlpha(.5f);
+            for (int i = 0; i < row.getChildCount(); i++) row.getChildAt(i).setEnabled(false);
+        }
+        if (note != null && !note.isEmpty()) addSettingsNote(rows, note);
+    }
     private LinearLayout addSettingsRow(LinearLayout rows, String label, Boolean checked, boolean grouped, Runnable action) {
         LinearLayout row = new LinearLayout(this); row.setGravity(android.view.Gravity.CENTER_VERTICAL);
         row.setPadding(dp(14), dp(6), dp(14), dp(6)); row.setMinimumHeight(dp(44));
@@ -1625,12 +1698,10 @@ public final class MainActivity extends Activity {
         return row;
     }
     private void showSettingsChild(android.app.AlertDialog dialog) {
-        refreshHostSettings = null;
         settingsChild = dialog;
         dialog.setOnDismissListener(d -> {
             if (settingsChild != dialog) return;
             settingsChild = null;
-            refreshHostSettings = null;
             if (settingsReanchorPending && settingsOpen) { reanchorSettings(); return; }
             if (settingsOverlay == null && settingsDialog == null) finishSettings();
         });
@@ -1650,9 +1721,9 @@ public final class MainActivity extends Activity {
             getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(settingsBack); settingsBack = null;
         }
         android.widget.FrameLayout overlay = settingsOverlay; settingsOverlay = null;
-        settingsScroll = null;
+        settingsScroll = null; refreshInlineHostSettings = null;
         if (overlay != null && overlay.getParent() instanceof android.view.ViewGroup parent) parent.removeView(overlay);
-        android.app.AlertDialog child = settingsChild; settingsChild = null; refreshHostSettings = null;
+        android.app.AlertDialog child = settingsChild; settingsChild = null;
         if (child != null) child.dismiss();
         android.app.AlertDialog dialog = settingsDialog; settingsDialog = null;
         if (dialog != null) dialog.dismiss();
@@ -1666,7 +1737,7 @@ public final class MainActivity extends Activity {
         settingsReanchoring = true;
         try {
             if (settingsScroll != null) settingsScrollY = settingsScroll.getScrollY();
-            settingsScroll = null;
+            settingsScroll = null; refreshInlineHostSettings = null;
             if (android.os.Build.VERSION.SDK_INT >= 33 && settingsBack != null) {
                 getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(settingsBack); settingsBack = null;
             }
@@ -1680,7 +1751,7 @@ public final class MainActivity extends Activity {
     private void finishSettings() {
         if (!settingsOpen) return;
         refreshSettingsMute = null;
-        settingsScroll = null; settingsScrollY = 0;
+        settingsScroll = null; settingsScrollY = 0; refreshInlineHostSettings = null;
         android.util.Log.i("SillAndroid", "Settings: finished");
         settingsOpen = false;
         if (updateSessionLayout != null) updateSessionLayout.run();
@@ -1692,77 +1763,22 @@ public final class MainActivity extends Activity {
             ((android.view.inputmethod.InputMethodManager)getSystemService(INPUT_METHOD_SERVICE)).showSoftInput(keyboard, 0);
         });
     }
-    private void hostSettingsMenu() {
-        JSONObject state = hostSettings;
-        JSONObject settings = state == null ? null : state.optJSONObject("settings");
-        if (settings == null) { show("Mac 尚未提供画质设置"); return; }
-        java.util.ArrayList<String> fields = new java.util.ArrayList<>(), items = new java.util.ArrayList<>();
-        android.widget.ArrayAdapter<String> adapter = new android.widget.ArrayAdapter<>(this, android.R.layout.simple_list_item_1, items) {
-            @Override public boolean areAllItemsEnabled() { return false; }
-            @Override public boolean isEnabled(int index) {
-                JSONObject latestState = hostSettings;
-                JSONObject latest = latestState == null ? null : latestState.optJSONObject("settings");
-                if (latest == null) return false;
-                String field = fields.get(index);
-                if (field.equals("sendAudio")) return latest.opt(field) instanceof Boolean;
-                if (!field.equals("virtualDisplay")) return true;
-                Boolean available = latestState.opt("virtualDisplayAvailable") instanceof Boolean b ? b : null;
-                return HostSettingsOptions.canChangeVirtualDisplay(latest.optBoolean(field), available);
-            }
-            @Override public android.view.View getView(int index, android.view.View convert, android.view.ViewGroup parent) {
-                android.view.View row = super.getView(index, convert, parent);
-                row.setEnabled(isEnabled(index)); row.setAlpha(isEnabled(index) ? 1f : .5f);
-                return row;
-            }
-        };
-        Runnable refresh = () -> {
-            JSONObject latestState = hostSettings;
-            JSONObject latest = latestState == null ? null : latestState.optJSONObject("settings");
-            fields.clear(); items.clear();
-            if (latest != null) {
-                if (latest.has("bitrate") && !latest.isNull("bitrate")) { fields.add("bitrate"); items.add("画质 · " + latest.optInt("bitrate") / 1000000 + " Mbps"); }
-                if (latest.has("maxFPS") && !latest.isNull("maxFPS")) { fields.add("maxFPS"); items.add("帧率 · " + latest.optInt("maxFPS") + " fps"); }
-                if (latest.has("captureScale") && !latest.isNull("captureScale")) { fields.add("captureScale"); items.add("分辨率 · " + (latest.optDouble("captureScale", 1) >= 2 ? "Retina" : "标准")); }
-                if (latest.opt("prioritizeSpeed") instanceof Boolean) {
-                    fields.add("prioritizeSpeed"); items.add("优先编码速度 · " + (latest.optBoolean("prioritizeSpeed") ? "开" : "关") + "\nMac 繁忙时降低延迟，画面可能较柔和");
-                }
-                Boolean available = latestState.opt("virtualDisplayAvailable") instanceof Boolean b ? b : null;
-                boolean virtualEnabled = HostSettingsOptions.canChangeVirtualDisplay(latest.optBoolean("virtualDisplay"), available);
-                if (latest.opt("virtualDisplay") instanceof Boolean) {
-                    fields.add("virtualDisplay");
-                    String note = latestState.opt("virtualDisplayNote") instanceof String text ? text.trim() : "";
-                    if (note.isEmpty() && !virtualEnabled) note = "此 Mac 暂不支持虚拟显示器";
-                    items.add("虚拟显示器 · " + (latest.optBoolean("virtualDisplay") ? "开" : "关") + (note.isEmpty() ? "" : "\n" + note));
-                }
-                fields.add("sendAudio");
-                items.add(HostSettingsOptions.sendAudioLabel(latest.opt("sendAudio") instanceof Boolean b ? b : null));
-            }
-            adapter.notifyDataSetChanged();
-        };
-        refresh.run();
-        showSettingsChild(new android.app.AlertDialog.Builder(this).setTitle("Mac 设置（影响连接的设备）").setAdapter(adapter, (dialog, index) -> {
-            String field = fields.get(index);
-            if (field.equals("bitrate")) {
-                String[] labels = {"低 4 Mbps", "节省 8 Mbps", "均衡 15 Mbps", "高 25 Mbps", "专业 40 Mbps", "极高 80 Mbps", "极限 150 Mbps"};
-                int[] values = {4000000, 8000000, 15000000, 25000000, 40000000, 80000000, 150000000};
-                showSettingsChild(new android.app.AlertDialog.Builder(this).setTitle("画质").setItems(labels, (d, i) -> changeHostSetting("bitrate", values[i])).create());
-            } else if (field.equals("maxFPS")) {
-                showSettingsChild(new android.app.AlertDialog.Builder(this).setTitle("帧率").setItems(new String[]{"60 fps", "120 fps"}, (d, i) -> changeHostSetting("maxFPS", i == 0 ? 60 : 120)).create());
-            } else if (field.equals("captureScale")) {
-                showSettingsChild(new android.app.AlertDialog.Builder(this).setTitle("分辨率").setItems(new String[]{"标准", "Retina"}, (d, i) -> changeHostSetting("captureScale", i == 0 ? 1.0 : 2.0)).create());
-            } else {
-                JSONObject latestState = hostSettings;
-                JSONObject latest = latestState == null ? null : latestState.optJSONObject("settings");
-                if (latest == null || !(latest.opt(field) instanceof Boolean current)) { show("Mac 已不提供此设置"); return; }
-                Boolean latestAvailable = latestState.opt("virtualDisplayAvailable") instanceof Boolean b ? b : null;
-                if (field.equals("virtualDisplay") && !HostSettingsOptions.canChangeVirtualDisplay(current, latestAvailable)) {
-                    String note = latestState.opt("virtualDisplayNote") instanceof String text ? text.trim() : "";
-                    show(note.isEmpty() ? "此 Mac 暂不支持虚拟显示器" : note); return;
-                }
-                changeHostSetting(field, !current);
-            }
-        }).create());
-        refreshHostSettings = refresh;
+    private void showHostSettingChoice(String field) {
+        if (pendingSettingsToken != 0) { show("正在等待 Mac 确认设置"); return; }
+        JSONObject state = hostSettings, values = state == null ? null : state.optJSONObject("settings");
+        if (values == null || !(values.opt(field) instanceof Number)) { show("Mac 已不提供此设置"); return; }
+        if (field.equals("bitrate")) {
+            String[] labels = {"低 4 Mbps", "节省 8 Mbps", "均衡 15 Mbps", "高 25 Mbps", "专业 40 Mbps", "极高 80 Mbps", "极限 150 Mbps"};
+            int[] rates = {4000000, 8000000, 15000000, 25000000, 40000000, 80000000, 150000000};
+            showSettingsChild(new android.app.AlertDialog.Builder(this).setTitle("画质")
+                    .setItems(labels, (d, i) -> changeHostSetting("bitrate", rates[i])).create());
+        } else if (field.equals("maxFPS")) {
+            showSettingsChild(new android.app.AlertDialog.Builder(this).setTitle("帧率")
+                    .setItems(new String[]{"60 fps", "120 fps"}, (d, i) -> changeHostSetting("maxFPS", i == 0 ? 60 : 120)).create());
+        } else if (field.equals("captureScale")) {
+            showSettingsChild(new android.app.AlertDialog.Builder(this).setTitle("分辨率")
+                    .setItems(new String[]{"标准", "Retina"}, (d, i) -> changeHostSetting("captureScale", i == 0 ? 1.0 : 2.0)).create());
+        }
     }
     private void changeHostSetting(String field, Object value) {
         JSONObject settings = hostSettings == null ? null : hostSettings.optJSONObject("settings");
@@ -1771,10 +1787,11 @@ public final class MainActivity extends Activity {
         try {
             pendingSettingsToken = ++settingsToken; pendingSettingsField = field; pendingSettingsValue = value;
             sendAsync(17, new JSONObject().put("token", pendingSettingsToken).put(field, value));
+            if (refreshInlineHostSettings != null) refreshInlineHostSettings.run();
             show("正在更新 Mac 设置…");
             int waiting = pendingSettingsToken;
-            ui.postDelayed(() -> { if (pendingSettingsToken == waiting) { pendingSettingsToken = 0; show("Mac 未确认设置，请重试"); } }, 10000);
-        } catch (Exception e) { pendingSettingsToken = 0; show("设置发送失败"); }
+            ui.postDelayed(() -> { if (pendingSettingsToken == waiting) { pendingSettingsToken = 0; if (refreshInlineHostSettings != null) refreshInlineHostSettings.run(); show("Mac 未确认设置，请重试"); } }, 10000);
+        } catch (Exception e) { pendingSettingsToken = 0; if (refreshInlineHostSettings != null) refreshInlineHostSettings.run(); show("设置发送失败"); }
     }
     private void updateClipboard() {
         if (!clipboardEnabled) clipboardReceipt.cancel();
@@ -2535,7 +2552,6 @@ public final class MainActivity extends Activity {
                 ui.post(() -> {
                     if (connection != messageSession) return;
                     hostSettings = state;
-                    if (refreshHostSettings != null) refreshHostSettings.run();
                     if (tourOverlay != null) updateTourStep();
                     updateAudioTiming();
                     if (scaleControl != null) scaleControl.refresh();
@@ -2546,6 +2562,7 @@ public final class MainActivity extends Activity {
                                 : pendingSettingsValue.equals(actual);
                         pendingSettingsToken = 0; show(accepted ? "Mac 设置已更新" : "Mac 未接受此设置");
                     }
+                    if (refreshInlineHostSettings != null) refreshInlineHostSettings.run();
                 });
             }
             case 24 -> {
