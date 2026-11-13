@@ -14,16 +14,22 @@ final class SignedMacInfo {
             0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, (byte) 0x86, 0x48, (byte) 0xce, 0x3d, 0x02, 0x01,
             0x06, 0x08, 0x2a, (byte) 0x86, 0x48, (byte) 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00};
 
-    record Update(String macId, String name, double issuedAt, boolean remoteAccess, List<SavedMacs.Endpoint> addresses, List<String> kinds) {
+    record Update(String macId, String name, double issuedAt, boolean remoteAccess, List<SavedMacs.Endpoint> addresses, List<String> kinds, List<Boolean> implicitPorts, int remotePort) {
         Update(String id, String name, double at, boolean remote, List<SavedMacs.Endpoint> addresses) {
             this(id, name, at, remote, addresses, java.util.Collections.nCopies(addresses.size(), "internet"));
         }
+        Update(String id, String name, double at, boolean remote, List<SavedMacs.Endpoint> addresses, List<String> kinds) {
+            this(id, name, at, remote, addresses, kinds, java.util.Collections.nCopies(addresses.size(), false), 0);
+        }
         Update {
-            if (macId == null || name == null || !Double.isFinite(issuedAt) || issuedAt <= 0)
+            if (macId == null || name == null || !Double.isFinite(issuedAt) || issuedAt <= 0 || remotePort < 0 || remotePort > 65535)
                 throw new IllegalArgumentException("Invalid Mac info");
-            addresses = List.copyOf(addresses); kinds = List.copyOf(kinds);
-            if (kinds.size() != addresses.size() || kinds.stream().anyMatch(k -> !java.util.Set.of("vpn", "lan", "internet").contains(k)))
+            addresses = List.copyOf(addresses); kinds = List.copyOf(kinds); implicitPorts = List.copyOf(implicitPorts);
+            if (kinds.size() != addresses.size() || implicitPorts.size() != addresses.size() || kinds.stream().anyMatch(k -> !java.util.Set.of("vpn", "lan", "internet").contains(k)))
                 throw new IllegalArgumentException("Invalid address kind");
+            for (int i = 0; i < addresses.size(); i++)
+                if (implicitPorts.get(i) && (remotePort == 0 || addresses.get(i).port() != remotePort))
+                    throw new IllegalArgumentException("Invalid implicit port");
         }
     }
 
@@ -59,5 +65,12 @@ final class SignedMacInfo {
             }
             return new SavedMacs.Endpoint(normalized, port);
         } catch (Exception ignored) { return null; }
+    }
+
+    static boolean containsAddress(List<SavedMacs.Endpoint> addresses, List<Boolean> implicitPorts,
+                                   SavedMacs.Endpoint address, boolean implicitPort) {
+        for (int i = 0; i < addresses.size(); i++)
+            if (addresses.get(i).equals(address) && implicitPorts.get(i) == implicitPort) return true;
+        return false;
     }
 }

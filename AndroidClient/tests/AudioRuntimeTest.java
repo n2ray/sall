@@ -48,6 +48,7 @@ public final class AudioRuntimeTest {
             return n;
         }
         public int bufferFrames() { return reportedBufferFrames; }
+        public int underruns() { return underruns; }
         public boolean routeChanged() { boolean changed = routeChange; routeChange = false; return changed; }
         public void close() { if (active) closes++; active = false; output.clear(); }
     }
@@ -184,7 +185,7 @@ public final class AudioRuntimeTest {
         clockRuntime.packet(packet(0, true), 1000, badClock.now, badClock.now);
         boolean failed = false;
         try { pump(clockRuntime, badClock, 201); } catch (IllegalStateException expected) { failed = true; }
-        assert failed && badClock.floats <= 12000 * 2; clockRuntime.close();
+        assert failed && badClock.floats <= (badClock.bufferFrames() + 12000) * 2; clockRuntime.close();
         Fake badPts = new Fake(); badPts.wrongPTS = true;
         AudioRuntime ptsRuntime = new AudioRuntime(badPts, () -> badPts.now);
         ptsRuntime.format(1, 480, 0, new byte[]{1});
@@ -199,7 +200,8 @@ public final class AudioRuntimeTest {
         stuckRuntime.packet(packet(0, true), 1000, stuck.now, stuck.now);
         failed = false;
         try { pump(stuckRuntime, stuck, 150); } catch (IllegalStateException expected) {
-            failed = expected.getMessage().contains("timeout") || expected.getMessage().contains("timestamp");
+            failed = expected.getMessage().contains("timeout") || expected.getMessage().contains("timestamp")
+                    || expected.getMessage().contains("underrun");
         }
         assert failed; stuckRuntime.close();
         Fake zero = new Fake(); zero.shortWrite = 0;

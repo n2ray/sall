@@ -19,6 +19,7 @@ final class AudioRuntime implements AutoCloseable {
         Stamp timestamp();
         int write(float[] pcm, int offset, int count);
         int bufferFrames();
+        default int underruns() { return 0; }
         boolean routeChanged();
         @Override void close();
     }
@@ -30,6 +31,9 @@ final class AudioRuntime implements AutoCloseable {
     private final AudioOutputTimeline timeline = new AudioOutputTimeline(96000);
     private final ArrayDeque<AudioDecodeMapping.Input> inputs = new ArrayDeque<>();
     private AudioPresentationClock clock;
+    private AudioStartupSupply startup;
+    private boolean handedOff;
+    private double outputLeadFrames;
     private byte[] cookie;
     private int epoch = -1, frames;
     private boolean enabled = true, opened, submitted;
@@ -54,13 +58,16 @@ final class AudioRuntime implements AutoCloseable {
     void timing(double refreshSeconds, double fps) {
         if (!Double.isFinite(refreshSeconds) || refreshSeconds <= 0 || !Double.isFinite(fps) || fps <= 0) return;
         refresh = refreshSeconds; streamFPS = fps;
-        if (opened) model.latency(0, Math.max(240, device.bufferFrames()) / 48000.0, refresh, streamFPS);
+        updateLatency();
     }
+    private void updateLatency() { if (opened) model.latency(0, outputLeadFrames / 48000.0, refresh, streamFPS); }
     String diagnostics() {
         if (!opened) return null;
         return "Audio experimental generation=" + join.generation() + " clock=" + clock.state()
                 + " writtenFrames=" + timeline.writtenFrames() + " pendingFloats=" + timeline.pendingFloats()
-                + " decoderPending=" + mapping.pendingPackets() + " schedulePending=" + join.pendingSchedules();
+                + " decoderPending=" + mapping.pendingPackets() + " schedulePending=" + join.pendingSchedules()
+                + " startupBudget=" + startup.budget() + " startupAllocated=" + startup.allocated()
+                + " handoff=" + handedOff + " writeLeadFrames=" + outputLeadFrames;
     }
     void enabled(boolean on) {
         if (enabled == on) return;
@@ -70,11 +77,14 @@ final class AudioRuntime implements AutoCloseable {
         if (cookie == null || batch.epoch() != epoch) return;
         lastPacket = now / 1e9;
         if (enabled && !opened) {
-            device.open(cookie); opened = true;
+            device.open(cookie);
             now = monotonic.getAsLong();
             clock = new AudioPresentationClock(now);
+            startup = new AudioStartupSupply(device.bufferFrames(), now);
+            opened = true;
+            handedOff = false;
             // Buffer capacity is conservative write-ahead, not a claim of measured hardware IO latency.
-            model.latency(0, Math.max(240, device.bufferFrames()) / 48000.0, refresh, streamFPS);
+            outputLeadFrames = Math.max(240, device.bufferFrames()); updateLatency();
         }
         for (var packet : AudioDecodeMapping.expand(batch, stamp, frames)) {
             if (opened) decode();
@@ -98,19 +108,28 @@ final class AudioRuntime implements AutoCloseable {
         decode();
         var stamp = device.timestamp();
         now = monotonic.getAsLong();
+        require(device.underruns() == 0, "audio underrun during " + clock.state());
         if (stamp != null) clock.observe(clock.generation(), stamp.frame, stamp.nanos, now, timeline.writtenFrames());
         require(clock.check(now) != AudioPresentationClock.State.FAILED, "presentation timestamp unavailable or discontinuous");
+        if (!handedOff) startup.observe(stamp, now, timeline.writtenFrames());
         var reading = clock.reading();
+        if (reading != null && !handedOff) {
+            double presentedNow = reading.frame() + (now - reading.nanos()) / 1e9 * 48000;
+            // Bootstrap zeros are irrevocably committed. Freeze this generation's writable
+            // horizon before the model admits its waiting PCM; never derive it from later music.
+            outputLeadFrames = Math.max(outputLeadFrames, timeline.endFrame() - presentedNow);
+            handedOff = true; updateLatency();
+        }
         if (reading != null) apply(model.played(reading.frame(), reading.nanos() / 1e9, now / 1e9), now / 1e9);
         apply(model.tick(now / 1e9), now / 1e9);
         require(join.pump(join.generation(), timeline, now / 1e9) != AudioScheduleJoin.State.FAILED, join.failure());
         if (clock.state() == AudioPresentationClock.State.STARTING) {
-            int count = clock.startupSilence(clock.generation(), now, Math.max(960, device.bufferFrames()));
+            int count = startup.replenish(now);
             if (count > 0) silence(count);
         } else if (!model.holding() && join.pendingSchedules() == 0) {
             // Keep the hardware clock advancing in gaps, but never commit over an editable tail.
             long target = reading.frame() + Math.max(0, Math.round((now - reading.nanos()) / 1e9 * 48000))
-                    + Math.max(960, device.bufferFrames());
+                    + Math.max(960, (long) Math.ceil(outputLeadFrames));
             long gap = target - timeline.endFrame();
             // Fill elapsed demand in one bounded allocation, not a fixed number of frames per
             // invocation. A stalled writer must fail rather than accumulate unbounded silence.
@@ -142,7 +161,8 @@ final class AudioRuntime implements AutoCloseable {
         require(join.apply(join.generation(), output, now) != AudioScheduleJoin.State.FAILED, join.failure());
     }
     private void resetPlayback() {
-        device.close(); opened = submitted = false; clock = null;
+        device.close(); opened = submitted = false; clock = null; startup = null;
+        handedOff = false; outputLeadFrames = 0;
         model.reset(AudioPlayout.Reset.PLAYBACK); mapping.flush(); join.reset(); timeline.flushed(); inputs.clear();
     }
     private static void require(boolean ok, String message) { if (!ok) throw new IllegalStateException(message); }

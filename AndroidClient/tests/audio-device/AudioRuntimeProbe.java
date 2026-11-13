@@ -64,6 +64,7 @@ final class AudioRuntimeProbe {
             return written;
         }
         public int bufferFrames() { return actual.bufferFrames(); }
+        public int underruns() { return actual.underruns(); }
         public boolean routeChanged() { return actual.routeChanged(); }
         public void close() {
             try { AudioTrack track = track(); if (track != null) snapshot(track); }

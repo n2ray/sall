@@ -10,5 +10,6 @@ javac -d "$classes" "$src/AudioPackets.java" "$src/AudioPlayout.java" "$src/Audi
 java -ea -cp "$classes" io.github.n2ray.sill.AudioScheduleJoinTest
 javac -d "$classes" "$src/AudioPresentationClock.java" "$root/tests/AudioPresentationClockTest.java"
 java -ea -cp "$classes" io.github.n2ray.sill.AudioPresentationClockTest
-javac -cp "$classes" -d "$classes" "$src/AudioRuntime.java" "$root/tests/AudioRuntimeTest.java"
+javac -cp "$classes" -d "$classes" "$src/AudioStartupSupply.java" "$src/AudioRuntime.java" "$root/tests/AudioRuntimeTest.java" "$root/tests/AudioDelayedRouteTest.java"
 java -ea -cp "$classes" io.github.n2ray.sill.AudioRuntimeTest
+java -ea -cp "$classes" io.github.n2ray.sill.AudioDelayedRouteTest

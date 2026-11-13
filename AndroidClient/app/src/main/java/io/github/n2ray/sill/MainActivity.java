@@ -1613,17 +1613,18 @@ public final class MainActivity extends Activity {
                     JSONArray advertised = info.getJSONArray("addresses");
                     java.util.List<SavedMacs.Endpoint> addresses = new java.util.ArrayList<>();
                     java.util.List<String> kinds = new java.util.ArrayList<>();
+                    java.util.List<Boolean> implicitPorts = new java.util.ArrayList<>();
                     for (int i = 0; i < advertised.length(); i++) {
                         JSONObject entry = advertised.getJSONObject(i);
                         int port = entry.isNull("port") ? defaultPort : entry.getInt("port");
                         if (!entry.isNull("port") && entry.getDouble("port") != port) continue;
                         SavedMacs.Endpoint address = SignedMacInfo.address(entry.getString("host"), port);
-                        if (address != null && !addresses.contains(address)) {
-                            addresses.add(address); kinds.add(entry.getString("kind"));
+                        if (address != null && !SignedMacInfo.containsAddress(addresses, implicitPorts, address, entry.isNull("port"))) {
+                            addresses.add(address); kinds.add(entry.getString("kind")); implicitPorts.add(entry.isNull("port"));
                         }
                     }
                     SignedMacInfo.Update update = new SignedMacInfo.Update(macId, info.getString("name"),
-                            info.getDouble("issuedAt"), info.getBoolean("remoteAccess"), addresses, kinds);
+                            info.getDouble("issuedAt"), info.getBoolean("remoteAccess"), addresses, kinds, implicitPorts, defaultPort);
                     ui.post(() -> {
                         if (connection == messageSession && savedMacStore.refresh(pin, update)) refreshSavedMacs();
                     });

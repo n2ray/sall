@@ -182,6 +182,69 @@ public final class SavedMacsTest {
                 "Explicit manual choice of the same VPN remains after remembered expiry");
         lifecyclePreferences.values.put(oldLan.legacyKey(), one.fingerprint());
         check(!new SavedMacStore(lifecyclePreferences).all().get(0).addresses().contains(oldLan), "Rollback legacy pins cannot resurrect withdrawn paths");
+        MemoryPreferences portsPreferences = new MemoryPreferences();
+        SavedMacStore ports = new SavedMacStore(portsPreferences);
+        SavedMacs.Endpoint implicitOld = new SavedMacs.Endpoint("100.64.1.1", 7455);
+        SavedMacs.Endpoint implicitNew = new SavedMacs.Endpoint("100.64.1.1", 8455);
+        SavedMacs.Endpoint explicit = new SavedMacs.Endpoint("100.64.1.2", 7455);
+        SavedMacs.Endpoint rememberOld = new SavedMacs.Endpoint("100.64.1.3", 7455);
+        SavedMacs.Endpoint rememberNew = new SavedMacs.Endpoint("100.64.1.3", 8455);
+        ports.paired(one, lan);
+        ports.refresh(first, new SignedMacInfo.Update(one.macId(), "Mac", 10, true,
+                List.of(implicitOld, explicit, rememberOld), List.of("vpn", "vpn", "vpn"), List.of(true, false, true), 7455), now);
+        ports.refresh(first, new SignedMacInfo.Update(one.macId(), "Mac", 11, true,
+                List.of(implicitOld, explicit), List.of("vpn", "vpn"), List.of(true, false), 7455), now + 1);
+        check(!ports.refresh(second, new SignedMacInfo.Update(one.macId(), "bad", 12, false,
+                List.of(), List.of(), List.of(), 8455), now + 2), "Wrong pin cannot alter implicit ports");
+        check(!ports.refresh(first, new SignedMacInfo.Update(one.macId(), "old", 10, false,
+                List.of(), List.of(), List.of(), 8455), now + 2), "Old signed data cannot alter implicit ports");
+        check(ports.refresh(first, new SignedMacInfo.Update(one.macId(), "Mac", 12, false,
+                List.of(), List.of(), List.of(), 8455), now + 2), "Signed remote port updates even when the list is retained");
+        SavedMacs.Mac changedPort = new SavedMacStore(portsPreferences).all().get(0);
+        check(changedPort.addresses(now + 2).containsAll(List.of(implicitNew, explicit, rememberNew, lan)),
+                "Implicit advertised and remembered addresses follow signed port while explicit and typed addresses remain");
+        check(!changedPort.addresses(now + 2).contains(implicitOld) && !changedPort.addresses(now + 2).contains(rememberOld),
+                "Previous implicit ports do not survive the verified update");
+        check(changedPort.remembered().size() == 1 && changedPort.remembered().get(0).address().implicitPort(),
+                "Remembered implicit provenance survives persistence");
+        check(changedPort.identity().fingerprint().equals(one.fingerprint()), "Port updates cannot alter the pin");
+        check(ports.refresh(first, new SignedMacInfo.Update(one.macId(), "Mac", 13, true,
+                List.of(new SavedMacs.Endpoint("100.64.1.1", 9455), explicit), List.of("vpn", "vpn"), List.of(true, false), 9455), now + 3),
+                "A signed replacement can change the default port");
+        SavedMacs.Mac replacedPort = new SavedMacStore(portsPreferences).all().get(0);
+        check(replacedPort.addresses(now + 3).contains(new SavedMacs.Endpoint("100.64.1.1", 9455))
+                && !replacedPort.addresses(now + 3).contains(implicitNew), "Relisted implicit VPN does not become a stale remembered port");
+        check(replacedPort.addresses(now + 3).contains(new SavedMacs.Endpoint("100.64.1.3", 9455))
+                && replacedPort.addresses(now + 3).contains(explicit), "Remembered implicit VPN follows the new default and explicit VPN does not");
+        MemoryPreferences legacyOrigins = new MemoryPreferences();
+        SavedMacStore legacyPortStore = new SavedMacStore(legacyOrigins);
+        legacyPortStore.paired(one, lan);
+        legacyOrigins.values.put(SavedMacs.PREFIX + one.macId() + ":addressOrigins",
+                "advertised\tvpn\t0\t" + implicitOld.legacyKey() + "\n");
+        check(legacyPortStore.refresh(first, new SignedMacInfo.Update(one.macId(), "Mac", 20, false,
+                List.of(), List.of(), List.of(), 8455), now + 3), "Legacy origins remain readable");
+        check(new SavedMacStore(legacyOrigins).all().get(0).addresses(now + 3).contains(implicitOld),
+                "Legacy four-column origins retain explicit ports when implicit status is unknown");
+        MemoryPreferences sharedEndpointPreferences = new MemoryPreferences();
+        SavedMacStore sharedEndpointStore = new SavedMacStore(sharedEndpointPreferences);
+        sharedEndpointStore.paired(one, lan);
+        List<SavedMacs.Endpoint> sameEndpoint = new java.util.ArrayList<>();
+        List<String> sameKinds = new java.util.ArrayList<>();
+        List<Boolean> sameImplicit = new java.util.ArrayList<>();
+        for (boolean implicit : List.of(true, false, true, false)) {
+            if (!SignedMacInfo.containsAddress(sameEndpoint, sameImplicit, implicitOld, implicit)) {
+                sameEndpoint.add(implicitOld); sameKinds.add("vpn"); sameImplicit.add(implicit);
+            }
+        }
+        check(sameEndpoint.size() == 2, "Shared endpoint retains one route of each port provenance");
+        sharedEndpointStore.refresh(first, new SignedMacInfo.Update(one.macId(), "Mac", 30, true,
+                sameEndpoint, sameKinds, sameImplicit, 7455), now);
+        check(new SavedMacStore(sharedEndpointPreferences).all().get(0).advertised().size() == 2,
+                "Both port provenances survive persistence");
+        sharedEndpointStore.refresh(first, new SignedMacInfo.Update(one.macId(), "Mac", 31, false,
+                List.of(), List.of(), List.of(), 8455), now + 1);
+        check(new SavedMacStore(sharedEndpointPreferences).all().get(0).addresses(now + 1).containsAll(List.of(implicitOld, implicitNew)),
+                "After the signed port changes, the explicit route stays and the implicit route follows");
         System.out.println("Saved Mac identity, migration, persistence, address provenance, VPN expiry/cap and forget checks passed");
     }
 

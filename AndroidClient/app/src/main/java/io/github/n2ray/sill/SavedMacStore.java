@@ -114,14 +114,19 @@ final class SavedMacStore {
                     || info.issuedAt() <= mac.infoIssuedAt()) continue;
             SavedMacs.Identity next = new SavedMacs.Identity(info.macId(), mac.identity().fingerprint(), info.name(), mac.identity().recognitionKey());
             if (next.name().isEmpty()) next = mac.identity();
+            List<SavedMacs.Advertised> previous = mac.advertised().stream().map(a -> a.withDefaultPort(info.remotePort())).toList();
+            List<SavedMacs.Remembered> remembered = mac.remembered().stream()
+                    .map(r -> new SavedMacs.Remembered(r.address().withDefaultPort(info.remotePort()), r.listedAt())).toList();
+            SavedMacs.Mac rebased = new SavedMacs.Mac(mac.identity(), mac.typedAddresses(), mac.lastWorked(), mac.infoIssuedAt(),
+                    mac.discoveredAddresses(), previous, remembered, mac.listedAt());
             List<SavedMacs.Advertised> advertised = new ArrayList<>();
             for (int j = 0; j < info.addresses().size(); j++)
-                advertised.add(new SavedMacs.Advertised(info.addresses().get(j), info.kinds().get(j)));
+                advertised.add(new SavedMacs.Advertised(info.addresses().get(j), info.kinds().get(j), info.implicitPorts().get(j)));
             boolean replace = info.remoteAccess() && !advertised.isEmpty();
-            if (!replace) advertised = mac.advertised();
+            if (!replace) advertised = previous;
             records.set(i, new SavedMacs.Mac(next, mac.typedAddresses(), mac.lastWorked(), info.issuedAt(),
                     // A successful Bonjour path is provisional; the signed list owns advertised routes.
-                    replace ? List.of() : mac.discoveredAddresses(), advertised, SavedMacs.remembering(mac, advertised, replace, now),
+                    replace ? List.of() : mac.discoveredAddresses(), advertised, SavedMacs.remembering(rebased, advertised, replace, now),
                     replace ? now : mac.listedAt()));
             write(records, preferences.edit()).apply();
             return true;

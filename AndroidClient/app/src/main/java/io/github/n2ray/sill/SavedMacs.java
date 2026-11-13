@@ -60,7 +60,12 @@ final class SavedMacs {
 
     static final double REMEMBER_FOR = 90 * 24 * 3600;
     static final int REMEMBER_CAP = 4;
-    record Advertised(Endpoint endpoint, String kind) {}
+    record Advertised(Endpoint endpoint, String kind, boolean implicitPort) {
+        Advertised(Endpoint endpoint, String kind) { this(endpoint, kind, false); }
+        Advertised withDefaultPort(int port) {
+            return implicitPort && port > 0 ? new Advertised(new Endpoint(endpoint.host(), port), kind, true) : this;
+        }
+    }
     record Remembered(Advertised address, double listedAt) {}
     record Mac(Identity identity, List<Endpoint> typedAddresses, Endpoint lastWorked, double infoIssuedAt,
                List<Endpoint> discoveredAddresses, List<Advertised> advertised, List<Remembered> remembered, double listedAt) {
@@ -154,8 +159,8 @@ final class SavedMacs {
                         switch (parts[0]) {
                             case "typed" -> typed.add(endpoint);
                             case "discovered" -> discovered.add(endpoint);
-                            case "advertised" -> advertised.add(new Advertised(endpoint, parts[1]));
-                            case "remembered" -> remembered.add(new Remembered(new Advertised(endpoint, parts[1]), Double.parseDouble(parts[2])));
+                            case "advertised" -> advertised.add(new Advertised(endpoint, parts[1], parts.length > 4 && parts[4].equals("implicit")));
+                            case "remembered" -> remembered.add(new Remembered(new Advertised(endpoint, parts[1], parts.length > 4 && parts[4].equals("implicit")), Double.parseDouble(parts[2])));
                             default -> throw new IllegalArgumentException("Unknown address origin");
                         }
                     }
@@ -185,8 +190,8 @@ final class SavedMacs {
             StringBuilder origins = new StringBuilder();
             for (Endpoint e : mac.typedAddresses()) origins.append("typed\t\t0\t").append(e.legacyKey()).append('\n');
             for (Endpoint e : mac.discoveredAddresses()) origins.append("discovered\t\t0\t").append(e.legacyKey()).append('\n');
-            for (Advertised a : mac.advertised()) origins.append("advertised\t").append(a.kind()).append("\t0\t").append(a.endpoint().legacyKey()).append('\n');
-            for (Remembered r : mac.remembered()) origins.append("remembered\t").append(r.address().kind()).append('\t').append(r.listedAt()).append('\t').append(r.address().endpoint().legacyKey()).append('\n');
+            for (Advertised a : mac.advertised()) origins.append("advertised\t").append(a.kind()).append("\t0\t").append(a.endpoint().legacyKey()).append('\t').append(a.implicitPort() ? "implicit" : "").append('\n');
+            for (Remembered r : mac.remembered()) origins.append("remembered\t").append(r.address().kind()).append('\t').append(r.listedAt()).append('\t').append(r.address().endpoint().legacyKey()).append('\t').append(r.address().implicitPort() ? "implicit" : "").append('\n');
             result.put(base + "addressOrigins", origins.toString());
         }
         return result;

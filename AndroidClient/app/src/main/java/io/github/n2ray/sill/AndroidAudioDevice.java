@@ -90,6 +90,7 @@ final class AndroidAudioDevice implements AudioRuntime.Device {
         return track.write(pcm, offset, count, AudioTrack.WRITE_NON_BLOCKING);
     }
     @Override public int bufferFrames() { return track.getBufferSizeInFrames(); }
+    @Override public int underruns() { return track.getUnderrunCount(); }
     @Override public boolean routeChanged() {
         AudioDeviceInfo device = track.getRoutedDevice();
         if (device == null) return route != null;
