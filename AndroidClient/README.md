@@ -1,6 +1,6 @@
 # Sall Android client
 
-Sall is an unofficial Android client for the original [Sill](https://github.com/Saffsanity/sill) Mac host. Version 0.1.1-alpha.1 is an early test build. It uses `io.github.n2ray.sall`; earlier `io.github.n2ray.sill` development installations have separate data and require pairing again.
+Sall is an unofficial Android client for the original [Sill](https://github.com/Saffsanity/sill) Mac host. Version 0.1.2-alpha.1 is an early test build. It uses `io.github.n2ray.sall`; earlier `io.github.n2ray.sill` development installations have separate data and require pairing again.
 
 Pair with a QR code or pairing code, connect to a Mac running the original host, and choose a window or desktop. Remote access requires Mac-side Remote Access and a network route such as Tailscale. Audio is experimental and off by default; enable both Mac audio sending and the phone's sound option. Some Mac windows cannot match the phone panel because of minimum size constraints. Capabilities such as multiple-display navigation depend on the installed host version.
 
@@ -11,6 +11,8 @@ Pair with a QR code or pairing code, connect to a Mac running the original host,
 - Decoder availability and software-decoding performance vary by device, resolution and frame rate. Android 15 / SDK 35 is the target and build platform, not the minimum OS.
 
 Starting with 0.1.1-alpha.1, Sall tries the system's default HEVC decoder first, then available HEVC software decoders after a decoder error and requests a fresh keyframe. The reported Unisoc T310 tablet still needs real-device verification. Version 0.1.0-alpha.1 does not automatically fall back.
+
+Starting with 0.1.2-alpha.1, Sall checks the video size against device decoder and graphics limits and can ask the Mac to use Standard resolution. This changes the Mac's setting and can affect other connected devices. If Standard still exceeds the device's graphics limit, lower the Mac display resolution or choose a smaller window. The Unisoc T310 fix still requires device testing.
 
 ## Build
 

@@ -291,7 +291,11 @@ public final class MainActivity extends Activity {
     private volatile boolean videoUnavailableReported;
     private volatile Surface decoderSurface;
     private volatile long surfaceEpoch, decoderEpoch = -1;
-    private Hevc.Parameters lastParameters;
+    private volatile Hevc.Parameters lastParameters;
+    private volatile VideoSizeLimits.Result videoSizeLimits;
+    private volatile boolean videoSizeBlocked;
+    private volatile SillConnection videoSizeOwner;
+    private boolean videoSizeReductionRequested, videoSizeNoticeShown;
     private record FreshFrame(long generation, long presentationUs) { }
     private final java.util.concurrent.atomic.AtomicReference<FreshFrame> revealFrame = new java.util.concurrent.atomic.AtomicReference<>();
     private long recoveryGeneration = -1;
@@ -3161,7 +3165,7 @@ public final class MainActivity extends Activity {
             refreshDiagnostics();
             show("正在更新 Mac 设置…");
             int waiting = pendingSettingsToken;
-            ui.postDelayed(() -> { if (pendingSettingsToken == waiting) { pendingSettingsToken = 0; if (refreshInlineHostSettings != null) refreshInlineHostSettings.run(); refreshDiagnostics(); show("Mac 未确认设置，请重试"); } }, 10000);
+            ui.postDelayed(() -> { if (pendingSettingsToken == waiting) { pendingSettingsToken = 0; if (refreshInlineHostSettings != null) refreshInlineHostSettings.run(); refreshDiagnostics(); show("Mac 未确认设置，请重试"); adjustOversizedVideo(); } }, 10000);
         } catch (Exception e) { pendingSettingsToken = 0; if (refreshInlineHostSettings != null) refreshInlineHostSettings.run(); refreshDiagnostics(); show("设置发送失败"); }
     }
     private boolean clipboardChipEligible() {
@@ -3636,6 +3640,8 @@ public final class MainActivity extends Activity {
         catch (Exception e) { show("请填写有效地址和端口。"); return; }
         if (running) { show("已有连接，请退出后重试。"); return; }
         videoDecoderPolicy = new VideoDecoderPolicy(); videoUnavailableReported = false;
+        videoSizeBlocked = false; videoSizeLimits = null; videoSizeOwner = null;
+        videoSizeReductionRequested = false; videoSizeNoticeShown = false;
         synchronized (outputLock) { reconnectSource = new ReconnectSourcePolicy(); }
         resetTourSession();
         PairingAuthorization pairingGuard;
@@ -4238,6 +4244,7 @@ public final class MainActivity extends Activity {
                         pendingSettingsToken = 0; show(accepted ? "Mac 设置已更新" : "Mac 未接受此设置");
                         refreshDiagnostics();
                     }
+                    adjustOversizedVideo();
                     if (refreshInlineHostSettings != null) refreshInlineHostSettings.run();
                 });
             }
@@ -4309,8 +4316,16 @@ public final class MainActivity extends Activity {
             case 0 -> {
                 Hevc.Parameters params = Hevc.parameters(message.payload()); nalSize = params.lengthSize();
                 lastParameters = params;
-                if (pip != null && pip.paused()) { waitingForKeyframe = true; interruptPicture(); return; }
                 releaseDecoder(); waitingForKeyframe = true;
+                Hevc.Size size = Hevc.size(params.codecConfig());
+                VideoSizeLimits.Result limits = VideoSizeLimits.check(size.width(), size.height());
+                videoSizeOwner = messageSession; videoSizeLimits = limits;
+                videoSizeBlocked = !limits.textureSafe() || !limits.hardwareSupported();
+                android.util.Log.i("Sall", "Video size: " + size.width() + "x" + size.height()
+                        + " textureSafe=" + limits.textureSafe() + " hardwareSupported=" + limits.hardwareSupported());
+                if (videoSizeBlocked) { interruptPicture(); ui.post(this::adjustOversizedVideo); return; }
+                ui.post(() -> { if (connection == messageSession && lastParameters == params) { videoSizeReductionRequested = false; videoSizeNoticeShown = false; } });
+                if (pip != null && pip.paused()) { interruptPicture(); return; }
                 HostLockState lock = hostLock;
                 if ((lock == null || !lock.isCovered()) && pictureWatched() && surface != null && surface.isValid()) createDecoder(params);
                 else interruptPicture();
@@ -4319,6 +4334,7 @@ public final class MainActivity extends Activity {
                 try {
                 AudioPlayer player = audio;
                 if (player != null && messageSession == connection) player.videoFrame(message.timestamp(), audioArrivalNanos);
+                if (videoSizeBlocked) return;
                 if (videoUnavailableReported) return;
                 HostLockState lock = hostLock;
                 if (lock == null || lock.isCovered()) return;
@@ -4410,6 +4426,25 @@ public final class MainActivity extends Activity {
             }
         }
     }
+    private void adjustOversizedVideo() {
+        VideoSizeLimits.Result limits = videoSizeLimits;
+        if (!videoSizeBlocked || limits == null || videoSizeOwner != connection || connection == null) return;
+        JSONObject settings = hostSettings == null ? null : hostSettings.optJSONObject("settings");
+        if (settings == null || !(settings.opt("captureScale") instanceof Number scale)) return;
+        if (scale.doubleValue() > 1 && !videoSizeReductionRequested) {
+            if (pendingSettingsToken != 0) return;
+            videoSizeReductionRequested = true;
+            changeHostSetting("captureScale", 1.0);
+            show("设备无法解码当前尺寸，正在请求 Mac 使用标准分辨率…");
+        } else if (scale.doubleValue() <= 1 && limits.textureSafe()) {
+            videoSizeBlocked = false;
+            show("硬件不支持此画面尺寸，正在尝试兼容解码器…");
+            try { requestKeyframe(); } catch (java.io.IOException error) { android.util.Log.w("Sall", "Could not request video keyframe", error); }
+        } else if (!videoSizeNoticeShown && (scale.doubleValue() <= 1 || videoSizeReductionRequested && pendingSettingsToken == 0)) {
+            videoSizeNoticeShown = true;
+            show("Mac 画面超出设备显示限制，请降低 Mac 显示器分辨率或选择较小窗口。");
+        }
+    }
     private void createDecoder(Hevc.Parameters params) throws Exception {
         Surface target; long targetEpoch;
         synchronized (surfaceLock) {
@@ -4423,6 +4458,7 @@ public final class MainActivity extends Activity {
             return;
         }
         if (videoDecoderPolicy == null) videoDecoderPolicy = new VideoDecoderPolicy();
+        Hevc.Size streamSize = Hevc.size(params.codecConfig());
         SillConnection expected = connection; HostLockState lock = hostLock; KeyframeRecovery recovery = keyframeRecovery;
         while (true) {
             String requested = videoDecoderPolicy.next(videoDecoderPolicy.softwareOnly()
@@ -4431,7 +4467,7 @@ public final class MainActivity extends Activity {
             MediaCodec candidateCodec = null;
             String actual = requested;
             try {
-            MediaFormat format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_HEVC, 1920, 1080);
+            MediaFormat format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_HEVC, streamSize.width(), streamSize.height());
             format.setByteBuffer("csd-0", ByteBuffer.wrap(params.codecConfig()));
             candidateCodec = requested.isEmpty() ? MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_HEVC)
                     : MediaCodec.createByCodecName(requested);

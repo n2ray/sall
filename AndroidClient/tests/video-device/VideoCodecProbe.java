@@ -15,6 +15,12 @@ public final class VideoCodecProbe {
     private static final String FRAME = "AAAAASgBrzFLRBzQ6msTf/8+RB/qhD+nQyIEpGAlt3KAkQfmLHOeUp74AjZIrTCSYMADaQGJAB7wBdyAAAADAADYgA==";
 
     public static void main(String[] args) throws Exception {
+        var small = VideoSizeLimits.check(256, 144);
+        var huge = VideoSizeLimits.check(65536, 65536);
+        if (!small.textureSafe() || huge.textureSafe()) throw new AssertionError("Unexpected texture limits");
+        if (VideoSizeLimits.textureFits(4112, 2658, 4096) || !VideoSizeLimits.textureFits(2056, 1329, 4096))
+            throw new AssertionError("Unisoc texture regression");
+        System.out.println("Size guard: 256x144=" + small + "; 4112x2658=" + VideoSizeLimits.check(4112, 2658) + "; oversized=" + huge);
         MediaCodec preferred = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_HEVC);
         try { System.out.println("Default HEVC decoder: " + preferred.getCanonicalName()
                 + "; hardwareAccelerated=" + preferred.getCodecInfo().isHardwareAccelerated()); }
