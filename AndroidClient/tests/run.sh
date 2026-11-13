@@ -33,6 +33,11 @@ javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/ClipboardRec
 java -ea -cp "$test_dir" io.github.n2ray.sill.ClipboardReceiptTest
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/ClipboardChipState.java "$root"/tests/ClipboardChipStateTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sill.ClipboardChipStateTest
+javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/ConnectionPreviewPolicy.java "$root"/tests/ConnectionPreviewPolicyTest.java
+java -ea -cp "$test_dir" io.github.n2ray.sill.ConnectionPreviewPolicyTest
+javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/ConnectionPreviewPolicy.java "$root"/app/src/main/java/io/github/n2ray/sill/ConnectionPreviewStore.java "$root"/tests/ConnectionPreviewStoreTest.java
+java -ea -cp "$test_dir" io.github.n2ray.sill.ConnectionPreviewStoreTest
+PYTHONDONTWRITEBYTECODE=1 python3 "$root/tests/preview-device/test_sequence.py"
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/ClipboardChangeTracker.java "$root"/app/src/main/java/io/github/n2ray/sill/ClipboardChipState.java "$root"/tests/ClipboardChangeTrackerTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sill.ClipboardChangeTrackerTest
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/ClipboardPastePolicy.java "$root"/tests/ClipboardPastePolicyTest.java
@@ -73,6 +78,8 @@ javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/WindowHold.j
 java -ea -cp "$test_dir" io.github.n2ray.sill.WindowHoldTest
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/MacMenuRow.java "$root"/tests/MacMenuRowTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sill.MacMenuRowTest
+javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/MacMenuState.java "$root"/tests/MacMenuStateTest.java
+java -ea -cp "$test_dir" io.github.n2ray.sill.MacMenuStateTest
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/WindowOrder.java "$root"/tests/WindowOrderTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sill.WindowOrderTest
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/InitialSourcePolicy.java "$root"/tests/InitialSourcePolicyTest.java

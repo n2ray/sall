@@ -10,6 +10,9 @@ public final class MacMenuRowTest {
         assert MacMenuRow.label("Item", "", "✓", false).startsWith("✓");
         assert MacMenuRow.label("Item", "", "–", false).startsWith("−");
         assert MacMenuRow.label("More", "", null, true).endsWith("›");
+        assert MacMenuRow.noteText("Allow access (System Settings).").equals(new MacMenuRow.NoteText("Allow access.", "System Settings"));
+        assert MacMenuRow.noteText("Not connected.").equals(new MacMenuRow.NoteText("Not connected.", null));
+        assert MacMenuRow.noteText("Message ()").equals(new MacMenuRow.NoteText("Message ()", null));
         System.out.println("Mac menu row checks passed");
     }
 }

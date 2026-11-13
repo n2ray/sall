@@ -187,7 +187,7 @@ public final class MainActivity extends Activity {
     private SillConnection hardwareKeySession;
     private volatile boolean hostKeyRepeat;
     private volatile boolean hostKeyRepeatKnown;
-    private JSONArray appList = new JSONArray(), macMenus = new JSONArray();
+    private JSONArray appList = new JSONArray();
     private JSONArray drawerWindows = new JSONArray();
     private AppDrawerDialog appDrawer;
     private android.widget.PopupWindow windowControls;
@@ -207,9 +207,13 @@ public final class MainActivity extends Activity {
         if (appDrawer != null && appDrawer.isShowing() && lock != null)
             lock.withPresentedList(() -> appDrawer.update(drawerWindows, appList, appIcons, activeWindowId, desktopActive));
     };
-    private int menuVersion, menuToken, pendingMenuToken;
+    private final MacMenuState mirroredMenus = new MacMenuState();
+    private int menuVersion;
+    private long menuToken, pendingMenuToken;
     private boolean menuStale;
     private Runnable pendingMenuBack;
+    private String pendingMenuTitle;
+    private final Runnable menuExpiry = this::expireMenuRequests;
     private SillConnection menuOwner, pendingMenuOwner;
     private android.app.AlertDialog menuDialog;
     private JSONObject hostSettings;
@@ -988,7 +992,7 @@ public final class MainActivity extends Activity {
             }
         });
         Button appsButton = barButton(bar, "应用", v -> showWindows()); tourAppsButton = appsButton;
-        menuButton = barButton(bar, "菜单", v -> showMenu(macMenus, "Mac 菜单", menuVersion));
+        menuButton = barButton(bar, "菜单", v -> showTopMenu());
         TextScaleControl scaleButton = new TextScaleControl(this, new TextScaleControl.Delegate() {
             private SillConnection owner;
             private long window;
@@ -1151,6 +1155,7 @@ public final class MainActivity extends Activity {
         root.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, oright, ob) -> {
             if (r - l != oright - ol || b - t != ob - ot) { dismissWindowControls(); cancelWindowDrag(); if (scaleControl != null) scaleControl.cancel(); }
             if (oright > ol && ob > ot && (r - l > b - t) != (oright - ol > ob - ot)) {
+                dismissMenu();
                 android.util.Log.i("SillAndroid", "Settings: rotated open=" + settingsOpen + " child=" + (settingsChild != null));
                 if (pictureInput != null) pictureInput.cancel();
                 if (appDrawer != null && appDrawer.isShowing()) {
@@ -1325,7 +1330,7 @@ public final class MainActivity extends Activity {
         int width = root.getWidth() - root.getPaddingLeft() - root.getPaddingRight();
         boolean landscape = root.getWidth() > root.getHeight();
         boolean fits = width >= dp(landscape ? 6 * 64 + 5 * 12 + 92 + 28 : 320);
-        int visibility = fits && macMenus.length() > 0 ? android.view.View.VISIBLE : android.view.View.GONE;
+        int visibility = fits && mirroredMenus.hasMenus() ? android.view.View.VISIBLE : android.view.View.GONE;
         boolean changed = visibility != menuButton.getVisibility();
         menuButton.setVisibility(visibility);
         if (changed && updateSessionLayout != null) root.post(updateSessionLayout);
@@ -1531,63 +1536,157 @@ public final class MainActivity extends Activity {
     }
     private void refreshDrawer() { ui.removeCallbacks(drawerUpdate); ui.postDelayed(drawerUpdate, 250); }
     private void dismissMenu() {
-        pendingMenuToken = 0; pendingMenuBack = null; pendingMenuOwner = null;
+        pendingMenuToken = 0; pendingMenuBack = null; pendingMenuOwner = null; pendingMenuTitle = null;
         if (menuDialog != null) { menuDialog.dismiss(); menuDialog = null; }
     }
     private void dismissStaleMenu() {
-        if (menuOwner != connection) { dismissMenu(); menuOwner = null; macMenus = new JSONArray(); refreshMenuButton(); }
-    }
-    private void showMenu(JSONArray items, String title, int version) { dismissMenu(); showMenu(items, title, version, null, menuOwner); }
-    private void showMenu(JSONArray items, String title, int version, Runnable back, SillConnection owner) {
-        invalidateChipAcknowledged();
-        if (owner == null || connection != owner || menuOwner != owner) return;
-        dismissSettings(false);
-        if (appDrawer != null) appDrawer.dismiss();
-        String[] names = new String[Math.max(1, items.length())];
-        boolean[] enabled = new boolean[names.length];
-        for (int i = 0; i < names.length; i++) {
-            if (i >= items.length()) { names[i] = "无菜单项"; continue; }
-            JSONObject item = items.optJSONObject(i);
-            if (item == null || item.optBoolean("separator")) { names[i] = "────────"; continue; }
-            String itemTitle = item.optString("title", "");
-            enabled[i] = MacMenuRow.selectable(false, !menuStale && item.optBoolean("enabled", true), item.isNull("id") ? "" : item.optString("id", ""), itemTitle);
-            names[i] = MacMenuRow.label(itemTitle, item.optString("key", ""), item.optString("mark", ""), item.optBoolean("submenu"));
+        if (menuOwner != connection) {
+            dismissMenu(); ui.removeCallbacks(menuExpiry); mirroredMenus.reset(); menuOwner = null;
+            menuVersion = 0; menuStale = false; refreshMenuButton();
         }
-        android.widget.ArrayAdapter<String> adapter = new android.widget.ArrayAdapter<String>(this, android.R.layout.simple_list_item_1, names) {
-            @Override public boolean areAllItemsEnabled() { return false; }
-            @Override public boolean isEnabled(int position) { return enabled[position]; }
-            @Override public android.view.View getView(int position, android.view.View convertView, android.view.ViewGroup parent) {
-                android.view.View view = super.getView(position, convertView, parent);
-                view.setEnabled(enabled[position]);
-                view.setAlpha(enabled[position] ? 1f : .45f);
-                return view;
-            }
-        };
+    }
+    private void showTopMenu() {
+        dismissMenu();
+        SillConnection owner = menuOwner; MacMenuState.Top top = mirroredMenus.top();
+        if (owner == null || owner != connection || top.version() == null) return;
+        java.util.List<java.util.List<MacMenuState.Row>> sections = new java.util.ArrayList<>();
+        if (top.note() != null) sections.add(java.util.List.of(MacMenuState.Row.note(top.note())));
+        if (!top.menus().isEmpty()) sections.add(top.menus());
+        if (sections.isEmpty()) sections.add(java.util.List.of(MacMenuState.Row.note(MacMenuState.NO_ITEMS)));
+        showMenuRows(sections, "Mac 菜单", top.version(), null, owner);
+    }
+    private void showMenuContent(MacMenuState.Content content, String title, int version, Runnable back, SillConnection owner) {
+        java.util.List<java.util.List<MacMenuState.Row>> sections = content.message() == null
+                ? content.sections() : java.util.List.of(java.util.List.of(MacMenuState.Row.note(content.message())));
+        showMenuRows(sections, title, version, back, owner);
+    }
+    private void showMenuRows(java.util.List<java.util.List<MacMenuState.Row>> sections, String title,
+                              int version, Runnable back, SillConnection owner) {
+        if (owner == null || connection != owner || menuOwner != owner) return;
+        if (version != menuVersion) { showTopMenu(); return; }
+        invalidateChipAcknowledged(); dismissSettings(false);
+        if (appDrawer != null) appDrawer.dismiss();
+        java.util.List<MacMenuState.Row> rows = new java.util.ArrayList<>();
+        for (java.util.List<MacMenuState.Row> section : sections) {
+            if (section.isEmpty()) continue;
+            if (!rows.isEmpty()) rows.add(null);
+            rows.addAll(section);
+        }
+        if (rows.isEmpty()) rows.add(MacMenuState.Row.note(MacMenuState.NO_ITEMS));
+        MacMenuAdapter adapter = new MacMenuAdapter(this, rows, menuStale);
         android.app.AlertDialog.Builder builder = new android.app.AlertDialog.Builder(this).setTitle(title).setAdapter(adapter, (dialog, which) -> {
-            JSONObject item = items.optJSONObject(which);
-            if (!enabled[which] || item == null) return;
+            if (which < 0 || which >= rows.size() || !adapter.isEnabled(which)) return;
+            MacMenuState.Row row = rows.get(which);
             if (connection != owner || menuOwner != owner || version != menuVersion || menuStale) { show("菜单已更改，请重新打开"); return; }
-            try {
-                JSONObject message = new JSONObject().put("version", version).put("id", item.getString("id"))
-                        .put("title", item.getString("title")).put("token", ++menuToken);
-                synchronized (outputLock) {
-                    if (connection != owner || menuOwner != owner) return;
-                    if (item.optBoolean("submenu")) {
-                        pendingMenuToken = menuToken; pendingMenuOwner = owner;
-                        pendingMenuBack = () -> showMenu(items, title, version, back, owner);
-                        sendMenu(owner, 27, message);
-                    } else sendMenu(owner, 25, message);
-                }
-            } catch (Exception e) { show("菜单请求失败"); }
+            if (row.kind() == MacMenuState.Kind.SUBMENU) {
+                Runnable parent = () -> showMenuRows(sections, title, version, back, owner);
+                openMenuRow(row, parent, owner);
+            } else if (row.kind() == MacMenuState.Kind.ITEM) {
+                long token = ++menuToken; MacMenuState.Press press = mirroredMenus.press(row, token);
+                if (press == null) return;
+                if (press.kind() == MacMenuState.PressKind.REFUSED) { show(press.refusal().note()); return; }
+                sendMenuCommand(owner, 25, press.command());
+            }
         });
         if (back != null) {
-            builder.setNegativeButton("返回", (dialog, which) -> back.run());
-            builder.setOnCancelListener(dialog -> back.run());
+            builder.setNegativeButton("返回", (dialog, which) -> returnFromMenu(dialog, owner, version, back));
         }
         menuDialog = builder.create();
         android.app.AlertDialog shown = menuDialog;
-        shown.setOnDismissListener(dialog -> { if (menuDialog == shown) menuDialog = null; });
+        shown.setOnCancelListener(dialog -> { if (menuDialog == shown) dismissMenu(); });
+        if (back != null && android.os.Build.VERSION.SDK_INT < 33) {
+            shown.setOnKeyListener((dialog, keyCode, event) -> {
+                if (keyCode != android.view.KeyEvent.KEYCODE_BACK) return false;
+                if (event.getAction() == android.view.KeyEvent.ACTION_UP && !event.isCanceled())
+                    returnFromMenu(dialog, owner, version, back);
+                return true;
+            });
+        }
+        final Runnable[] removeBack = {null};
+        shown.setOnDismissListener(dialog -> {
+            if (removeBack[0] != null) { removeBack[0].run(); removeBack[0] = null; }
+            if (menuDialog == shown) menuDialog = null;
+        });
         shown.show();
+        if (android.os.Build.VERSION.SDK_INT >= 33 && back != null)
+            removeBack[0] = MenuBackApi33.register(shown, () -> returnFromMenu(shown, owner, version, back));
+    }
+    private static final class MenuBackApi33 {
+        static Runnable register(android.app.Dialog dialog, Runnable action) {
+            android.window.OnBackInvokedDispatcher dispatcher = dialog.getOnBackInvokedDispatcher();
+            android.window.OnBackInvokedCallback callback = action::run;
+            dispatcher.registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, callback);
+            return () -> dispatcher.unregisterOnBackInvokedCallback(callback);
+        }
+    }
+    private void returnFromMenu(android.content.DialogInterface dialog, SillConnection owner, int version, Runnable back) {
+        if (menuDialog != dialog) return;
+        dismissMenu();
+        if (owner == connection && owner == menuOwner && version == menuVersion) back.run();
+    }
+    private void openMenuRow(MacMenuState.Row row, Runnable back, SillConnection owner) {
+        long token = ++menuToken;
+        MacMenuState.Fetch fetch = mirroredMenus.fetch(row.id(), row.title(), row.version(), token, token, android.os.SystemClock.uptimeMillis());
+        if (fetch.kind() == MacMenuState.FetchKind.SETTLED) { showMenuContent(fetch.content(), row.title(), menuVersion, back, owner); return; }
+        pendingMenuToken = token; pendingMenuOwner = owner; pendingMenuBack = back; pendingMenuTitle = row.title();
+        showMenuContent(MacMenuState.Content.message("正在加载…"), row.title(), menuVersion, back, owner);
+        if (fetch.kind() == MacMenuState.FetchKind.SEND) sendMenuCommand(owner, 27, fetch.command());
+        scheduleMenuExpiry();
+    }
+    private void sendMenuCommand(SillConnection owner, int kind, MacMenuState.Command command) {
+        try {
+            sendMenu(owner, kind, new JSONObject().put("version", command.version()).put("id", command.id())
+                    .put("title", command.title()).put("token", command.token()));
+        } catch (org.json.JSONException e) { show("菜单请求失败"); }
+    }
+    private void deliverMenuDone(java.util.List<MacMenuState.Done> done, SillConnection owner) {
+        for (MacMenuState.Done result : done) {
+            if (owner != connection || owner != menuOwner || owner != pendingMenuOwner || pendingMenuToken != result.key()) continue;
+            String title = pendingMenuTitle; Runnable back = pendingMenuBack;
+            pendingMenuToken = 0; pendingMenuOwner = null; pendingMenuBack = null; pendingMenuTitle = null;
+            if (menuDialog != null) { menuDialog.dismiss(); menuDialog = null; }
+            showMenuContent(result.content(), title == null ? "菜单" : title, menuVersion, back, owner);
+        }
+    }
+    private long menuTimeoutMs() { return Math.max(4000L, 4L * Math.max(0, keyframeWorstRtt)); }
+    private void scheduleMenuExpiry() {
+        ui.removeCallbacks(menuExpiry); Long oldest = mirroredMenus.oldestWait();
+        if (oldest != null) ui.postDelayed(menuExpiry, Math.max(1, oldest + menuTimeoutMs() - android.os.SystemClock.uptimeMillis()));
+    }
+    private void expireMenuRequests() {
+        SillConnection owner = menuOwner;
+        if (owner == null || connection != owner) { dismissStaleMenu(); return; }
+        deliverMenuDone(mirroredMenus.expire(android.os.SystemClock.uptimeMillis(), menuTimeoutMs(), windowOrderMac), owner);
+        scheduleMenuExpiry();
+    }
+    private static String optionalMenuString(JSONObject object, String name) {
+        Object value = object.opt(name); return value instanceof String ? (String) value : null;
+    }
+    private static Integer optionalMenuInt(JSONObject object, String name) {
+        Object value = object.opt(name);
+        if (!(value instanceof Number n)) return null;
+        double number = n.doubleValue();
+        return Double.isFinite(number) && number >= Integer.MIN_VALUE && number <= Integer.MAX_VALUE && number == Math.rint(number)
+                ? (int) number : null;
+    }
+    private static Long optionalMenuLong(JSONObject object, String name) {
+        Object value = object.opt(name);
+        if (!(value instanceof Number n)) return null;
+        double number = n.doubleValue();
+        return Double.isFinite(number) && number >= 0 && number <= 9007199254740991d && number == Math.rint(number)
+                ? n.longValue() : null;
+    }
+    private static java.util.List<MacMenuState.Item> menuItems(JSONArray values) {
+        java.util.List<MacMenuState.Item> items = new java.util.ArrayList<>();
+        if (values == null) return items;
+        for (int i = 0; i < values.length(); i++) {
+            JSONObject item = values.optJSONObject(i); if (item == null) continue;
+            Object enabled = item.opt("enabled");
+            items.add(new MacMenuState.Item(optionalMenuString(item, "id"), optionalMenuString(item, "title"),
+                    item.optBoolean("separator", false), enabled instanceof Boolean ? (Boolean) enabled : null,
+                    optionalMenuString(item, "mark"), optionalMenuString(item, "key"), item.optBoolean("submenu", false)));
+        }
+        return items;
     }
     private void sendMenu(SillConnection owner, int kind, JSONObject message) {
         long generation = tourInputGeneration;
@@ -3040,13 +3139,18 @@ public final class MainActivity extends Activity {
                         }
                     }
                 }
-                hostClipboardAvailable = list.optInt("clipboard", 0) >= 1;
-                if (!hostClipboardAvailable) { clipboardSubscribed = false; clipboardReceipt.cancel(); }
-                if (clipboardEnabled && !clipboardSubscribed && hostClipboardAvailable) updateClipboard();
-                SillConnection listConnection = connection;
+                boolean listClipboardAvailable = list.optInt("clipboard", 0) >= 1;
+                hostClipboardAvailable = listClipboardAvailable;
+                if (!listClipboardAvailable) clipboardReceipt.cancel();
+                SillConnection listConnection = messageSession;
                 final long receivedListVersion = listVersion;
                 ui.post(() -> {
                     if (connection != listConnection || listConnection == null) return;
+                    // The host capability is published immediately by the receiver for input
+                    // gating, but subscriptions, clipboard observation and views belong to UI.
+                    // Re-read it here: a newer host list may have arrived while this ran queued.
+                    if (!listClipboardAvailable) clipboardSubscribed = false;
+                    if (clipboardEnabled && !clipboardSubscribed && hostClipboardAvailable) updateClipboard();
                     int count = list.optInt("desktopDisplays", 0), current = list.optInt("desktopDisplay", 0);
                     hostGestures = list.optInt("gestures", 0);
                     hostKeyRepeat = list.optInt("keyRepeat", 0) >= 1;
@@ -3227,15 +3331,23 @@ public final class MainActivity extends Activity {
                 JSONObject menu = new JSONObject(new String(message.payload(), StandardCharsets.UTF_8));
                 ui.post(() -> {
                     if (connection != messageSession) return;
-                    if (menu.has("menus")) { menuOwner = messageSession; menuVersion = menu.optInt("version"); menuStale = menu.optBoolean("stale", false); macMenus = menu.optJSONArray("menus"); if (macMenus == null) macMenus = new JSONArray(); refreshMenuButton(); }
-                    else if (pendingMenuOwner == messageSession && menu.optInt("answering", -1) == pendingMenuToken && menu.has("items")) {
-                        pendingMenuToken = 0; JSONArray items = menu.optJSONArray("items");
-                        Runnable back = pendingMenuBack; pendingMenuBack = null; pendingMenuOwner = null;
-                        if (menu.optBoolean("stale", false)) {
-                            if (!menu.has("note")) show("菜单已过期，请重新打开");
-                        } else if (items != null && menu.optInt("version", -1) == menuVersion) showMenu(items, "菜单", menuVersion, back, messageSession);
+                    if (menuOwner != messageSession) {
+                        dismissMenu(); ui.removeCallbacks(menuExpiry); mirroredMenus.reset(); menuOwner = messageSession;
                     }
-                    if (menu.has("note")) show(menu.optString("note"));
+                    JSONArray top = menu.optJSONArray("menus"), items = menu.optJSONArray("items");
+                    if (menu.has("menus") && !menu.isNull("menus") && top == null) return;
+                    Object pressed = menu.opt("pressed");
+                    MacMenuState.Message incoming = new MacMenuState.Message(optionalMenuInt(menu, "version"), optionalMenuString(menu, "app"),
+                            top == null ? null : menuItems(top), optionalMenuLong(menu, "answering"),
+                            items == null ? null : menuItems(items), optionalMenuInt(menu, "more"),
+                            pressed instanceof Boolean ? (Boolean) pressed : null, menu.optBoolean("stale", false), optionalMenuString(menu, "note"));
+                    MacMenuState.Received received = mirroredMenus.receive(incoming);
+                    MacMenuState.Top current = mirroredMenus.top();
+                    menuVersion = current.version() == null ? 0 : current.version(); menuStale = current.stale();
+                    if (received.topChanged() && pendingMenuToken == 0 && menuDialog != null) { menuDialog.dismiss(); menuDialog = null; }
+                    deliverMenuDone(received.done(), messageSession);
+                    if (received.refusal() != null) show(received.refusal().note());
+                    refreshMenuButton(); scheduleMenuExpiry();
                 });
             }
             case 14 -> {

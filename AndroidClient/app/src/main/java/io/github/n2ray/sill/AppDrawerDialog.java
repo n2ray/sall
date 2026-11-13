@@ -34,6 +34,8 @@ final class AppDrawerDialog {
     private ScrollView scroll;
     private LinearLayout rows;
     private TextView lockNotice;
+    private LinearLayout lockNoticeBox;
+    private NoticeGlyph lockNoticeIcon;
     private HostLockState.Reason lockReason = HostLockState.Reason.NONE;
     private boolean lockView;
     private boolean awaitingLockList;
@@ -61,11 +63,18 @@ final class AppDrawerDialog {
         root.setBackground(panelBackground);
         root.setElevation(dp(24));
         root.setFocusableInTouchMode(true);
+        lockNoticeBox = new LinearLayout(activity); lockNoticeBox.setOrientation(LinearLayout.HORIZONTAL);
+        lockNoticeBox.setGravity(Gravity.TOP); lockNoticeBox.setBaselineAligned(true);
+        lockNoticeBox.setPadding(dp(14), dp(14), dp(14), dp(14));
+        lockNoticeBox.setBackground(background(0xff23262c, 12));
+        lockNoticeIcon = new NoticeGlyph(activity);
+        lockNoticeIcon.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        lockNoticeBox.addView(lockNoticeIcon, new LinearLayout.LayoutParams(dp(15), dp(15)));
         lockNotice = text("", 15, 0xffeef0f3);
-        lockNotice.setPadding(dp(14), dp(14), dp(14), dp(14));
-        lockNotice.setBackground(background(0xff23262c, 12));
         lockNotice.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
-        root.addView(lockNotice, new LinearLayout.LayoutParams(-1, -2));
+        LinearLayout.LayoutParams noticeText = new LinearLayout.LayoutParams(0, -2, 1);
+        noticeText.leftMargin = dp(10); lockNoticeBox.addView(lockNotice, noticeText);
+        root.addView(lockNoticeBox, new LinearLayout.LayoutParams(-1, -2));
         search = new EditText(activity); search.setSingleLine(true); search.setHint("搜索应用");
         search.setTextColor(0xffeef0f3); search.setHintTextColor(0xffa4abb5); search.setTextSize(15);
         search.setPadding(dp(14), 0, dp(14), 0);
@@ -205,14 +214,18 @@ final class AppDrawerDialog {
         if (rows != null) render(true);
     }
     private void applyLock() {
-        if (lockNotice == null || search == null || scroll == null) return;
+        if (lockNoticeBox == null || lockNotice == null || search == null || scroll == null) return;
         boolean locked = lockReason != HostLockState.Reason.NONE && !lockView;
         boolean notice = locked || lockView;
         String name = macName.isEmpty() ? "Mac" : macName;
-        lockNotice.setText(lockView ? "其他用户正在使用这台 Mac。当前显示的是你账户自己的桌面和窗口；恢复到你的账户后才能操作或打开应用。"
-                : lockReason == HostLockState.Reason.OTHER_USER ? "其他用户开始控制这台 Mac。请登录你的账户以重新启用 Sill 屏幕共享。"
-                : name + "已锁定。解锁后可查看窗口。");
-        lockNotice.setVisibility(notice ? View.VISIBLE : View.GONE);
+        if (notice) {
+            String copy = lockView ? "其他用户正在使用这台 Mac。当前显示的是你账户自己的桌面和窗口；恢复到你的账户后才能操作或打开应用。"
+                    : lockReason == HostLockState.Reason.OTHER_USER ? "其他用户开始控制这台 Mac。请登录你的账户以重新启用 Sill 屏幕共享。"
+                    : name + "已锁定。解锁后可查看窗口。";
+            if (!copy.contentEquals(lockNotice.getText())) lockNotice.setText(copy);
+            lockNoticeIcon.setPerson(lockView || lockReason == HostLockState.Reason.OTHER_USER);
+        }
+        lockNoticeBox.setVisibility(notice ? View.VISIBLE : View.GONE);
         if (locked && search.hasFocus()) {
             ((android.view.inputmethod.InputMethodManager) activity.getSystemService(Activity.INPUT_METHOD_SERVICE))
                     .hideSoftInputFromWindow(search.getWindowToken(), 0);
@@ -220,6 +233,31 @@ final class AppDrawerDialog {
         }
         search.setVisibility(locked ? View.GONE : View.VISIBLE);
         scroll.setVisibility(locked ? View.GONE : View.VISIBLE);
+        LinearLayout.LayoutParams searchParams = (LinearLayout.LayoutParams) search.getLayoutParams();
+        int gap = lockView ? dp(6) : 0;
+        if (searchParams.topMargin != gap) { searchParams.topMargin = gap; search.setLayoutParams(searchParams); }
+    }
+    private final class NoticeGlyph extends View {
+        private final android.graphics.Paint paint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private boolean person;
+        NoticeGlyph(Activity context) { super(context); }
+        void setPerson(boolean value) { if (person != value) { person = value; invalidate(); } }
+        @Override public int getBaseline() { return dp(13); }
+        @Override protected void onDraw(android.graphics.Canvas canvas) {
+            int save = canvas.save(); canvas.scale(getWidth() / 15f, getHeight() / 15f);
+            paint.setColor(0xffa4abb5); paint.setStyle(android.graphics.Paint.Style.FILL);
+            if (person) {
+                canvas.drawCircle(5, 4.5f, 2.8f, paint); canvas.drawCircle(10.5f, 5.2f, 2.4f, paint);
+                canvas.drawRoundRect(.4f, 8, 9.5f, 14, 3.5f, 3.5f, paint);
+                canvas.drawRoundRect(8.5f, 8.4f, 14.8f, 13.7f, 2.8f, 2.8f, paint);
+            } else {
+                paint.setStyle(android.graphics.Paint.Style.STROKE); paint.setStrokeWidth(1.8f);
+                canvas.drawArc(4.1f, 1, 10.9f, 10, 180, 180, false, paint);
+                paint.setStyle(android.graphics.Paint.Style.FILL);
+                canvas.drawRoundRect(2.8f, 6.2f, 12.2f, 14, 2, 2, paint);
+            }
+            canvas.restoreToCount(save);
+        }
     }
     int presentationVersion() { return presentationVersion; }
     void reanchor(int expectedVersion, JSONArray windowList, JSONArray appList, Map<String, Bitmap> appIcons,
