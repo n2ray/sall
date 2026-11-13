@@ -1,17 +1,19 @@
 package io.github.n2ray.sill;
 
 import android.os.SystemClock;
+import android.view.InputDevice;
 import android.view.MotionEvent;
 import android.view.VelocityTracker;
 import android.view.View;
 import android.view.ViewConfiguration;
 
 /** iOS-style direct picture input: tap, long press, scroll, pinch and Mac gestures. */
-final class PictureInput implements View.OnTouchListener {
+final class PictureInput implements View.OnTouchListener, View.OnGenericMotionListener {
     interface Listener {
         boolean beginPicture();
         void endPicture();
         boolean connected();
+        boolean trackpadBusy();
         boolean reverseScrolling();
         FrameGeometry.Rect frame();
         void pointer(String action, float x, float y);
@@ -25,8 +27,9 @@ final class PictureInput implements View.OnTouchListener {
     private final PictureStroke stroke = new PictureStroke();
     private final MultiFingerGesture multi = new MultiFingerGesture();
     private final ScrollMomentum momentum = new ScrollMomentum();
+    private final PhysicalMouse mouse;
     private final float density, slop;
-    private boolean owned, scrollOpen, coasting, longDone, suppressTap;
+    private boolean owned, scrollOpen, coasting, longDone, suppressTap, mouseOwned;
     private int a = -1, b = -1, sign = 1;
     private float startX, startY, lastX, lastY, pairX, pairY, pairSpan, zoomX, zoomY, zoomSpan;
     private float scrollX, scrollY, coastX, coastY;
@@ -37,6 +40,7 @@ final class PictureInput implements View.OnTouchListener {
 
     PictureInput(View view, PictureZoom zoom, Listener listener) {
         this.view = view; this.zoom = zoom; this.listener = listener;
+        mouse = new PhysicalMouse(listener::pointer);
         density = view.getResources().getDisplayMetrics().density;
         slop = ViewConfiguration.get(view.getContext()).getScaledTouchSlop();
         longPress = () -> {
@@ -73,9 +77,40 @@ final class PictureInput implements View.OnTouchListener {
     }
     void cancel() {
         view.removeCallbacks(longPress); endScroll(); stopCoast(); multi.cancel();
+        mouse.cancel(); if (mouseOwned) { mouseOwned = false; listener.endPicture(); }
         if (velocity != null) { velocity.recycle(); velocity = null; }
         if (owned) listener.endPicture(); owned = false; a = b = -1;
     }
+    private boolean mouseEvent(MotionEvent e) {
+        if (!e.isFromSource(InputDevice.SOURCE_MOUSE)) return false;
+        if (!listener.connected()) { if (mouseOwned) cancel(); return true; }
+        boolean blocked = owned || listener.trackpadBusy();
+        mouse.setBlocked(blocked);
+        if (blocked) { if (mouseOwned) { mouseOwned = false; listener.endPicture(); } return true; }
+        int action = e.getActionMasked();
+        if (action == MotionEvent.ACTION_CANCEL) { cancel(); return true; }
+        FrameGeometry.Rect r = listener.frame();
+        float px = e.getX(), py = e.getY();
+        boolean inside = inside(r, px, py);
+        int buttons = action == MotionEvent.ACTION_UP ? 0 : e.getButtonState();
+        if (!mouseOwned && inside && (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_BUTTON_PRESS)
+                && (buttons & (MotionEvent.BUTTON_PRIMARY | MotionEvent.BUTTON_SECONDARY)) != 0) {
+            if (!listener.beginPicture()) return true;
+            stopCoast(); mouseOwned = true;
+        }
+        mouse.update(mouseOwned ? buttons : 0, r.x(px), r.y(py), inside);
+        if (mouseOwned && !mouse.held()) { mouseOwned = false; listener.endPicture(); }
+        if (action == MotionEvent.ACTION_SCROLL && inside) {
+            stopCoast();
+            ViewConfiguration config = ViewConfiguration.get(view.getContext());
+            float dx = e.getAxisValue(MotionEvent.AXIS_HSCROLL) * config.getScaledHorizontalScrollFactor() / r.width();
+            float dy = e.getAxisValue(MotionEvent.AXIS_VSCROLL) * config.getScaledVerticalScrollFactor() / r.height();
+            if (Float.isFinite(dx) && Float.isFinite(dy) && (dx != 0 || dy != 0))
+                listener.scroll(null, r.x(px), r.y(py), dx, dy);
+        }
+        return true;
+    }
+    @Override public boolean onGenericMotion(View v, MotionEvent e) { return mouseEvent(e); }
     private void startScroll(float x, float y) {
         stopCoast(); FrameGeometry.Rect r = listener.frame(); scrollX = r.x(x); scrollY = r.y(y);
         sign = listener.reverseScrolling() ? -1 : 1; scrollOpen = true; listener.scroll("began", scrollX, scrollY, 0, 0);
@@ -97,8 +132,10 @@ final class PictureInput implements View.OnTouchListener {
         coastAt = SystemClock.uptimeMillis(); view.postDelayed(coast, 16);
     }
     public boolean onTouch(View v, MotionEvent e) {
+        if (e.isFromSource(InputDevice.SOURCE_MOUSE)) return mouseEvent(e);
         int action = e.getActionMasked(), index = e.getActionIndex();
         if (action == MotionEvent.ACTION_DOWN) {
+            if (mouseOwned) return true;
             if (!listener.connected() || !listener.beginPicture()) return false;
             owned = true; stopCoast(); stroke.begin(); multi.cancel(); before = zoom.copy();
             longDone = suppressTap = false; a = e.getPointerId(0); b = -1;

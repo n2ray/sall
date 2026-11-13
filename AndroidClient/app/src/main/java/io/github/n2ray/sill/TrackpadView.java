@@ -100,6 +100,7 @@ final class TrackpadView extends View {
             for (float py = step / 2; py < getHeight(); py += step) canvas.drawCircle(px, py, step / 24, paint);
     }
     @Override public boolean onTouchEvent(MotionEvent event) {
+        if (event.isFromSource(android.view.InputDevice.SOURCE_MOUSE)) return true;
         return touch(event, getWidth(), true);
     }
     boolean touch(MotionEvent event, float areaWidth, boolean allowLongPress) {

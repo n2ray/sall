@@ -425,6 +425,7 @@ public final class MainActivity extends Activity {
             }
             public void endPicture() { if (trackpad != null) trackpad.endPicture(); }
             public boolean connected() { return connection != null; }
+            public boolean trackpadBusy() { return trackpad != null && trackpad.busyForPicture(); }
             public boolean reverseScrolling() { return getPreferences(0).getBoolean("reverseScrolling", false); }
             public FrameGeometry.Rect frame() { return zoom.frame(cursor.getWidth(), cursor.getHeight(), videoWidth, videoHeight); }
             public void pointer(String action, float x, float y) {
@@ -438,6 +439,7 @@ public final class MainActivity extends Activity {
             public void zoomChanged() { layoutVideo(); cursor.invalidate(); }
         });
         cursor.setOnTouchListener(pictureInput);
+        cursor.setOnGenericMotionListener(pictureInput);
         cursor.addOnAttachStateChangeListener(new android.view.View.OnAttachStateChangeListener() {
             public void onViewAttachedToWindow(android.view.View view) { }
             public void onViewDetachedFromWindow(android.view.View view) { pictureInput.cancel(); }
@@ -725,6 +727,8 @@ public final class MainActivity extends Activity {
         super.onWindowFocusChanged(hasFocus);
         if (!hasFocus) clipboardReceipt.cancel();
         if (!hasFocus) releaseHardwareKeys();
+        if (!hasFocus && pictureInput != null) pictureInput.cancel();
+        if (!hasFocus && trackpad != null) trackpad.cancelGestures();
     }
     private void tapKey(int usage) { pressModifiers(); sendKey(usage, true); sendKey(usage, false); releaseModifiers(); }
     private void sendText(String text) {

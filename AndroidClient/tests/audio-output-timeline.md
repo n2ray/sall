@@ -1,0 +1,11 @@
+# Output timeline contract (not wired to AudioPlayer)
+
+Run `sh AndroidClient/tests/audio-output-timeline.sh` with JDK 21. No Android SDK or Gradle needed.
+
+`AudioOutputTimeline` receives already edited/faded stereo PCM from `AudioPlayout.Schedule`. Pass `Math.round(schedule.start())` for every schedule, including contiguous schedules whose `at` is null. The iOS model keeps its last 240 frames in `hand`; do not submit the whole decoder packet, or duplicate that tail hold inside this adapter. The owner retains source PCM until TAIL/discard and applies `change`/`fade` like AudioOutput.swift before enqueueing.
+
+All calls are confined to one output queue. Sink writes must be nonblocking and must not reenter. A drain has a call budget, preserves odd-float short writes, and yields immediately on zero. Cancellation does not silently drop already queued PCM: the owner stops and physically flushes the sink, then calls `flushed()` and resets the model playback mapping. Capture the returned generation for new tasks; old writes/schedules are rejected. Output errors latch until that flush. Physical output must not be replaced concurrently with a write.
+
+Capacity bounds unsent PCM plus silence. Rejected overlaps, oversized gaps and capacity exhaustion need an explicit owner policy (reset/drop/retry); they are not silently clipped. End positions describe accepted output, not actual playback. Device buffering remains the real AudioTrack driver's responsibility. Startup may enqueue a bounded zero buffer, but must never fabricate a presentation timestamp from enqueue time. This adapter does not implement startup/route/underrun recovery.
+
+`Head` only unwraps an observed unsigned playback head; its clock is the observation time, not speaker presentation time. Initialize via `flushed(generation)` alongside a physical flush and observe promptly, before a whole 32-bit wrap. Observations older than 250 ms are ignored; backwards time, impossible advancement, observations beyond written frames and ambiguous long gaps latch invalid until flush. Use `writtenFrames()` from the same sink. These tolerances are defensive checks, not a calibrated clock or latency model. Real AudioTrack timestamp validation, output-latency accounting, AAC integration, route changes and device synchronization are deliberately not implemented or validated here.

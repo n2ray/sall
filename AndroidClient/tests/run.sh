@@ -65,6 +65,8 @@ javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/InitialSourc
 java -ea -cp "$test_dir" io.github.n2ray.sill.InitialSourcePolicyTest
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/TextScale.java "$root"/tests/TextScaleTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sill.TextScaleTest
+javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/PhysicalMouse.java "$root"/tests/PhysicalMouseTest.java
+java -ea -cp "$test_dir" io.github.n2ray.sill.PhysicalMouseTest
 javac -d "$test_dir" "$root"/tests/fixtures/android/content/SharedPreferences.java "$root"/app/src/main/java/io/github/n2ray/sill/PairLink.java "$root"/app/src/main/java/io/github/n2ray/sill/SavedMacs.java "$root"/app/src/main/java/io/github/n2ray/sill/SavedMacStore.java "$root"/app/src/main/java/io/github/n2ray/sill/SignedMacInfo.java "$root"/app/src/main/java/io/github/n2ray/sill/RecognitionTag.java "$root"/tests/SavedMacsTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sill.SavedMacsTest
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/RecognitionTag.java "$root"/tests/RecognitionTagTest.java
@@ -79,3 +81,10 @@ javac -cp "$test_dir" -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/s
 java -ea -cp "$test_dir" io.github.n2ray.sill.RemoteDialTest
 javac -cp "$test_dir" -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/FirstWindowList.java "$root"/tests/FirstWindowListTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sill.FirstWindowListTest
+javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/AudioPlayout.java "$root"/tests/AudioPlayoutTest.java
+java -ea -cp "$test_dir" io.github.n2ray.sill.AudioPlayoutTest
+javac -cp "$test_dir" -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/AudioDecodeMapping.java "$root"/tests/AudioDecodeMappingTest.java
+java -ea -cp "$test_dir" io.github.n2ray.sill.AudioDecodeMappingTest
+
+javac -cp "$test_dir" -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/AudioOutputTimeline.java "$root"/tests/AudioOutputTimelineTest.java
+java -ea -cp "$test_dir" io.github.n2ray.sill.AudioOutputTimelineTest
