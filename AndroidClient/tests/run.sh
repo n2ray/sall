@@ -25,10 +25,18 @@ javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/ReconnectPol
 java -ea -cp "$test_dir" io.github.n2ray.sill.ReconnectPolicyTest
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/GoodbyePolicy.java "$root"/tests/GoodbyePolicyTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sill.GoodbyePolicyTest
+javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/HostSettingsOptions.java "$root"/tests/HostSettingsOptionsTest.java
+java -ea -cp "$test_dir" io.github.n2ray.sill.HostSettingsOptionsTest
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/AppIconBlob.java "$root"/tests/AppIconBlobTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sill.AppIconBlobTest
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/ClipboardReceipt.java "$root"/tests/ClipboardReceiptTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sill.ClipboardReceiptTest
+javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/ClipboardPastePolicy.java "$root"/tests/ClipboardPastePolicyTest.java
+java -ea -cp "$test_dir" io.github.n2ray.sill.ClipboardPastePolicyTest
+javac -cp "$test_dir" -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/TourPolicy.java "$root"/app/src/main/java/io/github/n2ray/sill/TourContent.java "$root"/app/src/main/java/io/github/n2ray/sill/TourPlacement.java "$root"/tests/TourPolicyTest.java "$root"/tests/TourContentTest.java "$root"/tests/TourPlacementTest.java
+java -ea -cp "$test_dir" io.github.n2ray.sill.TourPolicyTest
+java -ea -cp "$test_dir" io.github.n2ray.sill.TourContentTest
+java -ea -cp "$test_dir" io.github.n2ray.sill.TourPlacementTest
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/InputGeneration.java "$root"/tests/InputGenerationTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sill.InputGenerationTest
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sill/HardwareKeyGate.java "$root"/tests/HardwareKeyGateTest.java
