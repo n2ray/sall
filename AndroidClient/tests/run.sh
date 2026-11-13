@@ -98,6 +98,8 @@ javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sall/InitialSourc
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sall/AudioRecoveryPolicy.java "$root"/tests/AudioRecoveryPolicyTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sall.AudioRecoveryPolicyTest
 java -ea -cp "$test_dir" io.github.n2ray.sall.InitialSourcePolicyTest
+javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sall/VideoDecoderPolicy.java "$root"/tests/VideoDecoderPolicyTest.java
+java -ea -cp "$test_dir" io.github.n2ray.sall.VideoDecoderPolicyTest
 javac -cp "$test_dir" -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sall/ReconnectSourcePolicy.java "$root"/tests/ReconnectSourcePolicyTest.java
 java -ea -cp "$test_dir" io.github.n2ray.sall.ReconnectSourcePolicyTest
 javac -d "$test_dir" "$root"/app/src/main/java/io/github/n2ray/sall/TextScale.java "$root"/tests/TextScaleTest.java

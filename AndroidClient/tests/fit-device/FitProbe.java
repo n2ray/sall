@@ -42,6 +42,11 @@ public final class FitProbe extends Instrumentation {
         }
         return null;
     }
+    private static boolean sentKind(int kind) throws Exception {
+        java.io.ByteArrayInputStream input = new java.io.ByteArrayInputStream(SillConnection.fitProbeOutput.toByteArray());
+        while (input.available() > 0) if (StreamWire.read(input).kind() == kind) return true;
+        return false;
+    }
     private static boolean hasScale(double scale) throws Exception {
         byte[] bytes;
         synchronized (SillConnection.fitProbeOutput) { bytes = SillConnection.fitProbeOutput.toByteArray(); }
@@ -417,7 +422,46 @@ public final class FitProbe extends Instrumentation {
                     check(bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out), "switch image failed");
                 } finally { bitmap.recycle(); }
             } catch (Exception e) { throw new RuntimeException(e); } });
-            result.putString("result", "PASS: synthetic fit and reconnect source" + (skipPreview ? "; preview checks skipped" : "")); code = Activity.RESULT_OK;
+            onUi(() -> { try {
+                Method listMethod = MainActivity.class.getDeclaredMethod("softwareHevcDecoders");
+                listMethod.setAccessible(true);
+                @SuppressWarnings("unchecked") java.util.List<String> software = (java.util.List<String>) listMethod.invoke(null);
+                android.graphics.SurfaceTexture texture = new android.graphics.SurfaceTexture(0);
+                texture.setDefaultBufferSize(256, 144);
+                android.view.Surface target = new android.view.Surface(texture);
+                check(target.isValid(), "synthetic decoder surface unavailable");
+                SillConnection session = SillConnection.fitProbeSession();
+                set(a, "connection", session); set(a, "hostLock", new HostLockState(false));
+                set(a, "keyframeRecovery", new KeyframeRecovery()); set(a, "keyframeStreaming", true);
+                set(a, "surface", target); set(a, "keyframeForeground", true);
+                set(a, "videoUnavailableReported", false);
+                VideoDecoderPolicy fallback = new VideoDecoderPolicy(); set(a, "videoDecoderPolicy", fallback);
+                android.media.MediaCodec released = android.media.MediaCodec.createDecoderByType(android.media.MediaFormat.MIMETYPE_VIDEO_HEVC);
+                released.release();
+                set(a, "decoder", released); set(a, "decoderName", "synthetic.hardware");
+                set(a, "decoderSurface", target); set(a, "decoderEpoch", get(a, "surfaceEpoch"));
+                SillConnection.fitProbeOutput.reset();
+                call(a, "handle", new Class<?>[]{StreamWire.Message.class, SillConnection.class},
+                        new StreamWire.Message(1, 0, true, new byte[0]), session);
+                check(get(a, "connection") == session && get(a, "decoder") == null && fallback.softwareOnly(),
+                        "released codec did not recover while keeping its connection");
+                if (software.isEmpty()) check(Boolean.TRUE.equals(get(a, "videoUnavailableReported")), "missing decoder warning");
+                else {
+                    check(software.contains(fallback.next(software)) && sentKind(44), "software fallback or keyframe request missing");
+                    byte[] csd = android.util.Base64.decode("AAAAAUABDAH//wFgAAADALAAAAMAAAMAPBcCQAAAAAFCAQEBYAAAAwCwAAADAAADADygCAgJFiBe5FkUv/Ln8T+sBagQEBAEAAAAAUQBwHLwUyQ=", android.util.Base64.DEFAULT);
+                    byte[] frame = android.util.Base64.decode("AAAAPygBrzFLRBzQ6msTf/8+RB/qhD+nQyIEpGAlt3KAkQfmLHOeUp74AjZIrTCSYMADaQGJAB7wBdyAAAADAADYgA==", android.util.Base64.DEFAULT);
+                    Hevc.Parameters parameters = new Hevc.Parameters(4, csd);
+                    set(a, "lastParameters", parameters); set(a, "nalSize", 4);
+                    call(a, "createDecoder", new Class<?>[]{Hevc.Parameters.class}, parameters);
+                    check(get(a, "decoder") != null && software.contains(get(a, "decoderName")), "software decoder did not start");
+                    call(a, "handle", new Class<?>[]{StreamWire.Message.class, SillConnection.class},
+                            new StreamWire.Message(1, 0, true, frame), session);
+                    check(get(a, "connection") == session && get(a, "decoder") != null, "software decoder rejected synthetic keyframe");
+                    call(a, "releaseDecoder", new Class<?>[0]);
+                }
+                target.release(); texture.release(); set(a, "surface", null);
+            } catch (Exception e) { throw new RuntimeException(e); } });
+            result.putString("result", "PASS: synthetic fit, reconnect source and released-codec recovery" + (skipPreview ? "; preview checks skipped" : "")); code = Activity.RESULT_OK;
         } catch (Throwable e) {
             StringBuilder detail = new StringBuilder("FAIL");
             for (Throwable cause = e; cause != null && detail.length() < 600; cause = cause.getCause())

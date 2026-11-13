@@ -9,3 +9,5 @@ The isolated Activity also creates a synthetic saved Mac and encrypted preview, 
 Use `--skip-preview` to run only the fit and reconnect checks when recent device authentication is unavailable. This explicitly omits the encrypted-preview and removal checks; the default still requires and runs them.
 
 Set `SILL_UI_CAPTURE` to save a rendering of the synthetic settings switch. The probe checks its displayed state and that a click invokes the switch action exactly once.
+
+The probe also feeds the Activity a deliberately released HEVC decoder and checks that the session remains connected, the failed decoder is discarded, and a software candidate and keyframe request are selected when available. It then creates the actual software decoder and queues a locally generated HEVC Main keyframe. It does not prove successful decoding on a particular third-party tablet.

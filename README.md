@@ -2,16 +2,25 @@
 
 Sall 是基于 [Sill](https://github.com/Saffsanity/sill) 的非官方 Android 客户端，用于从 Android 手机或平板连接运行原版 Sill 的 Mac。Mac 端不需要安装修改版。
 
-**当前版本：0.1.0-alpha.1，测试版。** 界面和功能仍在完善，不代表与 Sill 的 iOS 客户端完全一致。项目与 Sill 作者没有官方合作或隶属关系。
+**当前版本：0.1.1-alpha.1，测试版。** 界面和功能仍在完善，不代表与 Sill 的 iOS 客户端完全一致。项目与 Sill 作者没有官方合作或隶属关系。
 
 ## 安装与连接
 
-1. 在 Mac 安装并运行 [原版 Sill](https://getsill.app/download)，根据提示授予屏幕录制和辅助功能权限。
+1. 在 Mac 安装并运行 [原版 Sill](https://getsill.app/download) 0.6.1 或更新版本，根据提示授予屏幕录制和辅助功能权限。
 2. 从本仓库的 [Releases](https://github.com/n2ray/sall/releases) 下载 Sall 测试版 APK，安装到 Android 10 或更新版本的设备。
 3. 打开 Sall，选择“添加 Mac”，扫描 Mac 上 Sill 显示的配对二维码；也可以输入地址和配对码。
 4. 跨网络连接时，在 Mac 的 Sill 中启用 Remote Access，并通过你信任的 VPN（例如 Tailscale）访问 Mac。
 
 此版本使用 `io.github.n2ray.sall` 包名。此前开发版 `io.github.n2ray.sill` 的配对记录不能自动迁移，需要在 Sall 中重新配对。卸载旧版会删除旧版在手机上的数据。
+
+## 设备要求
+
+- Android 10（API 29）或更新版本的手机或平板。Android SDK 35 是构建与目标版本，并非手机必须运行 Android 15。
+- 设备需提供可用的 **HEVC / H.265 视频解码器**。扫描二维码需要相机；也可以使用手动配对。
+- Mac 运行原版 Sill 0.6.1 或更新版本，并能通过局域网或可信 VPN 与 Android 设备互通。
+- 软件解码的流畅度取决于设备性能、画面分辨率和帧率。满足系统版本要求并不保证所有设备都能流畅解码；没有可用 HEVC 解码器时无法显示画面。
+
+从 `0.1.1-alpha.1` 开始，Sall 优先使用系统默认 HEVC 解码器；硬解启动或运行失败时，会尝试设备提供的 HEVC 软解，并请求新的关键帧。展锐 T310 平板仍需实机验证。旧版 `0.1.0-alpha.1` 没有自动切换功能。
 
 ## 已有功能与限制
 

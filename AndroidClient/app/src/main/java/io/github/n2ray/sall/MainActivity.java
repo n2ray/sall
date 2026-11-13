@@ -286,6 +286,9 @@ public final class MainActivity extends Activity {
     private MacDiscovery discovery;
     private final java.util.Map<String, android.view.View> nearby = new java.util.HashMap<>();
     private volatile MediaCodec decoder;
+    private VideoDecoderPolicy videoDecoderPolicy;
+    private String decoderName;
+    private volatile boolean videoUnavailableReported;
     private volatile Surface decoderSurface;
     private volatile long surfaceEpoch, decoderEpoch = -1;
     private Hevc.Parameters lastParameters;
@@ -3632,6 +3635,7 @@ public final class MainActivity extends Activity {
         try { number = Integer.parseInt(port.getText().toString()); if (address.isEmpty() || number < 1 || number > 65535) throw new IllegalArgumentException(); }
         catch (Exception e) { show("请填写有效地址和端口。"); return; }
         if (running) { show("已有连接，请退出后重试。"); return; }
+        videoDecoderPolicy = new VideoDecoderPolicy(); videoUnavailableReported = false;
         synchronized (outputLock) { reconnectSource = new ReconnectSourcePolicy(); }
         resetTourSession();
         PairingAuthorization pairingGuard;
@@ -4312,8 +4316,10 @@ public final class MainActivity extends Activity {
                 else interruptPicture();
             }
             case 1 -> {
+                try {
                 AudioPlayer player = audio;
                 if (player != null && messageSession == connection) player.videoFrame(message.timestamp(), audioArrivalNanos);
+                if (videoUnavailableReported) return;
                 HostLockState lock = hostLock;
                 if (lock == null || lock.isCovered()) return;
                 Surface target; long epoch;
@@ -4337,7 +4343,9 @@ public final class MainActivity extends Activity {
                 byte[] frame = Hevc.frame(message.payload(), nalSize);
                 int index = decoder.dequeueInputBuffer(10_000);
                 if (index >= 0) {
-                    ByteBuffer input = decoder.getInputBuffer(index); input.clear();
+                    ByteBuffer input = decoder.getInputBuffer(index);
+                    if (input == null) throw new IllegalStateException("视频解码器没有提供输入缓冲区");
+                    input.clear();
                     if (frame.length > input.remaining()) throw new IllegalStateException("视频帧超过解码缓冲区");
                     long presentationUs = (long) (message.timestamp() * 1_000_000);
                     if (message.keyframe() && lock.needsFreshFrame() && recoveryGeneration != lock.generation()) {
@@ -4358,10 +4366,15 @@ public final class MainActivity extends Activity {
                     interruptPicture(); requestKeyframe();
                 }
                 drainVideo();
+                } catch (IllegalStateException | IllegalArgumentException codecError) {
+                    recoverVideoDecoder(codecError);
+                }
             }
             case 13 -> {
-                if (decoder != null && pictureWatched() && surface != null && decoderEpoch == surfaceEpoch && ((hostLock != null && hostLock.needsFreshFrame())
-                        || (keyframeRecovery != null && keyframeRecovery.isOpen()))) drainVideo();
+                try {
+                    if (decoder != null && pictureWatched() && surface != null && decoderEpoch == surfaceEpoch && ((hostLock != null && hostLock.needsFreshFrame())
+                            || (keyframeRecovery != null && keyframeRecovery.isOpen()))) drainVideo();
+                } catch (IllegalStateException | IllegalArgumentException codecError) { recoverVideoDecoder(codecError); }
                 if (waitingForKeyframe && surface != null) interruptPicture();
                 requestKeyframe();
             }
@@ -4409,11 +4422,21 @@ public final class MainActivity extends Activity {
             interruptPicture();
             return;
         }
-        MediaFormat format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_HEVC, 1920, 1080);
-        format.setByteBuffer("csd-0", ByteBuffer.wrap(params.codecConfig()));
+        if (videoDecoderPolicy == null) videoDecoderPolicy = new VideoDecoderPolicy();
         SillConnection expected = connection; HostLockState lock = hostLock; KeyframeRecovery recovery = keyframeRecovery;
-        MediaCodec made = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_HEVC);
-        try {
+        while (true) {
+            String requested = videoDecoderPolicy.next(videoDecoderPolicy.softwareOnly()
+                    ? softwareHevcDecoders() : java.util.List.of());
+            if (requested == null) { reportVideoUnavailable(); return; }
+            MediaCodec candidateCodec = null;
+            String actual = requested;
+            try {
+            MediaFormat format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_HEVC, 1920, 1080);
+            format.setByteBuffer("csd-0", ByteBuffer.wrap(params.codecConfig()));
+            candidateCodec = requested.isEmpty() ? MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_HEVC)
+                    : MediaCodec.createByCodecName(requested);
+            final MediaCodec made = candidateCodec;
+            actual = made.getCanonicalName();
             made.configure(format, target, null, 0);
             made.setOnFrameRenderedListener((codec, timeUs, nanoTime) -> {
                 Surface renderedSurface = surface;
@@ -4438,13 +4461,61 @@ public final class MainActivity extends Activity {
                 capturePreview(expected, lock, targetEpoch);
             }, ui);
             made.start(); made.setVideoScalingMode(MediaCodec.VIDEO_SCALING_MODE_SCALE_TO_FIT);
-            decoderSurface = target; decoderEpoch = targetEpoch; decoder = made;
+            if (surfaceEpoch != targetEpoch || surface != target || !target.isValid() || !pictureWatched()) {
+                try { made.release(); } catch (RuntimeException ignored) { }
+                interruptPicture(); return;
+            }
+            decoderSurface = target; decoderEpoch = targetEpoch; decoderName = actual; decoder = made;
             waitingForKeyframe = true;
-        } catch (Exception e) {
-            made.release();
-            if (surfaceEpoch != targetEpoch || !pictureWatched()) { interruptPicture(); return; }
-            throw e;
+            android.util.Log.i("Sall", "Video decoder: " + actual);
+            return;
+            } catch (java.io.IOException | IllegalStateException | IllegalArgumentException e) {
+                if (candidateCodec != null) try { candidateCodec.release(); } catch (RuntimeException ignored) { }
+                if (surfaceEpoch != targetEpoch || surface != target || !target.isValid() || !pictureWatched()) { interruptPicture(); return; }
+                android.util.Log.w("Sall", "Video decoder could not start: " + actual, e);
+                videoDecoderPolicy.failed(requested);
+                videoDecoderPolicy.failed(actual);
+            }
         }
+    }
+    private static java.util.List<String> softwareHevcDecoders() {
+        java.util.List<String> result = new java.util.ArrayList<>();
+        try {
+            for (android.media.MediaCodecInfo info : new android.media.MediaCodecList(android.media.MediaCodecList.REGULAR_CODECS).getCodecInfos()) {
+                try {
+                    if (info.isEncoder() || info.isAlias()) continue;
+                    String name = info.getName();
+                    if (name.endsWith(".secure") || !(info.isSoftwareOnly() || name.startsWith("c2.android.") || name.startsWith("OMX.google."))) continue;
+                    for (String type : info.getSupportedTypes()) if (MediaFormat.MIMETYPE_VIDEO_HEVC.equalsIgnoreCase(type)) {
+                        if (!result.contains(name)) result.add(name);
+                        break;
+                    }
+                } catch (RuntimeException error) { android.util.Log.w("Sall", "Cannot inspect a video decoder", error); }
+            }
+        } catch (RuntimeException error) { android.util.Log.w("Sall", "Cannot enumerate software HEVC decoders", error); }
+        result.sort(java.util.Comparator.comparingInt(name -> name.startsWith("c2.android.") || name.startsWith("OMX.google.") ? 0 : 1));
+        return result;
+    }
+    private void reportVideoUnavailable() {
+        if (videoUnavailableReported) return;
+        videoUnavailableReported = true;
+        show("此设备没有可用的 HEVC 视频解码器，请尝试降低 Mac 画质或更换设备。");
+    }
+    private void recoverVideoDecoder(RuntimeException error) throws java.io.IOException {
+        MediaCodec failed = decoder;
+        if (failed == null) return;
+        Surface target = decoderSurface;
+        boolean stale = surfaceEpoch != decoderEpoch || surface != target || target == null || !target.isValid() || !pictureWatched();
+        String failedName = decoderName;
+        releaseDecoder(); waitingForKeyframe = true; interruptPicture();
+        if (!stale) {
+            if (videoDecoderPolicy == null) videoDecoderPolicy = new VideoDecoderPolicy();
+            videoDecoderPolicy.failed(failedName);
+            android.util.Log.w("Sall", "Video decoder failed: " + failedName, error);
+            if (videoDecoderPolicy.next(softwareHevcDecoders()) == null) { reportVideoUnavailable(); return; }
+            show("视频解码器不可用，正在切换兼容解码器…");
+        }
+        requestKeyframe();
     }
     private void renderLockOverlay(HostLockState lock, SillConnection expected) {
         if (connection != expected || hostLock != lock) return;
@@ -4475,7 +4546,7 @@ public final class MainActivity extends Activity {
     }
     private void requestKeyframe() throws java.io.IOException { requestKeyframe(connection, keyframeRecovery); }
     private void requestKeyframe(SillConnection expected, KeyframeRecovery recovery) throws java.io.IOException {
-        if (expected == null || recovery == null) return;
+        if (expected == null || recovery == null || videoUnavailableReported) return;
         synchronized (outputLock) {
             HostLockState lock = hostLock; Surface target = surface;
             if (connection != expected || keyframeRecovery != recovery || lock == null || lock.isCovered()) return;
@@ -4829,7 +4900,14 @@ public final class MainActivity extends Activity {
         windowControls.showAtLocation(root, android.view.Gravity.TOP | android.view.Gravity.START, x, Math.max(0, y));
         refreshClipboardChip();
     }
-    private void releaseDecoder() { decoderEpoch = -1; recoveryFrame.set(null); revealFrame.set(null); recoveryGeneration = -1; if (decoder != null) { try { decoder.stop(); } catch (Exception ignored) { } decoder.release(); decoder = null; decoderSurface = null; } }
+    private void releaseDecoder() {
+        MediaCodec old = decoder; decoder = null; decoderName = null; decoderSurface = null; decoderEpoch = -1;
+        recoveryFrame.set(null); revealFrame.set(null); recoveryGeneration = -1;
+        if (old != null) {
+            try { old.stop(); } catch (RuntimeException ignored) { }
+            try { old.release(); } catch (RuntimeException ignored) { }
+        }
+    }
     private void resetCursorShape() { cursorBitmap = null; cursorShape = null; cursor.invalidate(); }
     private boolean pictureWatched() { return pip == null ? keyframeForeground : pip.watched(keyframeForeground); }
     private void initializePip() {
