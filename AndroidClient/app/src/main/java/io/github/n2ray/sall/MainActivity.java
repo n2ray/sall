@@ -1781,7 +1781,9 @@ public final class MainActivity extends Activity {
         button.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
         button.setIncludeFontPadding(false); button.setSingleLine(true); button.setCompoundDrawablePadding(0);
         button.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, oright, ob) -> {
-            int inset = Math.max(0, (b - t - dp(24) - button.getCompoundDrawablePadding() - button.getLineHeight()) / 2);
+            android.graphics.drawable.Drawable icon = button.getCompoundDrawables()[1];
+            int iconHeight = icon == null ? dp(24) : icon.getBounds().height();
+            int inset = Math.max(0, (b - t - iconHeight - button.getCompoundDrawablePadding() - button.getLineHeight()) / 2);
             if (button.getPaddingTop() != inset || button.getPaddingBottom() != inset)
                 button.setPadding(0, inset, 0, inset);
         });
@@ -1792,7 +1794,17 @@ public final class MainActivity extends Activity {
         button.setSelected(open); button.setTextColor(open ? 0xff9bb7ff : 0xffc4c9d1);
         button.setBackground(shape(open ? 0xff2c3550 : 0xff23262c, root != null && root.getWidth() > root.getHeight() ? 16 : 14));
         ToolbarSymbol icon = new ToolbarSymbol((String) button.getTag(), open ? 0xff9bb7ff : 0xffeef0f3);
-        icon.setBounds(0, 0, dp(22), dp(24)); button.setCompoundDrawables(null, icon, null, null);
+        if (button == desktopButton) {
+            icon.dots = DesktopNavigation.dots(desktopActive, desktopDisplays, desktopDisplay);
+            icon.lit = desktopDisplay;
+            icon.counter = DesktopNavigation.counter(desktopActive, desktopDisplays, desktopDisplay);
+        }
+        icon.setBounds(0, 0, dp(22), dp(icon.dots > 0 || icon.counter != null ? 32 : 24));
+        button.setCompoundDrawables(null, icon, null, null);
+        if (button.getHeight() > 0) {
+            int inset = Math.max(0, (button.getHeight() - icon.getBounds().height() - button.getLineHeight()) / 2);
+            button.setPadding(0, inset, 0, inset);
+        }
     }
     private void refreshToolbarAppearance() {
         if (tourAppsButton == null || root == null) return;
@@ -1818,13 +1830,17 @@ public final class MainActivity extends Activity {
     private static final class ToolbarSymbol extends android.graphics.drawable.Drawable {
         private final String symbol;
         private final android.graphics.Paint paint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private int dots, lit;
+        private String counter;
         ToolbarSymbol(String symbol, int color) {
             this.symbol = symbol; paint.setColor(color); paint.setStyle(android.graphics.Paint.Style.STROKE);
             paint.setStrokeWidth(1.7f); paint.setStrokeCap(android.graphics.Paint.Cap.ROUND); paint.setStrokeJoin(android.graphics.Paint.Join.ROUND);
         }
         @Override public void draw(android.graphics.Canvas canvas) {
             android.graphics.Rect b = getBounds(); int save = canvas.save();
-            canvas.translate(b.left, b.top); canvas.scale(b.width() / 24f, b.height() / 24f); canvas.translate(0, 2);
+            canvas.translate(b.left, b.top);
+            canvas.scale(b.width() / 24f, (dots > 0 || counter != null ? b.width() : b.height()) / 24f);
+            canvas.translate(0, 2);
             switch (symbol) {
                 case "apps" -> { canvas.drawCircle(10, 10, 6, paint); canvas.drawLine(14.5f, 14.5f, 20, 20, paint); }
                 case "mini" -> { canvas.drawRoundRect(3, 8, 21, 17, 3, 3, paint); canvas.drawLine(5, 18.5f, 19, 18.5f, paint); canvas.drawPoint(17, 13, paint); }
@@ -1840,6 +1856,18 @@ public final class MainActivity extends Activity {
                     canvas.drawCircle(12, 12, 6.5f, paint); canvas.drawCircle(12, 12, 2.5f, paint);
                     for (int i = 0; i < 8; i++) { double angle = i * Math.PI / 4; float x = (float) Math.cos(angle), y = (float) Math.sin(angle); canvas.drawLine(12 + 7*x, 12 + 7*y, 12 + 9.5f*x, 12 + 9.5f*y, paint); }
                 }
+            }
+            if (dots > 0) {
+                paint.setStyle(android.graphics.Paint.Style.FILL);
+                for (int i = 1; i <= dots; i++) {
+                    paint.setAlpha(i == lit ? 255 : 80);
+                    canvas.drawCircle(12 + (i - (dots + 1) / 2f) * 3.5f, 27, 1.1f, paint);
+                }
+                paint.setAlpha(255); paint.setStyle(android.graphics.Paint.Style.STROKE);
+            } else if (counter != null) {
+                paint.setStyle(android.graphics.Paint.Style.FILL); paint.setTextSize(7); paint.setTextAlign(android.graphics.Paint.Align.CENTER);
+                canvas.drawText(counter, 12, 29, paint);
+                paint.setStyle(android.graphics.Paint.Style.STROKE);
             }
             canvas.restoreToCount(save);
         }
@@ -4045,9 +4073,12 @@ public final class MainActivity extends Activity {
                     }
                     if (count != desktopDisplays || current != desktopDisplay || isDesktop != desktopActive)
                         android.util.Log.i("Sall", "Host " + list.optString("hostVersion", "unknown") + ": desktop " + current + "/" + count + ", active=" + isDesktop);
+                    boolean displaysChanged = count != desktopDisplays || current != desktopDisplay || isDesktop != desktopActive;
                     desktopDisplays = count; desktopDisplay = current; desktopActive = isDesktop;
                     desktopButton.setText(desktopDisplays >= 2 && desktopDisplay > 0 ? "桌面 " + desktopDisplay + "/" + desktopDisplays : "桌面");
-                    desktopButton.setContentDescription(desktopDisplays >= 2 ? "桌面 " + desktopDisplay + " / " + desktopDisplays + "，再次点击切换显示器" : "桌面");
+                    desktopButton.setContentDescription(DesktopNavigation.next(true, count, current)
+                            ? "桌面，显示器 " + current + " / " + count + (isDesktop ? "，点击切换到下一台显示器" : "，点击显示桌面") : "显示 Mac 桌面");
+                    if (displaysChanged) styleToolbarButton(desktopButton, isDesktop);
                     String mac = list.optString("macName", "");
                     if (!mac.equals(windowOrderMac)) { cancelWindowDrag(); windowOrderMac = mac; loadWindowOrder(); }
                     JSONArray sortedWindows = orderedWindows(windows);

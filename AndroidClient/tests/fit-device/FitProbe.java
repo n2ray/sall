@@ -461,6 +461,20 @@ public final class FitProbe extends Instrumentation {
                 }
                 target.release(); texture.release(); set(a, "surface", null);
             } catch (Exception e) { throw new RuntimeException(e); } });
+            onUi(() -> { try {
+                set(a, "connection", SillConnection.fitProbeSession()); set(a, "hostLock", new HostLockState(false));
+                set(a, "desktopDisplays", 3); set(a, "desktopDisplay", 2); set(a, "desktopActive", true);
+                SillConnection.fitProbeOutput.reset();
+                call(a, "tapDesktop", new Class<?>[0]);
+            } catch (Exception e) { throw new RuntimeException(e); } });
+            ((java.util.concurrent.ExecutorService) get(a, "input")).submit(() -> {}).get();
+            check(sentKind(47) && !sentKind(6), "desktop did not send next display");
+            onUi(() -> { try {
+                set(a, "desktopActive", false); SillConnection.fitProbeOutput.reset();
+                call(a, "tapDesktop", new Class<?>[0]);
+            } catch (Exception e) { throw new RuntimeException(e); } });
+            ((java.util.concurrent.ExecutorService) get(a, "input")).submit(() -> {}).get();
+            check(sentKind(6) && !sentKind(47) && firstSelection().has("desktop"), "window did not return to desktop");
             result.putString("result", "PASS: synthetic fit, reconnect source and released-codec recovery" + (skipPreview ? "; preview checks skipped" : "")); code = Activity.RESULT_OK;
         } catch (Throwable e) {
             StringBuilder detail = new StringBuilder("FAIL");

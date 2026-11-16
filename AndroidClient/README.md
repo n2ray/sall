@@ -1,8 +1,10 @@
 # Sall Android client
 
-Sall is an unofficial Android client for the original [Sill](https://github.com/Saffsanity/sill) Mac host. Version 0.1.2-alpha.1 is an early test build. It uses `io.github.n2ray.sall`; earlier `io.github.n2ray.sill` development installations have separate data and require pairing again.
+Sall is an unofficial Android client for the original [Sill](https://github.com/Saffsanity/sill) Mac host. Version 0.1.3-alpha.1 is an early test build. It uses `io.github.n2ray.sall`; earlier `io.github.n2ray.sill` development installations have separate data and require pairing again.
 
 Pair with a QR code or pairing code, connect to a Mac running the original host, and choose a window or desktop. Remote access requires Mac-side Remote Access and a network route such as Tailscale. Audio is experimental and off by default; enable both Mac audio sending and the phone's sound option. Some Mac windows cannot match the phone panel because of minimum size constraints. Capabilities such as multiple-display navigation depend on the installed host version.
+
+With Sill for Mac 0.6.2 or later and multiple displays, tapping the Desktop button while viewing the desktop requests the next display. Dots under the icon indicate the current display. The user confirmed both on a multi-display Mac and Xiaomi phone on 2026-11-16.
 
 ## Device requirements
 
